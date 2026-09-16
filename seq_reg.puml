@@ -1,0 +1,16 @@
+@startuml
+participant "RegisterPage" as UI
+participant "auth.ts Action" as Action
+database "Supabase DB" as DB
+participant "Supabase Auth" as Auth
+
+UI -> Action: register(email, pass, code)
+Action -> DB: validate code
+DB --> Action: Returns valid invite
+Action -> DB: mark code used
+Action -> Auth: signUp(email, password)
+Auth --> DB: DB Trigger handle_new_user()
+DB -> DB: INSERT user_roles (role: 'teacher')
+Auth --> Action: Success Session
+Action --> UI: redirect(/)
+@enduml

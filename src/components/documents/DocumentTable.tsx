@@ -3,7 +3,8 @@
 import React from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
 import DocumentStatusBadge from "@/components/documents/DocumentStatusBadge";
-import { Document } from "@/types/database";
+import { Document, DocumentStatus } from "@/types/database";
+import { ExtractedFields } from "@/types/validation";
 
 interface DocumentTableProps {
   documents: Document[];
@@ -43,13 +44,13 @@ export default function DocumentTable({ documents, isLoading, onRowClick }: Docu
                 {doc.id.substring(0, 8)}...
               </TableCell>
               <TableCell className="text-zinc-600 dark:text-zinc-400 capitalize">
-                {(doc.document_type || doc.type || "Unknown").replace(/_/g, " ")}
+                {(doc.document_type || "Unknown").replace(/_/g, " ")}
               </TableCell>
               <TableCell className="text-zinc-900 dark:text-zinc-100">
-                {doc.extracted_data?.name || "-"}
+                {(doc.extracted_fields as ExtractedFields)?.name || "-"}
               </TableCell>
               <TableCell>
-                <DocumentStatusBadge status={doc.status} />
+                <DocumentStatusBadge status={doc.status as DocumentStatus} />
               </TableCell>
               <TableCell className="text-right text-zinc-500 dark:text-zinc-400 text-sm">
                 {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : "-"}

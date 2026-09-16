@@ -1,0 +1,1 @@
+const fs = require('fs'); let content = fs.readFileSync('src/lib/supabase/types.ts', 'utf8'); content = content.replace(/Update: \{[\s\S]*?\}/g, match => match + '\n        Relationships: any[]'); fs.writeFileSync('src/lib/supabase/types.ts', content);

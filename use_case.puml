@@ -1,0 +1,35 @@
+@startuml
+left to right direction
+actor Admin
+actor Teacher
+
+package "DocuValidate Navigation" {
+  usecase "UC1: View Dashboard Stats" as UC1
+  usecase "UC1a: View Auth Logs" as UC1a
+  usecase "UC2: Upload & Extract Document" as UC2
+  usecase "UC3: Browse Documents" as UC3
+  usecase "UC4: Process Review Queue" as UC4
+  usecase "UC5: View Student Directory" as UC5
+  usecase "UC6: View Reports" as UC6
+  usecase "UC7: View Settings" as UC7
+  usecase "UC7a: Generate Teacher Invites" as UC7a
+}
+
+Teacher --> UC1
+Teacher --> UC2
+Teacher --> UC3
+Teacher --> UC4
+Teacher --> UC5
+Teacher --> UC6
+Teacher --> UC7
+
+Admin --> UC1
+Admin --> UC1a
+Admin --> UC2
+Admin --> UC3
+Admin --> UC4
+Admin --> UC5
+Admin --> UC6
+Admin --> UC7
+Admin --> UC7a
+@enduml

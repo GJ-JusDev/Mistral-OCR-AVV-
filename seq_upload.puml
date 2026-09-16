@@ -1,0 +1,16 @@
+@startuml
+participant "UploadPage (Client)" as UI
+participant "useOcr (Client)" as Hook
+participant "/api/ocr (Route)" as API
+participant "Mistral AI" as Mistral
+participant "OcrParser" as Parser
+
+UI -> Hook: extract(base64Image)
+Hook -> API: POST { image, extractFields: true }
+API -> Mistral: POST /v1/ocr
+Mistral --> API: Response { pages: [markdown] }
+API -> Parser: parseOcrText(markdown)
+Parser --> API: ExtractedFields (Name, LRN, Grade...)
+API --> Hook: OcrResponse { text, fields, confidence }
+Hook --> UI: Sets OCR Result UI State
+@enduml

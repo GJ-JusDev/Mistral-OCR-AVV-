@@ -4,34 +4,8 @@
  */
 
 import type { ExtractedFields } from "@/types/documents";
-import { VALIDATION_RULES, type ValidationContext, type ValidationRule } from "./rules";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export type ValidationRuleResult = {
-  ruleName: string;
-  fieldName: string;
-  passed: boolean;
-  expectedValue?: string;
-  actualValue: string;
-  message: string;
-  severity: "error" | "warning";
-};
-
-export type ValidationReport = {
-  /** Overall status derived from rule results. */
-  status: "valid" | "needs_review" | "invalid";
-  /** Individual rule results. */
-  results: ValidationRuleResult[];
-  /** Count of rules that passed. */
-  passCount: number;
-  /** Count of rules that failed. */
-  failCount: number;
-  /** Total rules evaluated. */
-  totalRules: number;
-};
+import { VALIDATION_RULES } from "./rules";
+import { ValidationReport, ValidationRuleResult, ValidationContext, ValidationRule } from "@/types/validation";
 
 // ---------------------------------------------------------------------------
 // Engine

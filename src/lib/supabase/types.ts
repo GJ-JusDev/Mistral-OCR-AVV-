@@ -37,6 +37,7 @@ export interface Database {
           is_active?: boolean | null
           created_at?: string | null
         }
+        Relationships: any[]
       }
       students: {
         Row: {
@@ -84,6 +85,7 @@ export interface Database {
           created_at?: string | null
           updated_at?: string | null
         }
+        Relationships: any[]
       }
       documents: {
         Row: {
@@ -131,6 +133,7 @@ export interface Database {
           created_at?: string | null
           updated_at?: string | null
         }
+        Relationships: any[]
       }
       validation_results: {
         Row: {
@@ -166,6 +169,7 @@ export interface Database {
           message?: string | null
           created_at?: string | null
         }
+        Relationships: any[]
       }
       review_logs: {
         Row: {
@@ -201,6 +205,73 @@ export interface Database {
           reviewed_by?: string | null
           created_at?: string | null
         }
+        Relationships: any[]
+      }
+      teacher_invites: {
+        Row: {
+          id: string
+          email: string
+          access_code: string
+          used: boolean
+          created_at: string | null
+        }
+        Insert: {
+          id?: string
+          email: string
+          access_code: string
+          used?: boolean
+          created_at?: string | null
+        }
+        Update: {
+          id?: string
+          email?: string
+          access_code?: string
+          used?: boolean
+          created_at?: string | null
+        }
+        Relationships: any[]
+      }
+      user_roles: {
+        Row: {
+          id: string
+          user_id: string
+          role: string
+          created_at: string | null
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          role: string
+          created_at?: string | null
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          role?: string
+          created_at?: string | null
+        }
+        Relationships: any[]
+      }
+      auth_logs: {
+        Row: {
+          id: string
+          user_id: string
+          action: string
+          created_at: string | null
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          action: string
+          created_at?: string | null
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          action?: string
+          created_at?: string | null
+        }
+        Relationships: any[]
       }
     }
     Views: {

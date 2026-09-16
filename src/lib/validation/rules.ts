@@ -14,34 +14,7 @@ import {
   normalizeSex,
 } from "./patterns";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export type ValidationContext = {
-  /** List of recognized school names (lowercased, stripped). */
-  knownSchools: string[];
-  /** All extracted fields for cross-field checks. */
-  allFields: ExtractedFields;
-  /** OCR confidence score 0–1. */
-  ocrConfidence: number;
-};
-
-export type ValidationRule = {
-  /** Machine-readable rule identifier. */
-  name: string;
-  /** Which extracted field this rule checks. */
-  field: keyof ExtractedFields;
-  /** Human-readable failure message. */
-  message: string;
-  /** Severity: 'error' blocks approval, 'warning' flags for review. */
-  severity: "error" | "warning";
-  /**
-   * Return `true` if the field value is acceptable.
-   * Receives the field value and an optional context object for cross-checks.
-   */
-  check: (value: string, context: ValidationContext) => boolean;
-};
+import { ValidationContext, ValidationRule } from "@/types/validation";
 
 // ---------------------------------------------------------------------------
 // Helpers

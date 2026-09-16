@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     const knownSchools = schoolsData.map((s: { name: string }) => s.name);
 
     // Run validation engine
-    const report = validateFields(fields, knownSchools);
+    const report = validateFields(fields, { knownSchools });
 
     // Delete old validation results for this document
     const { error: deleteError } = await supabase
@@ -38,12 +38,15 @@ export async function POST(request: NextRequest) {
     }
 
     // Insert new validation results based on the report
-    if (report.errors && report.errors.length > 0) {
-      const resultsToInsert = report.errors.map((err: any) => ({
+    if (report.results && report.results.length > 0) {
+      const resultsToInsert = report.results.map((res) => ({
         document_id: documentId,
-        field_name: err.field,
-        issue_type: err.type,
-        message: err.message,
+        rule_name: res.ruleName,
+        field_name: res.fieldName,
+        passed: res.passed,
+        expected_value: res.expectedValue || null,
+        actual_value: typeof res.actualValue === 'string' ? res.actualValue : JSON.stringify(res.actualValue) || null,
+        message: res.message,
       }));
 
       const { error: insertError } = await supabase
@@ -55,10 +58,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Update document status
-    let newStatus = 'valid';
-    if (!report.isValid) {
-      newStatus = report.needsReview ? 'needs_review' : 'invalid';
+    let newStatus: string = 'validated';
+    if (report.status === 'invalid') {
+      newStatus = 'rejected';
+    } else if (report.status === 'needs_review') {
+      newStatus = 'needs_review';
     }
 
     const { error: updateError } = await supabase

@@ -66,7 +66,7 @@ export default function ComparePage() {
       const isMatch = g1Final === g2Final && g1Final !== "-";
       
       gradesComparison.push({
-        subject: g1?.subject || g2?.subject,
+        subject: g1?.subject || g2?.subject || "",
         sf9Grade: g1Final,
         sf10Grade: g2Final,
         isMatch

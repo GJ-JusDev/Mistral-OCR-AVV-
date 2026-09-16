@@ -35,7 +35,7 @@ export default async function SettingsPage() {
               </p>
             </div>
             
-            <form action={generateTeacherCode} className="flex flex-col gap-3">
+            <form action={async (fd) => { "use server"; await generateTeacherCode(fd); }} className="flex flex-col gap-3">
               <div className="flex flex-col gap-1.5">
                 <label htmlFor="email" className="text-sm font-medium text-slate-700">Teacher Email</label>
                 <input 

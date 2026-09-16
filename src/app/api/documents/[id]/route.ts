@@ -30,7 +30,7 @@ export async function PATCH(
   props: { params: Promise<{ id: string }> }
 ) {
   try {
-    const body = await request.json();
+    const body: import('@/lib/supabase/types').Database['public']['Tables']['documents']['Update'] = await request.json();
     const supabase = await createClient();
     const { id } = await props.params;
 

@@ -3,7 +3,7 @@
 import React from "react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import { Card, CardContent } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 
 export interface CropData {
   id: string;
@@ -30,13 +30,13 @@ export default function CropSelector({ crops, onRemoveCrop, isExtracting = false
     <div className="space-y-3">
       <h3 className="text-sm font-medium text-zinc-900 dark:text-zinc-100 flex items-center justify-between">
         Selected Regions
-        <Badge variant="secondary">{crops.length}</Badge>
+        <Badge variant="default">{crops.length}</Badge>
       </h3>
       
       <div className="grid grid-cols-1 gap-3 max-h-[400px] overflow-y-auto pr-1">
         {crops.map((crop, index) => (
-          <Card key={crop.id} className="overflow-hidden border-zinc-200 dark:border-zinc-800">
-            <CardContent className="p-3 flex items-center gap-3">
+          <Card key={crop.id} className="overflow-hidden border-zinc-200 dark:border-zinc-800" padding="none">
+            <div className="p-3 flex items-center gap-3">
               <div className="flex-shrink-0 w-8 text-center text-xs font-medium text-zinc-400">
                 #{index + 1}
               </div>
@@ -52,7 +52,7 @@ export default function CropSelector({ crops, onRemoveCrop, isExtracting = false
               
               <div className="flex-shrink-0 flex flex-col gap-2">
                 {!crop.hasContent && (
-                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 dark:text-amber-400">
+                  <Badge variant="amber" className="text-[10px] text-amber-600 border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 dark:text-amber-400">
                     Empty?
                   </Badge>
                 )}
@@ -69,7 +69,7 @@ export default function CropSelector({ crops, onRemoveCrop, isExtracting = false
                   </svg>
                 </Button>
               </div>
-            </CardContent>
+            </div>
           </Card>
         ))}
       </div>

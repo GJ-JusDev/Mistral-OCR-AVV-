@@ -79,15 +79,16 @@ export default function DocumentDetailPage() {
         {/* Right Column: OCR Results, Validation, Review Panel */}
         <div className="flex flex-col gap-6">
           <OcrResultCard 
-            document={document} 
-            isEditable={document.status === "needs_review"}
+            fields={document.extracted_fields} 
+            rawText={document.extracted_text}
           />
           <ValidationSummary 
-            validationResults={document.validation_results || []} 
+            report={{ results: document.validation_results || [], status: "needs_review", passCount: 0, failCount: 0, totalRules: 0 }} 
           />
           <ReviewPanel 
-            documentId={document.id} 
-            currentStatus={document.status} 
+            document={document} 
+            onApprove={() => {}}
+            onReject={() => {}}
           />
         </div>
       </div>

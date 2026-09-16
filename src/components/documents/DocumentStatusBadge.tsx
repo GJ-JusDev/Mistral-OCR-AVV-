@@ -30,7 +30,6 @@ export default function DocumentStatusBadge({ status }: DocumentStatusBadgeProps
       variant = "warning";
       break;
     case "rejected":
-    case "invalid":
       variant = "error";
       break;
     default:

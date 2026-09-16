@@ -85,7 +85,7 @@ export default function ReviewPanel({ document, onApprove, onReject, isSubmittin
               Cancel
             </Button>
             <Button 
-              variant="destructive"
+              variant="danger"
               onClick={handleReject}
               disabled={!rejectReason.trim() || isSubmitting}
             >

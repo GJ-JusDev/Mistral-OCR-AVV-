@@ -40,9 +40,9 @@ export default function ValidationSummary({ report }: ValidationSummaryProps) {
                 {result.severity === 'error' && <XCircle className="w-5 h-5 text-red-500" />}
               </div>
               <div>
-                {result.field && (
+                {result.fieldName && (
                   <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 capitalize">
-                    {result.field.replace(/_/g, " ")}
+                    {result.fieldName.replace(/_/g, " ")}
                   </p>
                 )}
                 <p className="text-sm text-zinc-600 dark:text-zinc-400">
