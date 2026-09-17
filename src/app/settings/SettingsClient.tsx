@@ -77,7 +77,7 @@ export default function SettingsClient() {
 
       <div className="p-4 border border-slate-200 dark:border-slate-800 rounded-md bg-white dark:bg-[#1e1e1e]">
         <div className="mb-4">
-          <h4 className="font-medium text-slate-900 dark:text-slate-100 flex items-center gap-2">
+          <h4 className="font-medium text-red-600 dark:text-red-500 flex items-center gap-2">
             <Lock className="h-4 w-4" /> Change Password
           </h4>
           <p className="text-sm text-slate-500 dark:text-slate-400">Update your account password</p>
