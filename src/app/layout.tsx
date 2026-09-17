@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Sidebar from "@/components/layout/Sidebar";
 import { ToastProvider } from "@/components/ui/Toast";
+import { createClient } from "@/lib/supabase/server";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -19,16 +20,20 @@ export const metadata: Metadata = {
   description: "Upload, validate, and manage school documents with OCR-powered field extraction and automated validation.",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  const role = user?.user_metadata?.role?.toLowerCase() || "teacher";
+
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex bg-slate-50">
+      <body className="h-screen flex bg-slate-50 overflow-hidden">
         <ToastProvider>
-          <Sidebar />
-          <main className="flex-1 flex flex-col min-h-screen overflow-auto">
+          <Sidebar role={role} />
+          <main className="flex-1 flex flex-col h-full overflow-y-auto">
             {children}
           </main>
         </ToastProvider>

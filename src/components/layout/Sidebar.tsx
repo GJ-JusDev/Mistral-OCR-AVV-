@@ -29,24 +29,9 @@ const baseNavigation = [
   { name: "Settings", href: "/settings", icon: Settings },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ role = "teacher" }: { role?: string }) {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
-  const [role, setRole] = useState<string>("teacher");
-
-  useEffect(() => {
-    const getRole = async () => {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const userRole = user.user_metadata?.role?.toLowerCase();
-        if (userRole) {
-          setRole(userRole);
-        }
-      }
-    };
-    getRole();
-  }, []);
 
   if (pathname === "/login" || pathname === "/register") {
     return null;
