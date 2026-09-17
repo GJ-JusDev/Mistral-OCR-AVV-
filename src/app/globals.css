@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@custom-variant dark (&:where(.dark, .dark *));
+@custom-variant dark (&:where(.dark-mode-disabled));
 
 :root {
   --background: #f8f9fa; /* Very light gray, easier on the eyes */
@@ -7,12 +7,6 @@
   --card-bg: #ffffff;
   --sidebar-width: 256px;
   --sidebar-collapsed-width: 64px;
-}
-
-.dark {
-  --background: #121212;
-  --foreground: #e0e0e0;
-  --card-bg: #1e1e1e;
 }
 
 @theme inline {
