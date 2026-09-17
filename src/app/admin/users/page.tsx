@@ -5,15 +5,15 @@ import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import { Card } from "@/components/ui/Card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
-import { getUsers, approveUser } from "@/actions/users";
-import { CheckCircle, Clock } from "lucide-react";
+import { getUsers, approveUser, declineUser } from "@/actions/users";
+import { CheckCircle, Clock, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 
 export default function UsersPage() {
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [isPending, startTransition] = useTransition();
+  const [isTransitioning, startTransition] = useTransition();
 
   async function fetchUsers() {
     setLoading(true);
@@ -41,6 +41,17 @@ export default function UsersPage() {
     });
   };
 
+  const handleDecline = (userId: string) => {
+    startTransition(async () => {
+      const res = await declineUser(userId);
+      if (res.error) {
+        alert(res.error);
+      } else {
+        await fetchUsers();
+      }
+    });
+  };
+
   return (
     <PageContainer>
       <Header title="Users Management" description="Manage registered users and approvals." />
@@ -58,6 +69,7 @@ export default function UsersPage() {
                 <TableRow>
                   <TableHead>Email</TableHead>
                   <TableHead>Full Name</TableHead>
+                  <TableHead>Role</TableHead>
                   <TableHead>LPT Info</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Actions</TableHead>
@@ -66,13 +78,13 @@ export default function UsersPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={6} className="text-center py-8 text-slate-500">
                       Loading users...
                     </TableCell>
                   </TableRow>
                 ) : users.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={6} className="text-center py-8 text-slate-500">
                       No users found.
                     </TableCell>
                   </TableRow>
@@ -81,27 +93,41 @@ export default function UsersPage() {
                     const meta = user.user_metadata || {};
                     const fullName = [meta.first_name, meta.middle_name, meta.last_name, meta.name_extension].filter(Boolean).join(" ");
                     const isPending = meta.account_status === "Pending";
+                    const isDeclined = meta.account_status === "Declined";
+                    const role = meta.role || "Teacher";
                     
                     return (
                       <TableRow key={user.id}>
                         <TableCell className="font-medium">{user.email}</TableCell>
                         <TableCell>{fullName || "N/A"}</TableCell>
-                        <TableCell>{meta.lpt_info || "N/A"}</TableCell>
+                        <TableCell className="capitalize">{role}</TableCell>
+                        <TableCell>{role.toLowerCase() === "teacher" ? (meta.lpt_info || "N/A") : "N/A"}</TableCell>
                         <TableCell>
-                          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${isPending ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
-                            {isPending ? <Clock className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
-                            {meta.account_status || "Active"}
+                          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${isPending ? 'bg-amber-100 text-amber-800' : isDeclined ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                            {isPending ? <Clock className="h-3.5 w-3.5" /> : isDeclined ? <XCircle className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
+                            {meta.account_status || "Approved"}
                           </span>
                         </TableCell>
                         <TableCell>
                           {isPending && (
-                            <Button 
-                              size="sm" 
-                              onClick={() => handleApprove(user.id)}
-                              disabled={isPending}
-                            >
-                              Approve
-                            </Button>
+                            <div className="flex gap-2">
+                              <Button 
+                                size="sm" 
+                                onClick={() => handleApprove(user.id)}
+                                disabled={isTransitioning}
+                              >
+                                Approve
+                              </Button>
+                              <Button 
+                                size="sm" 
+                                variant="outline"
+                                onClick={() => handleDecline(user.id)}
+                                disabled={isTransitioning}
+                                className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                              >
+                                Decline
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>

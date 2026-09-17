@@ -39,13 +39,9 @@ export default function Sidebar() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        const { data } = await supabase
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", user.id)
-          .single();
-        if (data) {
-          setRole(data.role);
+        const userRole = user.user_metadata?.role?.toLowerCase();
+        if (userRole) {
+          setRole(userRole);
         }
       }
     };

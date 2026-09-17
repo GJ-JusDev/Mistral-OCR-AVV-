@@ -14,14 +14,7 @@ export default async function DashboardPage() {
   // Get current user
   const { data: { user } } = await supabase.auth.getUser();
 
-  // Get role
-  const { data: roleData } = await supabase
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", user?.id || "")
-    .single();
-
-  const role = roleData?.role || "teacher";
+  const role = user?.user_metadata?.role?.toLowerCase() || "teacher";
   const isAdmin = role === "admin";
 
   // Fetch stats (we apply basic RLS automatically via Supabase client, 
@@ -84,11 +77,44 @@ export default async function DashboardPage() {
           </div>
           
           {isAdmin && (
-            <div className="lg:col-span-1 flex flex-col">
-              <Card padding="md" className="h-full flex flex-col">
+            <div className="lg:col-span-1 flex flex-col gap-6">
+              <Card padding="md" className="flex flex-col">
                 <div className="flex items-center gap-2 mb-4">
                   <UserCircle className="h-5 w-5 text-slate-500" />
-                  <h3 className="text-sm font-medium text-slate-900">User Activity (Admin)</h3>
+                  <h3 className="text-sm font-medium text-slate-900">Admin Profile</h3>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Name</p>
+                    <p className="text-sm text-slate-900 font-medium">
+                      {[user?.user_metadata?.first_name, user?.user_metadata?.middle_name, user?.user_metadata?.last_name, user?.user_metadata?.name_extension].filter(Boolean).join(" ") || "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Email</p>
+                    <p className="text-sm text-slate-900">{user?.email}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Role</p>
+                    <p className="text-sm text-slate-900 font-medium capitalize">
+                      {user?.user_metadata?.role || "Admin"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Account Status</p>
+                    <p className="text-sm text-slate-900 font-medium">
+                      <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+                        {user?.user_metadata?.account_status || "Approved"}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              </Card>
+
+              <Card padding="md" className="flex flex-col">
+                <div className="flex items-center gap-2 mb-4">
+                  <UserCircle className="h-5 w-5 text-slate-500" />
+                  <h3 className="text-sm font-medium text-slate-900">User Activity</h3>
                 </div>
                 <div className="flex-1 overflow-auto">
                   <Table>

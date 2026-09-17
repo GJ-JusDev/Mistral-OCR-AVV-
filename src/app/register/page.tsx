@@ -70,17 +70,7 @@ export default function RegisterPage() {
               className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors"
             />
           </div>
-          <div>
-            <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Teacher Access Code</label>
-            <input 
-              name="accessCode" 
-              type="text"
-              placeholder="E.g., TEACHER2026"
-              required 
-              className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors"
-            />
-            <p className="mt-2 text-sm text-[#6c757d]">Provided by your school administrator.</p>
-          </div>
+
           
           {state?.error && (
             <div className="rounded-sm bg-red-50 p-4 text-[0.95rem] text-red-700 border border-red-200">

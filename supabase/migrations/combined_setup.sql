@@ -42,22 +42,7 @@ CREATE POLICY "Admins can read all roles" ON public.user_roles
     EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = auth.uid() AND role = 'admin')
   );
 
--- 5. Create teacher_invites table
-CREATE TABLE IF NOT EXISTS public.teacher_invites (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    email text NOT NULL,
-    access_code text NOT NULL,
-    created_at timestamptz DEFAULT now(),
-    used boolean DEFAULT false
-);
 
-ALTER TABLE public.teacher_invites ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS "Admins can manage invites" ON public.teacher_invites;
-CREATE POLICY "Admins can manage invites" ON public.teacher_invites
-  FOR ALL USING (
-    EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = auth.uid() AND role = 'admin')
-  );
 
 -- 6. Create a default admin user (only if they don't exist)
 INSERT INTO auth.users (
@@ -72,7 +57,7 @@ SELECT
   crypt('Password123!', gen_salt('bf')), 
   now(), now(), now(), 
   '{"provider":"email","providers":["email"]}', 
-  '{}', 
+  '{"first_name":"Admin","middle_name":"N/A","last_name":"N/A","name_extension":"","role":"Admin","account_status":"Approved"}', 
   now(), now(), '', '', '', ''
 WHERE NOT EXISTS (
     SELECT 1 FROM auth.users WHERE email = 'admin@example.com'
@@ -96,7 +81,7 @@ SELECT
   crypt('Password123!', gen_salt('bf')), 
   now(), now(), now(), 
   '{"provider":"email","providers":["email"]}', 
-  '{}', 
+  '{"first_name":"Teacher","middle_name":"A","last_name":"One","name_extension":"","role":"Teacher","lpt_info":"LPT-12345","account_status":"Approved"}', 
   now(), now(), '', '', '', ''
 WHERE NOT EXISTS (
     SELECT 1 FROM auth.users WHERE email = 'teacher@example.com'

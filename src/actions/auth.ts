@@ -39,7 +39,6 @@ export async function login(formData: FormData) {
 export async function register(formData: FormData) {
   const email = formData.get("email") as string;
   const password = formData.get("password") as string;
-  const accessCode = formData.get("accessCode") as string;
   const firstName = (formData.get("firstName") as string)?.trim();
   const middleName = (formData.get("middleName") as string)?.trim();
   const lastName = (formData.get("lastName") as string)?.trim();
@@ -52,32 +51,6 @@ export async function register(formData: FormData) {
 
   const supabase = await createClient();
 
-  // Basic security: check env code first
-  const validCodeEnv = process.env.TEACHER_ACCESS_CODE || "TEACHER2026";
-  
-  let isValid = accessCode === validCodeEnv;
-
-  // If not env code, check DB teacher_invites
-  if (!isValid) {
-    const { data: invite } = await supabase
-      .from("teacher_invites")
-      .select("*")
-      .eq("email", email)
-      .eq("access_code", accessCode)
-      .eq("used", false)
-      .single();
-      
-    if (invite) {
-      isValid = true;
-      // Mark as used
-      await supabase.from("teacher_invites").update({ used: true }).eq("id", invite.id);
-    }
-  }
-
-  if (!isValid) {
-    return { error: "Invalid teacher access code." };
-  }
-
   const { error } = await supabase.auth.signUp({
     email,
     password,
@@ -88,7 +61,8 @@ export async function register(formData: FormData) {
         last_name: lastName,
         name_extension: nameExtension,
         lpt_info: lptInfo,
-        account_status: 'Pending'
+        role: "Teacher",
+        account_status: "Pending" // Automatically mark new users as Pending
       }
     }
   });

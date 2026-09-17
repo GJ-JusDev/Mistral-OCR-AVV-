@@ -22,13 +22,8 @@ export async function getUsers() {
   
   if (!user) return { error: "Unauthorized" };
   
-  const { data: roleData } = await serverClient
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", user.id)
-    .single();
-
-  if (roleData?.role !== "admin") {
+  const role1 = user.user_metadata?.role?.toLowerCase();
+  if (role1 !== "admin") {
     return { error: "Forbidden" };
   }
 
@@ -50,13 +45,8 @@ export async function approveUser(userId: string) {
   
   if (!user) return { error: "Unauthorized" };
   
-  const { data: roleData } = await serverClient
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", user.id)
-    .single();
-
-  if (roleData?.role !== "admin") {
+  const role2 = user.user_metadata?.role?.toLowerCase();
+  if (role2 !== "admin") {
     return { error: "Forbidden" };
   }
 
@@ -73,6 +63,41 @@ export async function approveUser(userId: string) {
     user_metadata: {
       ...currentMetadata,
       account_status: "Approved"
+    }
+  });
+
+  if (updateError) {
+    return { error: updateError.message };
+  }
+
+  revalidatePath("/admin/users");
+  return { success: true };
+}
+
+export async function declineUser(userId: string) {
+  const serverClient = await createServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
+  
+  if (!user) return { error: "Unauthorized" };
+  
+  const role = user.user_metadata?.role?.toLowerCase();
+  if (role !== "admin") {
+    return { error: "Forbidden" };
+  }
+
+  const adminClient = getAdminClient();
+  const { data: targetUser, error: getUserError } = await adminClient.auth.admin.getUserById(userId);
+  
+  if (getUserError || !targetUser?.user) {
+    return { error: "User not found" };
+  }
+
+  const currentMetadata = targetUser.user.user_metadata || {};
+  
+  const { error: updateError } = await adminClient.auth.admin.updateUserById(userId, {
+    user_metadata: {
+      ...currentMetadata,
+      account_status: "Declined"
     }
   });
 

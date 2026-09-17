@@ -207,30 +207,7 @@ export interface Database {
         }
         Relationships: any[]
       }
-      teacher_invites: {
-        Row: {
-          id: string
-          email: string
-          access_code: string
-          used: boolean
-          created_at: string | null
-        }
-        Insert: {
-          id?: string
-          email: string
-          access_code: string
-          used?: boolean
-          created_at?: string | null
-        }
-        Update: {
-          id?: string
-          email?: string
-          access_code?: string
-          used?: boolean
-          created_at?: string | null
-        }
-        Relationships: any[]
-      }
+
       user_roles: {
         Row: {
           id: string
