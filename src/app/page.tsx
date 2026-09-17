@@ -166,11 +166,15 @@ export default async function DashboardPage() {
                   </div>
                   <div>
                     <p className="text-xs text-slate-500 font-medium">Email</p>
-                    <p className="text-sm text-slate-900">{user?.email}</p>
+                    <p className="text-sm text-slate-900">
+                      {user?.email ? `${user.email.split('@')[0][0]}***${user.email.split('@')[0].slice(-1)}@${user.email.split('@')[1]}` : "N/A"}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-slate-500 font-medium">LPT License Number</p>
-                    <p className="text-sm text-slate-900 font-medium">{user?.user_metadata?.lpt_info || "N/A"}</p>
+                    <p className="text-sm text-slate-900 font-medium">
+                      {user?.user_metadata?.lpt_info ? `${user.user_metadata.lpt_info.slice(0, -3)}***` : "N/A"}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-slate-500 font-medium">Account Status</p>

@@ -30,7 +30,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="h-screen flex bg-slate-50 overflow-hidden">
+      <body className="h-screen flex bg-background text-foreground overflow-hidden">
         <ToastProvider>
           <Sidebar role={role} />
           <main className="flex-1 flex flex-col h-full overflow-y-auto">
