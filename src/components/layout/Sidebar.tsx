@@ -62,7 +62,7 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
         />
       )}
 
-      <div className={`fixed inset-y-0 left-0 z-40 w-64 transform flex-col border-r border-[#dee2e6] bg-[#f8f9fa] transition-transform duration-200 ease-in-out md:relative md:flex md:translate-x-0 h-screen ${isOpen ? "flex translate-x-0" : "-translate-x-full"}`}>
+      <div className={`fixed inset-y-0 left-0 z-40 w-64 transform flex-col border-r border-[#dee2e6] bg-[#f8f9fa] transition-transform duration-200 ease-in-out md:sticky md:top-0 md:flex md:translate-x-0 h-screen ${isOpen ? "flex translate-x-0" : "-translate-x-full"}`}>
         <div className="flex h-16 shrink-0 items-center gap-2 border-b border-[#dee2e6] px-6 bg-white">
           <div className="flex h-8 w-8 items-center justify-center rounded-sm bg-[#212529] text-white">
             <GraduationCap className="h-5 w-5" />
