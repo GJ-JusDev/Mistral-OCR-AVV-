@@ -72,14 +72,14 @@ export default async function DashboardPage() {
     <PageContainer>
       <Header 
         title="Dashboard" 
-        description={`Welcome back, ${user?.email}. Role: ${role.toUpperCase()}`} 
+        description={`Welcome back, ${isAdmin ? user?.user_metadata?.first_name || 'Admin' : user?.user_metadata?.first_name || 'Teacher'}!`} 
       />
       
       <div className="mt-6 flex flex-col gap-6">
         <StatsGrid stats={stats} />
         
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div className={isAdmin ? "lg:col-span-2" : "lg:col-span-3"}>
+          <div className={isAdmin ? "lg:col-span-2" : "lg:col-span-2"}>
             <ProcessingChart data={processingChartData} title="Processing Volume (Last 7 Days)" />
           </div>
           
@@ -123,6 +123,42 @@ export default async function DashboardPage() {
               </Card>
             </div>
           )}
+
+          {!isAdmin && (
+            <div className="lg:col-span-1 flex flex-col">
+              <Card padding="md" className="h-full flex flex-col">
+                <div className="flex items-center gap-2 mb-4">
+                  <UserCircle className="h-5 w-5 text-slate-500" />
+                  <h3 className="text-sm font-medium text-slate-900">Teacher Profile</h3>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Name</p>
+                    <p className="text-sm text-slate-900 font-medium">
+                      {[user?.user_metadata?.first_name, user?.user_metadata?.middle_name, user?.user_metadata?.last_name, user?.user_metadata?.name_extension].filter(Boolean).join(" ") || "N/A"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Email</p>
+                    <p className="text-sm text-slate-900">{user?.email}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">LPT License Number</p>
+                    <p className="text-sm text-slate-900 font-medium">{user?.user_metadata?.lpt_info || "N/A"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 font-medium">Account Status</p>
+                    <p className="text-sm text-slate-900 font-medium">
+                      <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-medium text-emerald-800">
+                        {user?.user_metadata?.account_status || "Active"}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              </Card>
+            </div>
+          )}
+
         </div>
       </div>
     </PageContainer>

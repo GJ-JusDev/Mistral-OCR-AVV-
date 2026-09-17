@@ -45,6 +45,13 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
+  // Protect admin routes (optional extra safety layer)
+  if (user && request.nextUrl.pathname.startsWith('/admin')) {
+    // Cannot easily check user_roles in middleware without a new query
+    // We do it in the API/Component, but we could do it here if needed.
+    // For now we leave it since API blocks it anyway.
+  }
+
   return supabaseResponse
 }
 

@@ -18,6 +18,12 @@ export async function login(formData: FormData) {
     return { error: error.message };
   }
 
+  // Check account status
+  if (data.user?.user_metadata?.account_status === 'Pending') {
+    await supabase.auth.signOut();
+    return { error: "Your account is pending admin approval." };
+  }
+
   // Log the login event
   if (data.user) {
     await supabase.from("auth_logs").insert({
@@ -34,7 +40,16 @@ export async function register(formData: FormData) {
   const email = formData.get("email") as string;
   const password = formData.get("password") as string;
   const accessCode = formData.get("accessCode") as string;
+  const firstName = (formData.get("firstName") as string)?.trim();
+  const middleName = (formData.get("middleName") as string)?.trim();
+  const lastName = (formData.get("lastName") as string)?.trim();
+  const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
+  const lptInfo = (formData.get("lptInfo") as string)?.trim();
   
+  if (!firstName || !middleName || !lastName) {
+    return { error: "First Name, Middle Name, and Last Name are required." };
+  }
+
   const supabase = await createClient();
 
   // Basic security: check env code first
@@ -66,6 +81,16 @@ export async function register(formData: FormData) {
   const { error } = await supabase.auth.signUp({
     email,
     password,
+    options: {
+      data: {
+        first_name: firstName,
+        middle_name: middleName,
+        last_name: lastName,
+        name_extension: nameExtension,
+        lpt_info: lptInfo,
+        account_status: 'Pending'
+      }
+    }
   });
 
   if (error) {

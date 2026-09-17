@@ -27,6 +27,31 @@ export default function RegisterPage() {
 
       <Card padding="lg" className="w-full max-w-lg bg-white border-[#dee2e6] shadow-sm">
         <form action={formAction} className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">First Name</label>
+              <input name="firstName" type="text" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            </div>
+            <div>
+              <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Middle Name</label>
+              <input name="middleName" type="text" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Last Name</label>
+              <input name="lastName" type="text" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            </div>
+            <div>
+              <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Name Extension (Optional)</label>
+              <input name="nameExtension" type="text" placeholder="e.g. Jr., Sr., III" className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            </div>
+          </div>
+          <div>
+            <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">LPT Information</label>
+            <input name="lptInfo" type="text" placeholder="LPT License Number" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            <p className="mt-2 text-sm text-[#6c757d]">Required for Teacher verification.</p>
+          </div>
           <div>
             <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Email address</label>
             <input 
@@ -62,6 +87,19 @@ export default function RegisterPage() {
               {state.error}
             </div>
           )}
+
+          <div className="flex items-start gap-2">
+            <input 
+              type="checkbox" 
+              id="terms" 
+              name="terms" 
+              required 
+              className="mt-1 h-4 w-4 rounded border-gray-300 text-[#212529] focus:ring-[#86b7fe]"
+            />
+            <label htmlFor="terms" className="text-sm text-[#495057]">
+              I agree to the <Link href="/terms" className="font-medium text-[#212529] hover:underline" target="_blank">Terms and Conditions</Link>, including the developer liability disclaimer.
+            </label>
+          </div>
 
           <Button type="submit" size="lg" className="w-full" disabled={isPending}>
             {isPending ? "Registering..." : "Create account"}
