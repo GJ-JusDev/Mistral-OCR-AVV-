@@ -7,6 +7,7 @@ export type GradeRecord = {
   q4?: number;
   final?: number;
   status: "Passed" | "Failed" | "Missing";
+  needsVerification?: boolean;
 };
 
 export type AttendanceRecord = {

@@ -123,10 +123,16 @@ export function parseGradesText(text: string): ExtractedFields {
       // Evaluate status based on final (or lowest available if final missing)
       const gradeToCheck = final || validNumbers[validNumbers.length - 1];
       let status: "Passed" | "Failed" | "Missing" = "Missing";
+      let needsVerification = false;
       
       if (gradeToCheck !== undefined) {
         // Requirements: 74-0 is failing, 75+ is passed
-        status = gradeToCheck <= 74 ? "Failed" : "Passed";
+        status = gradeToCheck < 75 ? "Failed" : "Passed";
+        
+        // Flag borderline grades for manual verification
+        if (gradeToCheck >= 72 && gradeToCheck <= 77) {
+          needsVerification = true;
+        }
       }
 
       grades.push({
@@ -137,7 +143,8 @@ export function parseGradesText(text: string): ExtractedFields {
         q3,
         q4,
         final,
-        status
+        status,
+        needsVerification
       });
     }
   }
