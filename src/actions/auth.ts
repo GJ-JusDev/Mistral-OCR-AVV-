@@ -45,8 +45,13 @@ export async function register(formData: FormData) {
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
   const lptInfo = (formData.get("lptInfo") as string)?.trim();
   
-  if (!firstName || !middleName || !lastName) {
-    return { error: "First Name, Middle Name, and Last Name are required." };
+  if (!firstName || !lastName) {
+    return { error: "First Name and Last Name are required." };
+  }
+
+  const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}$/;
+  if (!passwordRegex.test(password)) {
+    return { error: "Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one number." };
   }
 
   const supabase = await createClient();

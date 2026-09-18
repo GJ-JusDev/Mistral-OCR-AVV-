@@ -70,6 +70,9 @@ export default function RegisterPage() {
                 name="password" 
                 type={showPassword ? "text" : "password"} 
                 required 
+                minLength={8}
+                pattern="(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}"
+                title="Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one number."
                 className="w-full rounded-sm border border-[#ced4da] px-4 py-3 pr-10 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors"
               />
               <button
