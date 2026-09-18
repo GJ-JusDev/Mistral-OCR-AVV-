@@ -16,7 +16,7 @@ export default function RegisterPage() {
   );
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-[#f8f9fa] px-4 py-12">
+    <div className="flex min-h-screen flex-col items-center bg-[#f8f9fa] py-12 px-4 sm:pt-16">
       <div className="mb-10 flex flex-col items-center text-center">
         <div className="flex h-14 w-14 items-center justify-center rounded-sm bg-[#212529] text-white shadow-sm mb-5">
           <GraduationCap className="h-8 w-8" />
@@ -34,7 +34,7 @@ export default function RegisterPage() {
             </div>
             <div>
               <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Middle Name</label>
-              <input name="middleName" type="text" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+              <input name="middleName" type="text" className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
             </div>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -100,6 +100,10 @@ export default function RegisterPage() {
           Already registered? <Link href="/login" className="font-medium text-[#212529] hover:underline">Sign in</Link>
         </p>
       </Card>
+
+      <div className="mt-12 text-center text-sm text-[#6c757d] pb-8">
+        <p>&copy; {new Date().getFullYear()} All rights reserved. Taysan Resettlement Integrated School.</p>
+      </div>
     </div>
   );
 }
