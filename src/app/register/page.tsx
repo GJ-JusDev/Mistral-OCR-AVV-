@@ -5,10 +5,11 @@ import { register } from "@/actions/auth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import Link from "next/link";
-import { GraduationCap } from "lucide-react";
+import { GraduationCap, Eye, EyeOff } from "lucide-react";
 
 export default function RegisterPage() {
   const [isTermsOpen, setIsTermsOpen] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [state, formAction, isPending] = useActionState(
     async (prevState: any, formData: FormData) => {
       return await register(formData);
@@ -64,12 +65,22 @@ export default function RegisterPage() {
           </div>
           <div>
             <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Password</label>
-            <input 
-              name="password" 
-              type="password" 
-              required 
-              className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors"
-            />
+            <div className="relative">
+              <input 
+                name="password" 
+                type={showPassword ? "text" : "password"} 
+                required 
+                className="w-full rounded-sm border border-[#ced4da] px-4 py-3 pr-10 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors"
+              />
+              <button
+                type="button"
+                className="absolute inset-y-0 right-0 flex items-center pr-3 text-[#6c757d] hover:text-[#212529]"
+                onClick={() => setShowPassword(!showPassword)}
+                tabIndex={-1}
+              >
+                {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+              </button>
+            </div>
           </div>
 
           
