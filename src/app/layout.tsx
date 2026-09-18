@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DocuValidate — School Document Validation System",
+  title: "Automated Visual Validation System — Taysan Resettlement Integrated School",
   description: "Upload, validate, and manage school documents with OCR-powered field extraction and automated validation.",
 };
 

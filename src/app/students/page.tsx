@@ -5,8 +5,17 @@ import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 
+export interface Student {
+  id: string;
+  name?: string;
+  lrn?: string;
+  grade?: string;
+  school?: string;
+  status?: string;
+}
+
 export default function StudentsPage() {
-  const [students, setStudents] = useState<any[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -17,8 +26,12 @@ export default function StudentsPage() {
         if (!res.ok) throw new Error("Failed to fetch students");
         const data = await res.json();
         setStudents(data.students || []);
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err: unknown) {
+        if (err instanceof Error) {
+          setError(err.message);
+        } else {
+          setError("An unexpected error occurred");
+        }
       } finally {
         setLoading(false);
       }

@@ -67,7 +67,7 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
           <div className="flex h-8 w-8 items-center justify-center rounded-sm bg-[#212529] text-white">
             <GraduationCap className="h-5 w-5" />
           </div>
-          <span className="font-semibold text-[#212529] text-lg tracking-tight">DocuValidate</span>
+          <span className="font-semibold text-[#212529] text-base tracking-tight leading-tight">Automated Visual Validation System</span>
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto p-3">
