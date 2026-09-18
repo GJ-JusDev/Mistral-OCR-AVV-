@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { register } from "@/actions/auth";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -8,6 +8,7 @@ import Link from "next/link";
 import { GraduationCap } from "lucide-react";
 
 export default function RegisterPage() {
+  const [isTermsOpen, setIsTermsOpen] = useState(false);
   const [state, formAction, isPending] = useActionState(
     async (prevState: any, formData: FormData) => {
       return await register(formData);
@@ -87,7 +88,7 @@ export default function RegisterPage() {
               className="mt-1 h-4 w-4 rounded border-gray-300 text-[#212529] focus:ring-[#86b7fe]"
             />
             <label htmlFor="terms" className="text-sm text-[#495057]">
-              I agree to the <Link href="/terms" className="font-medium text-[#212529] hover:underline" target="_blank">Terms and Conditions</Link>, including the developer liability disclaimer.
+              I agree to the <button type="button" onClick={() => setIsTermsOpen(true)} className="font-medium text-[#212529] hover:underline bg-transparent border-none p-0 cursor-pointer">Terms and Conditions</button>, including the developer liability disclaimer.
             </label>
           </div>
 
@@ -104,6 +105,33 @@ export default function RegisterPage() {
       <div className="mt-12 text-center text-sm text-[#6c757d] pb-8">
         <p>&copy; {new Date().getFullYear()} All rights reserved. Taysan Resettlement Integrated School.</p>
       </div>
+
+      {isTermsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 px-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6 max-h-[90vh] flex flex-col">
+            <h2 className="text-xl font-bold mb-4 text-[#212529]">Terms and Conditions</h2>
+            <div className="flex-1 overflow-y-auto pr-2 text-sm text-[#495057] space-y-4">
+              <p>
+                <strong>1. Acceptance of Terms:</strong> By registering, you agree to use this system exclusively for official school validation purposes.
+              </p>
+              <p>
+                <strong>2. Data Privacy (DepEd Compliance):</strong> In strict compliance with the Data Privacy Act of 2012 (RA 10173) and DepEd data privacy policies, all student records, particularly grades and LRNs, are highly confidential. No grades or student information shall be disclosed, leaked, or thrown out carelessly. You are strictly prohibited from sharing extracted data outside authorized school channels.
+              </p>
+              <p>
+                <strong>3. Verification Duty:</strong> Automated extractions must be verified. You agree to manually review flagged documents and ensure accuracy before final approval.
+              </p>
+              <p>
+                <strong>4. Developer Liability Disclaimer:</strong> The Automated Visual Validation System (AVVS) is provided "as is". The developers are not liable for any discrepancies, errors in extraction, or subsequent issues arising from unverified data. Final data accuracy relies on the human reviewer.
+              </p>
+            </div>
+            <div className="mt-6 flex justify-end">
+              <Button type="button" onClick={() => setIsTermsOpen(false)}>
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
