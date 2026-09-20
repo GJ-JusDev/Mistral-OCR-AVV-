@@ -1,19 +1,106 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import { Card } from "@/components/ui/Card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
-import { getUsers, approveUser, declineUser } from "@/actions/users";
-import { CheckCircle, Clock, XCircle } from "lucide-react";
+import { getUsers, verifyAndRevealPrc } from "@/actions/users";
+import { CheckCircle, Clock, XCircle, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
+import { UserActions } from "@/components/admin/UserActions";
+
+function PrcVisibilityCell({ userId, hasPrc }: { userId: string, hasPrc: boolean }) {
+  const [isVisible, setIsVisible] = useState(false);
+  const [prcValue, setPrcValue] = useState<string | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  if (!hasPrc) return <span className="text-slate-500">N/A</span>;
+
+  const toggleVisibility = () => {
+    if (isVisible) {
+      setIsVisible(false);
+      setPrcValue(null);
+    } else {
+      setIsModalOpen(true);
+      setPassword("");
+      setError("");
+    }
+  };
+
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setError("");
+
+    const res = await verifyAndRevealPrc(userId, password);
+    setIsSubmitting(false);
+
+    if (res.error) {
+      setError(res.error);
+    } else if (res.prc) {
+      setPrcValue(res.prc);
+      setIsVisible(true);
+      setIsModalOpen(false);
+    } else {
+      setError("No PRC ID found for this user.");
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <span className="font-mono tracking-widest text-slate-700">
+        {isVisible ? prcValue : "*******"}
+      </span>
+      <button 
+        onClick={toggleVisibility}
+        className="text-slate-400 hover:text-slate-600 focus:outline-none transition-colors"
+        title={isVisible ? "Hide PRC ID" : "Show PRC ID"}
+      >
+        {isVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Admin Verification">
+        <form onSubmit={handleVerify} className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Please enter your admin password to view this user's PRC ID.
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Password
+            </label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-sm border border-slate-300 px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              placeholder="Enter admin password"
+            />
+          </div>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" onClick={() => setIsModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "Verifying..." : "Verify & Reveal"}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    </div>
+  );
+}
 
 export default function UsersPage() {
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [isTransitioning, startTransition] = useTransition();
 
   async function fetchUsers() {
     setLoading(true);
@@ -29,28 +116,6 @@ export default function UsersPage() {
   useEffect(() => {
     fetchUsers();
   }, []);
-
-  const handleApprove = (userId: string) => {
-    startTransition(async () => {
-      const res = await approveUser(userId);
-      if (res.error) {
-        alert(res.error);
-      } else {
-        await fetchUsers();
-      }
-    });
-  };
-
-  const handleDecline = (userId: string) => {
-    startTransition(async () => {
-      const res = await declineUser(userId);
-      if (res.error) {
-        alert(res.error);
-      } else {
-        await fetchUsers();
-      }
-    });
-  };
 
   return (
     <PageContainer>
@@ -70,7 +135,7 @@ export default function UsersPage() {
                   <TableHead>Email</TableHead>
                   <TableHead>Full Name</TableHead>
                   <TableHead>Role</TableHead>
-                  <TableHead>LPT Info</TableHead>
+                  <TableHead>PRC Info</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Actions</TableHead>
                 </TableRow>
@@ -101,7 +166,13 @@ export default function UsersPage() {
                         <TableCell className="font-medium">{user.email}</TableCell>
                         <TableCell>{fullName || "N/A"}</TableCell>
                         <TableCell className="capitalize">{role}</TableCell>
-                        <TableCell>{role.toLowerCase() === "teacher" ? (meta.lpt_info || "N/A") : "N/A"}</TableCell>
+                        <TableCell>
+                          {role.toLowerCase() === "teacher" ? (
+                            <PrcVisibilityCell userId={user.id} hasPrc={meta.has_prc === true} />
+                          ) : (
+                            "N/A"
+                          )}
+                        </TableCell>
                         <TableCell>
                           <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${isPending ? 'bg-amber-100 text-amber-800' : isDeclined ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}`}>
                             {isPending ? <Clock className="h-3.5 w-3.5" /> : isDeclined ? <XCircle className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
@@ -109,26 +180,7 @@ export default function UsersPage() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          {isPending && (
-                            <div className="flex gap-2">
-                              <Button 
-                                size="sm" 
-                                onClick={() => handleApprove(user.id)}
-                                disabled={isTransitioning}
-                              >
-                                Approve
-                              </Button>
-                              <Button 
-                                size="sm" 
-                                variant="outline"
-                                onClick={() => handleDecline(user.id)}
-                                disabled={isTransitioning}
-                                className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                              >
-                                Decline
-                              </Button>
-                            </div>
-                          )}
+                          <UserActions user={user} fetchUsers={fetchUsers} />
                         </TableCell>
                       </TableRow>
                     );

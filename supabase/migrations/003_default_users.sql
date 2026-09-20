@@ -15,7 +15,7 @@ INSERT INTO auth.users (
   '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000000', 'teacher@example.com',
   crypt('Password123!', gen_salt('bf')), now(),
   '{"provider":"email","providers":["email"]}', 
-  '{"first_name":"Teacher","middle_name":"A","last_name":"One","name_extension":"","role":"Teacher","lpt_info":"LPT-12345","account_status":"Approved"}', 
+  '{"first_name":"Teacher","middle_name":"A","last_name":"One","name_extension":"","role":"Teacher","prc":"1234567","account_status":"Approved"}', 
   now(), now(), '', '', '', ''
 );
 

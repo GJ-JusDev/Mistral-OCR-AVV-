@@ -43,10 +43,14 @@ export async function register(formData: FormData) {
   const middleName = (formData.get("middleName") as string)?.trim();
   const lastName = (formData.get("lastName") as string)?.trim();
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
-  const lptInfo = (formData.get("lptInfo") as string)?.trim();
+  const prc = (formData.get("prc") as string)?.trim();
   
   if (!firstName || !lastName) {
     return { error: "First Name and Last Name are required." };
+  }
+
+  if (!prc || !/^\d{7}$/.test(prc)) {
+    return { error: "PRC must be exactly 7 digits long and contain only numbers." };
   }
 
   const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}$/;
@@ -65,7 +69,7 @@ export async function register(formData: FormData) {
         middle_name: middleName,
         last_name: lastName,
         name_extension: nameExtension,
-        lpt_info: lptInfo,
+        prc: prc,
         role: "Teacher",
         account_status: "Pending" // Automatically mark new users as Pending
       }

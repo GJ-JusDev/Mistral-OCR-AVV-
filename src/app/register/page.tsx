@@ -50,8 +50,17 @@ export default function RegisterPage() {
             </div>
           </div>
           <div>
-            <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">LPT Information</label>
-            <input name="lptInfo" type="text" placeholder="LPT License Number" required className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
+            <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">PRC Information</label>
+            <input 
+              name="prc" 
+              type="text" 
+              placeholder="7-digit PRC License Number" 
+              required 
+              pattern="\d{7}"
+              title="PRC License Number must be exactly 7 digits long and contain only numbers."
+              maxLength={7}
+              className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" 
+            />
             <p className="mt-2 text-sm text-[#6c757d]">Required for Teacher verification.</p>
           </div>
           <div>

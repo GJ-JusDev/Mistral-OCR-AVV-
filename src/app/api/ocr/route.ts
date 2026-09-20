@@ -21,9 +21,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { image, extractFields } = (await request.json()) as {
+    const { image, extractFields, gradeLevel } = (await request.json()) as {
       image?: string;
       extractFields?: boolean;
+      gradeLevel?: string;
     };
 
     if (typeof image !== "string" || !image.startsWith("data:image/")) {
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
     let fields: ExtractedFields | undefined;
     if (extractFields) {
       // parseGradesText automatically detects and parses both student info (front) and grades (back)
-      fields = parseGradesText(text);
+      fields = parseGradesText(text, gradeLevel);
     }
 
     const responseData: OcrResponse = {

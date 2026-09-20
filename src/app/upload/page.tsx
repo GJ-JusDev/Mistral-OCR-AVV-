@@ -24,6 +24,7 @@ import Link from "next/link";
 
 export default function UploadPage() {
   const [mode, setMode] = useState<"camera" | "upload">("camera");
+  const [gradeLevel, setGradeLevel] = useState<"Elementary" | "High School" | "Senior High School">("Senior High School");
   const [ocrResult, setOcrResult] = useState<OcrResponse | null>(null);
 
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -77,7 +78,7 @@ export default function UploadPage() {
   const handleExtract = async () => {
     if (!processedImage) return;
     try {
-      const result = await extract(processedImage, true);
+      const result = await extract(processedImage, true, gradeLevel);
       setOcrResult(result);
       console.log("Extraction succeeded", result);
     } catch (err) {
@@ -151,6 +152,26 @@ export default function UploadPage() {
         {/* Left Column: Input (Camera or Upload) */}
         <div className="flex-1 space-y-4">
           <div className="flex flex-col gap-4 mb-4">
+            <div>
+              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
+                Grade Level
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(["Elementary", "High School", "Senior High School"] as const).map((level) => (
+                  <button
+                    key={level}
+                    onClick={() => setGradeLevel(level)}
+                    className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                      gradeLevel === level
+                        ? "bg-indigo-600 text-white shadow-sm"
+                        : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                    }`}
+                  >
+                    {level}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex gap-2">
               <button
                 onClick={() => setMode("camera")}

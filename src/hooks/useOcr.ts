@@ -16,14 +16,18 @@ export function useOcr() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const extract = useCallback(async (image: string, extractFields: boolean = false): Promise<OcrResponse> => {
+  const extract = useCallback(async (
+    image: string, 
+    extractFields: boolean = false, 
+    gradeLevel: string = "Senior High School"
+  ): Promise<OcrResponse> => {
     setIsExtracting(true);
     setError(null);
     try {
       const response = await fetch("/api/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, extractFields }),
+        body: JSON.stringify({ image, extractFields, gradeLevel }),
       });
       
       const result = await response.json() as OcrResponse;

@@ -81,7 +81,7 @@ SELECT
   crypt('Password123!', gen_salt('bf')), 
   now(), now(), now(), 
   '{"provider":"email","providers":["email"]}', 
-  '{"first_name":"Teacher","middle_name":"A","last_name":"One","name_extension":"","role":"Teacher","lpt_info":"LPT-12345","account_status":"Approved"}', 
+  '{"first_name":"Teacher","middle_name":"A","last_name":"One","name_extension":"","role":"Teacher","prc":"1234567","account_status":"Approved"}', 
   now(), now(), '', '', '', ''
 WHERE NOT EXISTS (
     SELECT 1 FROM auth.users WHERE email = 'teacher@example.com'
