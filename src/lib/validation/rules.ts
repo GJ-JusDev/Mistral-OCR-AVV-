@@ -12,6 +12,8 @@ import {
   GRADE_PATTERN,
   looksLikeDate,
   normalizeSex,
+  isValidSchoolYear,
+  SCHOOL_ID_PATTERN,
 } from "./patterns";
 
 import { ValidationContext, ValidationRule } from "@/types/validation";
@@ -124,6 +126,40 @@ export const VALIDATION_RULES: ValidationRule[] = [
     message: "Sex should be M or F.",
     severity: "warning",
     check: (v) => !isPresent(v) || normalizeSex(v) !== "",
+  },
+
+  // ── School Year ───────────────────────────────────────────────────────
+  {
+    name: "school_year_present",
+    field: "school_year",
+    message: "School year is missing. Required for DepEd academic progression records.",
+    severity: "warning",
+    check: (v) => isPresent(v),
+  },
+  {
+    name: "school_year_valid",
+    field: "school_year",
+    message: "School year must be in consecutive YYYY-YYYY format (e.g. 2023-2024).",
+    severity: "warning",
+    check: (v) => !isPresent(v) || isValidSchoolYear(v),
+  },
+
+  // ── School ID ─────────────────────────────────────────────────────────
+  {
+    name: "school_id_format",
+    field: "school_id",
+    message: "DepEd School ID must be a 6-digit number.",
+    severity: "warning",
+    check: (v) => !isPresent(v) || SCHOOL_ID_PATTERN.test(v.trim()),
+  },
+
+  // ── Class Adviser ─────────────────────────────────────────────────────
+  {
+    name: "adviser_present",
+    field: "adviser",
+    message: "Class adviser name should be recorded.",
+    severity: "warning",
+    check: (v) => isPresent(v),
   },
 
   // ── OCR confidence ────────────────────────────────────────────────────

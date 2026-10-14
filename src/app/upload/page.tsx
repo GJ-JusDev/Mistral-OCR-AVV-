@@ -101,15 +101,46 @@ export default function UploadPage() {
     if (!ocrResult?.fields) return;
     setIsUploading(true);
     try {
+      const imageToUpload = processedImage || rawImage;
+      let finalImageUrl = imageToUpload || "uploaded-from-single-page";
+      let originalFilename = "sf9_document.jpg";
+      const docType = (ocrResult.fields?.document_type?.toLowerCase() === 'sf10') ? 'sf10' : 'sf9';
+
+      // 1. Upload file to Supabase Storage if dataUrl is available
+      if (imageToUpload && imageToUpload.startsWith("data:image/")) {
+        try {
+          const storageRes = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: imageToUpload,
+              filename: `${docType}_${Date.now()}.jpg`,
+              docType: docType,
+            }),
+          });
+          if (storageRes.ok) {
+            const storageData = await storageRes.json();
+            if (storageData.url) {
+              finalImageUrl = storageData.url;
+              originalFilename = storageData.originalFilename || originalFilename;
+            }
+          }
+        } catch (storageErr) {
+          console.warn("[upload] Storage API fallback:", storageErr);
+        }
+      }
+
+      // 2. Persist document record with storage URL
       const res = await fetch('/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          document_type: "Unknown",
-          image_url: "uploaded-from-single-page", // placeholder
+          document_type: docType,
+          image_url: finalImageUrl,
+          original_filename: originalFilename,
           extracted_text: ocrResult.text || "Extracted Text",
           extracted_fields: ocrResult.fields,
-          status: "pending"
+          status: "submitted"
         })
       });
       if (res.ok) {
@@ -119,7 +150,8 @@ export default function UploadPage() {
           setUploadSuccess(false);
         }, 2000);
       } else {
-        alert("Upload failed.");
+        const errData = await res.json().catch(() => ({}));
+        alert(`Upload failed: ${errData.error || "Unknown error"}`);
       }
     } catch (e) {
       console.error(e);

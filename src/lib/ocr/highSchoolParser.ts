@@ -106,33 +106,49 @@ export function parseHighSchoolGradesText(text: string): ExtractedFields {
         continue;
       }
 
-      // Map to quarters/semesters based on how many numbers we found
-      // DepEd SF9 usually has Q1, Q2, Final for Senior High (Semester-based)
-      // Or Q1, Q2, Q3, Q4, Final for Junior High (Year-based)
+      // Check if this row is the General Average row explicitly printed on the form
+      const isGeneralAverage = [
+        "general average",
+        "gen. ave",
+        "general weighted average",
+        "gwa"
+      ].some(kw => subjectLower.includes(kw));
+
+      if (isGeneralAverage) {
+        if (validNumbers.length > 0) {
+          fields.general_average = validNumbers[validNumbers.length - 1];
+        }
+        continue;
+      }
+
+      // Map to quarters/semesters based on how many numbers we found.
+      // Do NOT invent a missing final grade or average!
       if (validNumbers.length === 3) {
         [q1, q2, final] = validNumbers;
       } else if (validNumbers.length >= 4) {
         [q1, q2, q3, q4, final] = validNumbers;
       } else if (validNumbers.length === 2) {
         [q1, q2] = validNumbers;
-        final = Math.round((q1 + q2) / 2);
+        final = undefined; // Do not invent (q1+q2)/2; flag for human review
       } else if (validNumbers.length === 1) {
         [final] = validNumbers;
       }
 
-      // Evaluate status based on final (or lowest available if final missing)
-      const gradeToCheck = final || validNumbers[validNumbers.length - 1];
+      // Evaluate status based on final grade
       let status: "Passed" | "Failed" | "Missing" = "Missing";
       let needsVerification = false;
       
-      if (gradeToCheck !== undefined) {
+      if (final !== undefined) {
         // Requirements: 74-0 is failing, 75+ is passed
-        status = gradeToCheck < 75 ? "Failed" : "Passed";
+        status = final < 75 ? "Failed" : "Passed";
         
         // Flag borderline grades for manual verification
-        if (gradeToCheck >= 72 && gradeToCheck <= 77) {
+        if (final >= 72 && final <= 77) {
           needsVerification = true;
         }
+      } else {
+        status = "Missing";
+        needsVerification = true;
       }
 
       grades.push({

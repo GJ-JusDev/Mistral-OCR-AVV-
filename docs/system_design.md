@@ -1,6 +1,6 @@
-# DocuValidate — System Design & UML Documentation
+# Automated Visual Validation System (AVV) — System Design & UML Documentation
 
-This document describes the actual architecture, data models, and request flows of the DocuValidate (TrOCR) web application, based on a direct inspection of the codebase and connected Supabase schema.
+This document describes the actual architecture, data models, and request flows of the Automated Visual Validation System (AVV) web application, based on a direct inspection of the codebase and connected Supabase schema.
 
 ---
 
@@ -75,7 +75,7 @@ usecaseDiagram
     actor Admin
     actor Teacher
 
-    package "DocuValidate Navigation" {
+    package "AVV Navigation" {
         usecase "UC1: View Dashboard Stats" as UC1
         usecase "UC1a: View Auth Logs" as UC1a
         usecase "UC2: Upload & Extract Document" as UC2

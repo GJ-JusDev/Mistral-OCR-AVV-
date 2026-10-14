@@ -1,0 +1,143 @@
+{
+  "academic_standing_history": {
+    "status": "PASS",
+    "rowCount": 0
+  },
+  "confirm_student_academic_standing": {
+    "status": "PASS",
+    "behavior": "Access denied: Only an authorized Admin or Principal can confirm academic standing."
+  },
+  "user_roles": {
+    "status": "PASS",
+    "sampleColumns": [
+      "id",
+      "user_id",
+      "role",
+      "account_status",
+      "school_id",
+      "created_at"
+    ]
+  },
+  "documents": {
+    "status": "PASS"
+  },
+  "students": {
+    "status": "PASS"
+  },
+  "subject_grades": {
+    "status": "PASS"
+  },
+  "helperFunctions": {
+    "is_admin": {
+      "status": "PASS",
+      "defaultReturnValue": false
+    },
+    "is_principal": {
+      "status": "PASS",
+      "defaultReturnValue": false
+    },
+    "is_approved_teacher": {
+      "status": "PASS",
+      "defaultReturnValue": false
+    },
+    "is_approved_staff": {
+      "status": "PASS",
+      "defaultReturnValue": false
+    },
+    "get_auth_user_school_id": {
+      "status": "PASS",
+      "defaultReturnValue": null
+    },
+    "can_approve_documents": {
+      "status": "PASS",
+      "defaultReturnValue": false
+    }
+  },
+  "anonymousAccess": {
+    "schools": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    },
+    "students": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    },
+    "documents": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    },
+    "subject_grades": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    },
+    "academic_standing_history": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    },
+    "user_roles": {
+      "readBlocked": true,
+      "rowsExposed": 0,
+      "error": "Empty set returned (RLS enforced)"
+    }
+  },
+  "storage": {
+    "status": "PASS",
+    "buckets": [
+      {
+        "id": "documents",
+        "name": "documents",
+        "public": false,
+        "file_size_limit": 10485760,
+        "allowed_mime_types": [
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+          "application/pdf"
+        ]
+      }
+    ]
+  },
+  "liveRoster": [
+    {
+      "id": "058ba391-b5b7-41f9-8c03-01f3d570233e",
+      "email": "di***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Pending",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-09-19T14:12:58.903889Z"
+    },
+    {
+      "id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
+      "email": "go***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Pending",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-09-17T11:10:49.380187Z"
+    },
+    {
+      "id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+      "email": "ad***@example.com",
+      "dbRole": "admin",
+      "dbStatus": "Approved",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-09-07T02:50:53.611935Z"
+    },
+    {
+      "id": "9412725c-7faa-4efa-a654-be78cc40a14f",
+      "email": "te***@example.com",
+      "dbRole": "teacher",
+      "dbStatus": "Pending",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-09-07T02:50:53.611935Z"
+    }
+  ]
+}

@@ -21,7 +21,8 @@ export default function DocumentsPage() {
         const res = await fetch("/api/documents");
         if (!res.ok) throw new Error("Failed to fetch documents");
         const data = await res.json();
-        setDocuments(data.documents || []);
+        const docs = Array.isArray(data) ? data : (data.documents || []);
+        setDocuments(docs);
       } catch (err: any) {
         setError(err.message);
       } finally {

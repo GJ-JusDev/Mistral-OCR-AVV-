@@ -99,15 +99,45 @@ export default function ComparePage() {
   const handleUploadToSupabase = async () => {
     setIsUploading(true);
     try {
+      const imageToUpload = doc2Image || doc1Image;
+      let finalImageUrl = imageToUpload || "uploaded-from-compare";
+      let originalFilename = "sf10_comparison.jpg";
+
+      // 1. Upload to Supabase Storage if dataUrl is available
+      if (imageToUpload && imageToUpload.startsWith("data:image/")) {
+        try {
+          const storageRes = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: imageToUpload,
+              filename: `sf10_${Date.now()}.jpg`,
+              docType: "sf10",
+            }),
+          });
+          if (storageRes.ok) {
+            const storageData = await storageRes.json();
+            if (storageData.url) {
+              finalImageUrl = storageData.url;
+              originalFilename = storageData.originalFilename || originalFilename;
+            }
+          }
+        } catch (storageErr) {
+          console.warn("[upload] Storage API fallback:", storageErr);
+        }
+      }
+
+      // 2. Persist document record
       const res = await fetch('/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          document_type: "SF10",
-          image_url: "uploaded-from-compare", // placeholder or base64
+          document_type: "sf10",
+          image_url: finalImageUrl,
+          original_filename: originalFilename,
           extracted_text: "Combined from Compare",
           extracted_fields: mergedFields,
-          status: "pending"
+          status: "submitted"
         })
       });
       if (res.ok) {
@@ -117,7 +147,8 @@ export default function ComparePage() {
           setUploadSuccess(false);
         }, 2000);
       } else {
-        alert("Upload failed.");
+        const errData = await res.json().catch(() => ({}));
+        alert(`Upload failed: ${errData.error || "Unknown error"}`);
       }
     } catch (e) {
       console.error(e);

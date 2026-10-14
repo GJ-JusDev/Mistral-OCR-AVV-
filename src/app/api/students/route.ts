@@ -7,20 +7,24 @@ export async function GET(request: NextRequest) {
     const queryParam = searchParams.get('query');
 
     const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized: Please log in to view student records." }, { status: 401 });
+    }
 
-    let query = supabase.from('students').select('*');
+    let query = supabase.from('students').select('*, schools(name)');
 
     if (queryParam) {
       query = query.or(`lrn.ilike.%${queryParam}%,first_name.ilike.%${queryParam}%,last_name.ilike.%${queryParam}%`);
     }
 
-    const { data, error } = await query;
+    const { data, error } = await query.order('last_name', { ascending: true });
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json({ students: data || [] });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
@@ -30,6 +34,10 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized: Please log in to modify student records." }, { status: 401 });
+    }
 
     const { data, error } = await supabase
       .from('students')

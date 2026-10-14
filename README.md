@@ -1,4 +1,8 @@
-This application captures or uploads images and extracts their text with Mistral OCR.
+# Automated Visual Validation System (AVV)
+
+Official Capstone Project: **Automated Visual Validation System (AVV)** — Taysan Resettlement Integrated School.
+
+This application captures or uploads student documents (SF9, SF10) and performs OCR extraction and automated visual validation against academic records.
 
 ## Configuration
 

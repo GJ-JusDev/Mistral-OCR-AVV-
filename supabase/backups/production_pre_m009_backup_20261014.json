@@ -1,0 +1,419 @@
+{
+  "metadata": {
+    "sourceUrl": "https://yhsmawyntabwghncqbqy.supabase.co",
+    "timestamp": "2026-10-14T02:19:49.105Z",
+    "backupScope": "Complete public schema tables + auth user metadata roster",
+    "tableList": [
+      "schools",
+      "students",
+      "documents",
+      "validation_results",
+      "review_logs",
+      "user_roles",
+      "auth_logs",
+      "subject_grades"
+    ]
+  },
+  "tables": {
+    "schools": {
+      "status": "OK",
+      "count": 1,
+      "rows": [
+        {
+          "id": "a0000000-0000-0000-0000-000000000001",
+          "name": "Taysan Resettlement Integrated School",
+          "school_id": "300792",
+          "division": null,
+          "region": null,
+          "is_active": true,
+          "created_at": "2026-10-13T12:30:42.254208+00:00"
+        }
+      ]
+    },
+    "students": {
+      "status": "OK",
+      "count": 0,
+      "rows": []
+    },
+    "documents": {
+      "status": "OK",
+      "count": 0,
+      "rows": []
+    },
+    "validation_results": {
+      "status": "OK",
+      "count": 0,
+      "rows": []
+    },
+    "review_logs": {
+      "status": "OK",
+      "count": 0,
+      "rows": []
+    },
+    "user_roles": {
+      "status": "OK",
+      "count": 4,
+      "rows": [
+        {
+          "id": "601bcd16-1718-4fd5-9bb7-6c8a99b44a9d",
+          "user_id": "9412725c-7faa-4efa-a654-be78cc40a14f",
+          "role": "teacher",
+          "created_at": "2026-09-07T02:50:53.611935+00:00",
+          "account_status": "Pending",
+          "school_id": null
+        },
+        {
+          "id": "f8f504b6-095b-4ba3-9663-b59f8c02898d",
+          "user_id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
+          "role": "teacher",
+          "created_at": "2026-09-17T11:10:49.377202+00:00",
+          "account_status": "Pending",
+          "school_id": null
+        },
+        {
+          "id": "7a3fa552-6128-4a8c-a642-a036d04fd70c",
+          "user_id": "058ba391-b5b7-41f9-8c03-01f3d570233e",
+          "role": "teacher",
+          "created_at": "2026-09-19T14:12:58.902614+00:00",
+          "account_status": "Pending",
+          "school_id": null
+        },
+        {
+          "id": "63c1744a-bcca-4372-9872-812fb4f23813",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "role": "admin",
+          "created_at": "2026-09-07T02:50:53.611935+00:00",
+          "account_status": "Approved",
+          "school_id": null
+        }
+      ]
+    },
+    "auth_logs": {
+      "status": "OK",
+      "count": 32,
+      "rows": [
+        {
+          "id": "909414d5-7369-41a1-a1e0-359bc07ce731",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-07T03:24:39.97238+00:00"
+        },
+        {
+          "id": "dadcd382-6384-4bdf-be6a-4e15aabfc253",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-07T03:42:47.209819+00:00"
+        },
+        {
+          "id": "e771bdf3-db6d-411f-aea7-9a4ce01c684f",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-11T05:27:10.581969+00:00"
+        },
+        {
+          "id": "5933ab3a-fe2a-4283-a868-0c0d0b2c082d",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-16T10:32:32.209596+00:00"
+        },
+        {
+          "id": "a114700e-6294-4128-90c8-4ac27d85e8dd",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-16T10:44:00.489427+00:00"
+        },
+        {
+          "id": "5a263545-4bd3-4bc8-80d8-f013c2d37962",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T03:54:31.029535+00:00"
+        },
+        {
+          "id": "5d1e7699-328c-4474-82c0-4eb9cac6a415",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T04:56:31.864223+00:00"
+        },
+        {
+          "id": "62fc2fd0-e085-4a5b-9747-fff5e8f87cb2",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T05:43:05.26713+00:00"
+        },
+        {
+          "id": "ba261859-4810-4667-9a48-902eed1a7c1e",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-17T05:43:35.902744+00:00"
+        },
+        {
+          "id": "eabce779-d9d3-47bb-8385-76b900206d9e",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T10:45:33.136301+00:00"
+        },
+        {
+          "id": "d0b137cd-a528-471c-9ba7-18f9b3ea7ca6",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-17T10:45:49.297241+00:00"
+        },
+        {
+          "id": "0545509c-8993-40ad-9c0a-49b589627875",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:11:29.794959+00:00"
+        },
+        {
+          "id": "6f6ff145-d0b7-40b5-8d41-9079025cb76c",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:14:18.001111+00:00"
+        },
+        {
+          "id": "57cc2ceb-42b2-4e19-83bf-a2e66e2abc63",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:14:28.063233+00:00"
+        },
+        {
+          "id": "1bb03e5f-5c3a-4183-ae46-a7e8be160919",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:14:49.230586+00:00"
+        },
+        {
+          "id": "75cbd551-99d4-452b-845f-14071dfe2ab3",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:28:41.304384+00:00"
+        },
+        {
+          "id": "5bdcb094-69d3-4f59-a852-861c4c238c48",
+          "user_id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-17T11:28:51.471015+00:00"
+        },
+        {
+          "id": "4dc91121-549a-4fee-bcc3-ac63df8ca730",
+          "user_id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-18T04:10:17.511473+00:00"
+        },
+        {
+          "id": "bc0f66c1-b8c9-4b0e-aa31-e6971d621474",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T02:33:59.805338+00:00"
+        },
+        {
+          "id": "1ccf67fb-a189-4bc1-9e96-fe88c7476797",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T02:42:48.575619+00:00"
+        },
+        {
+          "id": "9cd9378b-3902-4587-a8cd-5d797b6c71e8",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-19T07:49:33.557887+00:00"
+        },
+        {
+          "id": "062767b2-05f5-42e5-8a70-e70bea9a239b",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T07:53:20.028838+00:00"
+        },
+        {
+          "id": "5f95a5a5-7786-451f-9cef-45a250cb8605",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T08:37:32.263042+00:00"
+        },
+        {
+          "id": "6d6d9156-15da-4efe-b91d-d81922d88d46",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-19T09:51:35.255795+00:00"
+        },
+        {
+          "id": "7f5a7ea5-002b-4e45-be8b-e5e8de0b352f",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T09:52:47.594299+00:00"
+        },
+        {
+          "id": "b0a67f36-93ec-4979-9342-4e6d5c703ebe",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T10:07:08.210402+00:00"
+        },
+        {
+          "id": "69ca8e76-40f8-4603-b784-880c95b62f69",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-19T13:31:37.945924+00:00"
+        },
+        {
+          "id": "491f55a7-33ad-44eb-a348-b96f5d427c94",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-19T13:34:04.551402+00:00"
+        },
+        {
+          "id": "2515c529-02b1-469a-bbb9-8cae42bf93d3",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-20T15:25:39.412269+00:00"
+        },
+        {
+          "id": "e653b04c-0169-45e0-b32f-76b83669012a",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-20T15:25:55.084645+00:00"
+        },
+        {
+          "id": "8990992c-f5f3-4a38-8dfa-6d4da416ea07",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "logout",
+          "ip_address": null,
+          "created_at": "2026-09-20T15:50:25.764378+00:00"
+        },
+        {
+          "id": "b1a58976-b86a-4ac4-8386-8ff89e347eff",
+          "user_id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+          "action": "login",
+          "ip_address": null,
+          "created_at": "2026-09-20T15:52:02.013954+00:00"
+        }
+      ]
+    },
+    "subject_grades": {
+      "status": "OK",
+      "count": 0,
+      "rows": []
+    }
+  },
+  "storage": {
+    "buckets": [
+      {
+        "id": "documents",
+        "name": "documents",
+        "owner": "",
+        "public": false,
+        "type": "STANDARD",
+        "file_size_limit": 10485760,
+        "allowed_mime_types": [
+          "image/jpeg",
+          "image/png",
+          "image/webp",
+          "application/pdf"
+        ],
+        "created_at": "2026-09-06T10:59:46.793Z",
+        "updated_at": "2026-09-06T10:59:46.793Z"
+      }
+    ]
+  },
+  "usersRoster": [
+    {
+      "id": "058ba391-b5b7-41f9-8c03-01f3d570233e",
+      "email": "diegomarayabusiness@gmail.com",
+      "role": "authenticated",
+      "user_metadata": {
+        "account_status": "Pending",
+        "email": "diegomarayabusiness@gmail.com",
+        "email_verified": false,
+        "first_name": "Diego",
+        "last_name": "Maraya",
+        "middle_name": "A",
+        "name_extension": "",
+        "phone_verified": false,
+        "prc": "0202637",
+        "role": "Teacher",
+        "sub": "058ba391-b5b7-41f9-8c03-01f3d570233e"
+      },
+      "created_at": "2026-09-19T14:12:58.903889Z"
+    },
+    {
+      "id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
+      "email": "gomez623justin@gmail.com",
+      "role": "authenticated",
+      "user_metadata": {
+        "account_status": "Approved",
+        "email": "gomez623justin@gmail.com",
+        "email_verified": true,
+        "first_name": "Justin",
+        "last_name": "Gomez",
+        "middle_name": "Loquillano",
+        "name_extension": "",
+        "phone_verified": false,
+        "prc": "0000003",
+        "role": "Teacher",
+        "sub": "6cfe54aa-64dc-403e-9552-a9d0dc4db473"
+      },
+      "created_at": "2026-09-17T11:10:49.380187Z",
+      "email_confirmed_at": "2026-09-17T11:11:49.524024Z"
+    },
+    {
+      "id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
+      "email": "admin@example.com",
+      "role": "authenticated",
+      "user_metadata": {
+        "account_status": "Approved",
+        "first_name": "Admin",
+        "last_name": "N/A",
+        "middle_name": "N/A",
+        "name_extension": "",
+        "role": "Admin"
+      },
+      "created_at": "2026-09-07T02:50:53.611935Z",
+      "email_confirmed_at": "2026-09-07T02:50:53.611935Z"
+    },
+    {
+      "id": "9412725c-7faa-4efa-a654-be78cc40a14f",
+      "email": "teacher@example.com",
+      "role": "authenticated",
+      "user_metadata": {
+        "account_status": "Approved",
+        "first_name": "Teacher",
+        "last_name": "One",
+        "middle_name": "A",
+        "name_extension": "",
+        "prc": "0012345",
+        "role": "Teacher"
+      },
+      "created_at": "2026-09-07T02:50:53.611935Z",
+      "email_confirmed_at": "2026-09-07T02:50:53.611935Z"
+    }
+  ]
+}

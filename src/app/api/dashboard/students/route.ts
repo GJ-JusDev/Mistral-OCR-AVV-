@@ -5,8 +5,9 @@ export async function GET() {
   try {
     const supabase = await createClient();
 
-    // Fetch all students with their subject grades
-    const { data: students, error } = await (supabase as any)
+    let students: any[] = [];
+    // Fetch all students with their subject grades if available
+    const { data: studentWithGrades, error: joinError } = await (supabase as any)
       .from("students")
       .select(`
         *,
@@ -14,9 +15,20 @@ export async function GET() {
       `)
       .order("last_name", { ascending: true });
 
-    if (error) {
-      console.error("[dashboard/students] Error fetching students:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (joinError) {
+      // Fallback: If migration 005 has not been applied yet, query students without subject_grades join
+      const { data: simpleStudents, error: simpleError } = await (supabase as any)
+        .from("students")
+        .select("*")
+        .order("last_name", { ascending: true });
+
+      if (simpleError) {
+        console.error("[dashboard/students] Error fetching students:", simpleError);
+        return NextResponse.json({ error: simpleError.message }, { status: 500 });
+      }
+      students = simpleStudents || [];
+    } else {
+      students = studentWithGrades || [];
     }
 
     const flagged: any[] = [];

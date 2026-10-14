@@ -5,7 +5,7 @@ import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import { Card } from "@/components/ui/Card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
-import { getUsers, verifyAndRevealPrc } from "@/actions/users";
+import { getUsers, getSchools, verifyAndRevealPrc } from "@/actions/users";
 import { CheckCircle, Clock, XCircle, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -99,16 +99,25 @@ function PrcVisibilityCell({ userId, hasPrc }: { userId: string, hasPrc: boolean
 
 export default function UsersPage() {
   const [users, setUsers] = useState<any[]>([]);
+  const [schools, setSchools] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   async function fetchUsers() {
     setLoading(true);
-    const res = await getUsers();
-    if (res.error) {
-      setError(res.error);
+    const [userRes, schoolRes] = await Promise.all([
+      getUsers(),
+      getSchools()
+    ]);
+
+    if (userRes.error) {
+      setError(userRes.error);
     } else {
-      setUsers(res.users || []);
+      setUsers(userRes.users || []);
+    }
+
+    if (schoolRes.schools) {
+      setSchools(schoolRes.schools);
     }
     setLoading(false);
   }
@@ -135,6 +144,7 @@ export default function UsersPage() {
                   <TableHead>Email</TableHead>
                   <TableHead>Full Name</TableHead>
                   <TableHead>Role</TableHead>
+                  <TableHead>School</TableHead>
                   <TableHead>PRC Info</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Actions</TableHead>
@@ -143,13 +153,13 @@ export default function UsersPage() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={7} className="text-center py-8 text-slate-500">
                       Loading users...
                     </TableCell>
                   </TableRow>
                 ) : users.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={7} className="text-center py-8 text-slate-500">
                       No users found.
                     </TableCell>
                   </TableRow>
@@ -157,15 +167,17 @@ export default function UsersPage() {
                   users.map(user => {
                     const meta = user.user_metadata || {};
                     const fullName = [meta.first_name, meta.middle_name, meta.last_name, meta.name_extension].filter(Boolean).join(" ");
-                    const isPending = meta.account_status === "Pending";
-                    const isDeclined = meta.account_status === "Declined";
-                    const role = meta.role || "Teacher";
+                    const isPending = user.db_account_status === "Pending" || meta.account_status === "Pending";
+                    const isDeclined = user.db_account_status === "Declined" || meta.account_status === "Declined";
+                    const role = user.db_role || meta.role || "Teacher";
+                    const schoolDisplay = user.school_name || (user.school_id ? "Assigned School" : "Unassigned");
                     
                     return (
                       <TableRow key={user.id}>
                         <TableCell className="font-medium">{user.email}</TableCell>
                         <TableCell>{fullName || "N/A"}</TableCell>
                         <TableCell className="capitalize">{role}</TableCell>
+                        <TableCell className="text-sm text-slate-600">{schoolDisplay}</TableCell>
                         <TableCell>
                           {role.toLowerCase() === "teacher" ? (
                             <PrcVisibilityCell userId={user.id} hasPrc={meta.has_prc === true} />
@@ -176,11 +188,11 @@ export default function UsersPage() {
                         <TableCell>
                           <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${isPending ? 'bg-amber-100 text-amber-800' : isDeclined ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}`}>
                             {isPending ? <Clock className="h-3.5 w-3.5" /> : isDeclined ? <XCircle className="h-3.5 w-3.5" /> : <CheckCircle className="h-3.5 w-3.5" />}
-                            {meta.account_status || "Approved"}
+                            {user.db_account_status || meta.account_status || "Approved"}
                           </span>
                         </TableCell>
                         <TableCell>
-                          <UserActions user={user} fetchUsers={fetchUsers} />
+                          <UserActions user={user} schools={schools} fetchUsers={fetchUsers} />
                         </TableCell>
                       </TableRow>
                     );

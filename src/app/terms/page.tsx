@@ -5,18 +5,18 @@ import { Card } from "@/components/ui/Card";
 export default function TermsPage() {
   return (
     <PageContainer>
-      <Header title="Terms and Conditions" description="Please read our terms carefully before using the system." />
+      <Header title="Terms and Conditions" description="Please read our terms carefully before using the Automated Visual Validation System (AVV)." />
       <div className="mt-6 max-w-4xl mx-auto">
         <Card padding="lg" className="bg-white shadow-sm border-[#dee2e6]">
           <div className="prose prose-zinc max-w-none text-[#212529]">
             <h2 className="text-xl font-semibold mb-4">1. Acceptance of Terms</h2>
             <p className="mb-6 text-[#495057]">
-              By registering for and using this OCR Document Validation System, you agree to be bound by these Terms and Conditions. If you do not agree with any part of these terms, you may not use our services.
+              By registering for and using the Automated Visual Validation System (AVV), you agree to be bound by these Terms and Conditions. If you do not agree with any part of these terms, you may not use our services.
             </p>
 
             <h2 className="text-xl font-semibold mb-4 text-red-600">2. Developer Liability & Indemnification</h2>
             <p className="mb-6 text-[#495057]">
-              <strong>Important Notice:</strong> The original developers and creators of this system are <strong>NOT LIABLE</strong> for any damages, fines, data breaches, or legal repercussions that may arise from the use of this software. The system is now deployed, operated, and handled entirely by external administrators and the respective educational institutions. By using this system, you acknowledge that the original developers have no ongoing control over its data or operations, and you agree to hold the developers harmless from any claims, liabilities, or fines.
+              <strong>Important Notice:</strong> The original developers and creators of the Automated Visual Validation System (AVV) are <strong>NOT LIABLE</strong> for any damages, fines, data breaches, or legal repercussions that may arise from the use of this software. The system is now deployed, operated, and handled entirely by external administrators and the respective educational institutions. By using this system, you acknowledge that the original developers have no ongoing control over its data or operations, and you agree to hold the developers harmless from any claims, liabilities, or fines.
             </p>
 
             <h2 className="text-xl font-semibold mb-4">3. Privacy and Data Usage</h2>

@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Automated Visual Validation System — Taysan Resettlement Integrated School",
+  title: "Automated Visual Validation System (AVV) — Taysan Resettlement Integrated School",
   description: "Upload, validate, and manage school documents with OCR-powered field extraction and automated validation.",
 };
 

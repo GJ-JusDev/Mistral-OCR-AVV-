@@ -38,7 +38,7 @@ export default function RegisterPage() {
           <GraduationCap className="h-8 w-8" />
         </div>
         <h1 className="text-3xl font-semibold tracking-tight text-[#212529]">Teacher Registration</h1>
-        <p className="mt-3 text-base text-[#6c757d]">Create your account to start validating documents</p>
+        <p className="mt-3 text-base text-[#6c757d]">Create your account to start validating documents with AVV</p>
       </div>
 
       <Card padding="lg" className="w-full max-w-lg bg-white border-[#dee2e6] shadow-sm">
@@ -147,7 +147,7 @@ export default function RegisterPage() {
       </Card>
 
       <div className="mt-12 text-center text-sm text-[#6c757d] pb-8">
-        <p>&copy; {new Date().getFullYear()} All rights reserved. Taysan Resettlement Integrated School.</p>
+        <p>&copy; {new Date().getFullYear()} Automated Visual Validation System (AVV). All rights reserved. Taysan Resettlement Integrated School.</p>
       </div>
 
       {isTermsOpen && (
@@ -156,7 +156,7 @@ export default function RegisterPage() {
             <h2 className="text-xl font-bold mb-4 text-[#212529]">Terms and Conditions</h2>
             <div className="flex-1 overflow-y-auto pr-2 text-sm text-[#495057] space-y-4">
               <p>
-                <strong>1. Acceptance of Terms:</strong> By registering, you agree to use this system exclusively for official school validation purposes.
+                <strong>1. Acceptance of Terms:</strong> By registering, you agree to use the Automated Visual Validation System (AVV) exclusively for official school validation purposes.
               </p>
               <p>
                 <strong>2. Data Privacy (DepEd Compliance):</strong> In strict compliance with the Data Privacy Act of 2012 (RA 10173) and DepEd data privacy policies, all student records, particularly grades and LRNs, are highly confidential. No grades or student information shall be disclosed, leaked, or thrown out carelessly. You are strictly prohibited from sharing extracted data outside authorized school channels.
@@ -165,7 +165,7 @@ export default function RegisterPage() {
                 <strong>3. Verification Duty:</strong> Automated extractions must be verified. You agree to manually review flagged documents and ensure accuracy before final approval.
               </p>
               <p>
-                <strong>4. Developer Liability Disclaimer:</strong> The Automated Visual Validation System (AVVS) is provided "as is". The developers are not liable for any discrepancies, errors in extraction, or subsequent issues arising from unverified data. Final data accuracy relies on the human reviewer.
+                <strong>4. Developer Liability Disclaimer:</strong> The Automated Visual Validation System (AVV) is provided &quot;as is&quot;. The developers are not liable for any discrepancies, errors in extraction, or subsequent issues arising from unverified data. Final data accuracy relies on the human reviewer.
               </p>
             </div>
             <div className="mt-6 flex justify-end">

@@ -22,7 +22,7 @@ export default function LoginPage() {
         <div className="flex h-14 w-14 items-center justify-center rounded-sm bg-[#212529] text-white shadow-sm mb-5">
           <GraduationCap className="h-8 w-8" />
         </div>
-        <h1 className="text-3xl font-semibold tracking-tight text-[#212529]">Sign in to Automated Visual Validation System</h1>
+        <h1 className="text-3xl font-semibold tracking-tight text-[#212529]">Sign in to Automated Visual Validation System (AVV)</h1>
         <p className="mt-3 text-base text-[#6c757d]">Taysan Resettlement Integrated School</p>
       </div>
 
@@ -74,7 +74,7 @@ export default function LoginPage() {
       </Card>
 
       <div className="mt-12 text-center text-sm text-[#6c757d]">
-        <p>&copy; {new Date().getFullYear()} All rights reserved. Taysan Resettlement Integrated School.</p>
+        <p>&copy; {new Date().getFullYear()} Automated Visual Validation System (AVV). All rights reserved. Taysan Resettlement Integrated School.</p>
       </div>
     </div>
   );

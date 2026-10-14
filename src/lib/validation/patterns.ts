@@ -58,3 +58,18 @@ export function normalizeSex(raw: string): "M" | "F" | "" {
   if (trimmed === "F" || trimmed === "FEMALE") return "F";
   return "";
 }
+
+/** DepEd School Year pattern: e.g. "2023-2024", "2024-2025" */
+export const SCHOOL_YEAR_PATTERN = /^(?:S\.?Y\.?\s*)?(?:20\d{2})\s*[-–/]\s*(?:20\d{2})$/i;
+
+/**
+ * Check if a school year string is valid DepEd format with consecutive years.
+ */
+export function isValidSchoolYear(raw: string): boolean {
+  if (!raw) return false;
+  const match = raw.trim().match(/^(?:S\.?Y\.?\s*)?(20\d{2})\s*[-–/]\s*(20\d{2})$/i);
+  if (!match) return false;
+  const start = parseInt(match[1], 10);
+  const end = parseInt(match[2], 10);
+  return end === start + 1;
+}

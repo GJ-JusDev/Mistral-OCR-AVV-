@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { 
@@ -17,7 +17,6 @@ import {
   UserCheck
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
-import { createClient } from "@/lib/supabase/client";
 
 const baseNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
@@ -63,11 +62,14 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
       )}
 
       <div className={`fixed inset-y-0 left-0 z-40 w-64 transform flex-col border-r border-[#dee2e6] bg-[#f8f9fa] transition-transform duration-200 ease-in-out md:sticky md:top-0 md:flex md:translate-x-0 h-screen ${isOpen ? "flex translate-x-0" : "-translate-x-full"}`}>
-        <div className="flex h-16 shrink-0 items-center gap-2 border-b border-[#dee2e6] px-6 bg-white">
-          <div className="flex h-8 w-8 items-center justify-center rounded-sm bg-[#212529] text-white">
+        <div className="flex h-16 shrink-0 items-center gap-3 border-b border-[#dee2e6] px-5 bg-white" title="Automated Visual Validation System (AVV)">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm bg-[#212529] text-white">
             <GraduationCap className="h-5 w-5" />
           </div>
-          <span className="font-semibold text-[#212529] text-base tracking-tight leading-tight">Automated Visual Validation System</span>
+          <div className="flex flex-col min-w-0">
+            <span className="font-bold text-[#212529] text-sm leading-tight tracking-tight">AVV</span>
+            <span className="text-[0.65rem] text-[#6c757d] font-medium leading-tight truncate">Automated Visual Validation System</span>
+          </div>
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto p-3">

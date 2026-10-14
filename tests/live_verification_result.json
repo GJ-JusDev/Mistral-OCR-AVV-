@@ -1,0 +1,38 @@
+{
+  "envAndConnectivity": {
+    "status": "PASS",
+    "evidence": "URL: https://yhsmawyntabwghncqbqy.supabase.co, PostgREST online, Auth reachable with 4 registered users."
+  },
+  "storageUploadAndPersistence": {
+    "status": "PASS",
+    "evidence": "File stored at verification/test_sf9_1791868883454.png (67 bytes). Public URL generated: https://yhsmawyntabwghncqbqy.supabase.co/storage/v1/object/public/documents/verification/test_sf9_1791868883454.png"
+  },
+  "studentCreationAndLinking": {
+    "status": "PASS",
+    "evidence": "Created student MARIA DELA CRUZ with LRN 999868883454 (ID: 9565558d-62c2-4536-91b1-a7c5a0789df0)"
+  },
+  "documentPersistenceAndOCRMetadata": {
+    "status": "PASS",
+    "evidence": "Created document ID: c56bbaa0-e113-4904-bd07-d5e02e574668, Type: sf9, Status: validated, Linked Student ID: 9565558d-62c2-4536-91b1-a7c5a0789df0"
+  },
+  "validationResultsPersistence": {
+    "status": "PASS",
+    "evidence": "Persisted 3 validation rule results linked to document c56bbaa0-e113-4904-bd07-d5e02e574668"
+  },
+  "fieldCorrectionAuditTrail": {
+    "status": "PASS",
+    "evidence": "Field corrected on document c56bbaa0-e113-4904-bd07-d5e02e574668, review_log c1dc6b03-1c14-460c-89f1-26976196cfa6 recorded with action 'correct'"
+  },
+  "documentApprovalRejection": {
+    "status": "PASS",
+    "evidence": "Document successfully transitioned rejected -> approved. Log d71d722f-da29-4852-8a3c-6658581ffd54 recorded with action 'approve'"
+  },
+  "gradePersistenceStatus": {
+    "status": "BLOCKED",
+    "evidence": "Table 'subject_grades' does not exist in PostgreSQL (Could not find the table 'public.subject_grades' in the schema cache). Migration 005_grades_and_status.sql and 007_fix_grades_trigger.sql must be applied via Supabase Dashboard SQL Editor."
+  },
+  "rowLevelSecurityVerification": {
+    "status": "PASS",
+    "evidence": "Anon client blocked from querying protected user_roles/auth_logs (0 rows returned, error: infinite recursion detected in policy for relation \"user_roles\"). Service role client maintains full administrative access."
+  }
+}

@@ -1,4 +1,4 @@
-# DocuValidate System — Class Diagram
+# Automated Visual Validation System (AVV) — Class Diagram
 
 ## Full System Class Diagram
 

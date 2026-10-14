@@ -6,7 +6,7 @@
  */
 
 import type { ExtractedFields } from "@/types/documents";
-import { normalizeLrn, normalizeSex } from "../validation/patterns";
+import { normalizeLrn, normalizeSex, isValidLrn, isValidSchoolYear } from "../validation/patterns";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -129,6 +129,19 @@ const ALL_LABELS = [
   "Track/ Strand",
   "Track",
   "Strand",
+  "School Year",
+  "School Yr",
+  "SY",
+  "S.Y.",
+  "Taong Panuruan",
+  "Birth Date",
+  "Date of Birth",
+  "DOB",
+  "Kapanganakan",
+  "Adviser",
+  "Class Adviser",
+  "Guro",
+  "Semester",
   "Sex",
   "Gender",
   "Address",
@@ -225,6 +238,63 @@ export function parseOcrText(text: string): ExtractedFields {
     extractField(text, "Track", otherLabels) ||
     extractField(text, "Strand", otherLabels);
 
+  // School Year
+  let schoolYear =
+    extractField(text, "School Year", otherLabels) ||
+    extractField(text, "School Yr", otherLabels) ||
+    extractField(text, "SY", otherLabels) ||
+    extractField(text, "S.Y.", otherLabels) ||
+    extractField(text, "Taong Panuruan", otherLabels);
+
+  if (!schoolYear) {
+    // Regex match for YYYY-YYYY or SY YYYY-YYYY in text
+    const syMatch = text.match(/\b(?:S\.?Y\.?\s*)?(20\d{2})\s*[-–/]\s*(20\d{2})\b/i);
+    if (syMatch) {
+      schoolYear = `${syMatch[1]}-${syMatch[2]}`;
+    }
+  } else {
+    // Normalize format
+    const syClean = schoolYear.match(/(20\d{2})\s*[-–/]\s*(20\d{2})/);
+    if (syClean) {
+      schoolYear = `${syClean[1]}-${syClean[2]}`;
+    }
+  }
+
+  // School ID
+  let schoolId =
+    extractField(text, "School ID", otherLabels) ||
+    extractField(text, "School Id", otherLabels);
+  if (schoolId) {
+    const idMatch = schoolId.match(/\b\d{6}\b/);
+    if (idMatch) schoolId = idMatch[0];
+  } else {
+    const idMatch = text.match(/\b(?:School\s*ID|School\s*Id|ID ng Paaralan)[\s:]*(\d{6})\b/i);
+    if (idMatch) schoolId = idMatch[1];
+  }
+
+  // Birth Date
+  const birthDate =
+    extractField(text, "Birth Date", otherLabels) ||
+    extractField(text, "Date of Birth", otherLabels) ||
+    extractField(text, "DOB", otherLabels) ||
+    extractField(text, "Kapanganakan", otherLabels);
+
+  // Adviser
+  const adviser =
+    extractField(text, "Adviser", otherLabels) ||
+    extractField(text, "Class Adviser", otherLabels) ||
+    extractField(text, "Guro", otherLabels);
+
+  // Section
+  const section =
+    extractField(text, "Section", otherLabels) ||
+    extractField(text, "Pangkat", otherLabels);
+
+  // Semester
+  const semester =
+    extractField(text, "Semester", otherLabels) ||
+    (text.match(/\b(1st|2nd|First|Second)\s+Semester\b/i)?.[0] || "");
+
   // Sex
   const rawSex =
     extractField(text, "Sex", otherLabels) ||
@@ -232,11 +302,34 @@ export function parseOcrText(text: string): ExtractedFields {
     extractField(text, "Kasarian", otherLabels); // Filipino label
   const sex = normalizeSex(rawSex) || rawSex;
 
+  // Document Type detection (SF9 vs SF10)
+  let detectedDocType: "sf9" | "sf10" = "sf9";
+  if (/\b(?:SF10|SF-10|Form 137|Permanent Record)\b/i.test(text)) {
+    detectedDocType = "sf10";
+  } else if (/\b(?:SF9|SF-9|Form 138|Report Card)\b/i.test(text)) {
+    detectedDocType = "sf9";
+  }
+
   // Compose the full name for display.
   const composedName = fullName ||
     [nameParts.first_name, nameParts.middle_name, nameParts.last_name]
       .filter(Boolean)
       .join(" ");
+
+  // Identify missing or uncertain fields without guessing
+  const flags: string[] = [];
+  if (!lrn || !isValidLrn(lrn)) {
+    flags.push("missing_or_invalid_lrn");
+  }
+  if (!schoolYear || !isValidSchoolYear(schoolYear)) {
+    flags.push("missing_or_uncertain_school_year");
+  }
+  if (!composedName || composedName.trim().length < 3) {
+    flags.push("missing_student_name");
+  }
+  if (!schoolName) {
+    flags.push("missing_school_name");
+  }
 
   return {
     name: composedName,
@@ -245,9 +338,17 @@ export function parseOcrText(text: string): ExtractedFields {
     last_name: nameParts.last_name,
     lrn,
     grade_level: gradeLevel,
+    school_year: schoolYear,
     school_name: schoolName,
+    school_id: schoolId,
+    birth_date: birthDate,
+    adviser,
+    section,
+    semester,
     track_strand: trackStrand,
     sex,
+    document_type: detectedDocType,
+    flags,
   };
 }
 

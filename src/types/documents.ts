@@ -20,14 +20,24 @@ export type ExtractedFields = {
   first_name?: string
   middle_name?: string
   last_name?: string
+  suffix?: string
   lrn?: string
   grade_level?: string
+  school_year?: string
   school_name?: string
+  school_id?: string
+  birth_date?: string
+  adviser?: string
+  section?: string
+  semester?: string
   track_strand?: string
   sex?: string
+  document_type?: string
   grades?: GradeRecord[]
+  general_average?: number
   attendance?: AttendanceRecord[]
   attendance_months?: string[]
+  flags?: string[]
   [key: string]: any  // allow additional fields
 }
 

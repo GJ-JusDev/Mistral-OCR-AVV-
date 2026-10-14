@@ -20,7 +20,8 @@ export default function ReviewQueuePage() {
         const res = await fetch("/api/documents?status=needs_review");
         if (!res.ok) throw new Error("Failed to fetch review queue");
         const data = await res.json();
-        setDocuments(data.documents || []);
+        const docs = Array.isArray(data) ? data : (data.documents || []);
+        setDocuments(docs);
       } catch (err: any) {
         setError(err.message);
       } finally {
