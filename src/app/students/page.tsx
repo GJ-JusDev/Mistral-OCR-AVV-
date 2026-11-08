@@ -146,6 +146,8 @@ export default function StudentsPage() {
       <Header
         title="Student Directory"
         description="Official student profiles, enrollment, human document review status, and academic validation records."
+        roleBadge={{ role: "teacher", label: "Faculty Validator" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
       />
 
       <div className="mt-6 space-y-6">

@@ -25,6 +25,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized: Please log in to view student records." }, { status: 401 });
     }
 
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
+    }
+
     // Query students with joined school name and attached documents for authoritative verification status
     const { data, error } = await supabase
       .from('students')

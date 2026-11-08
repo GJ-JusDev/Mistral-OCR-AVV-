@@ -3,6 +3,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { revalidatePath } from "next/cache";
 import { createClient as createServerClient } from "@/lib/supabase/server";
+import { logAuditEvent } from "@/lib/audit/auditLogger";
 
 function getAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -136,6 +137,19 @@ export async function verifyAndRevealPrc(targetUserId: string, adminPassword: st
     return { error: "User not found" };
   }
 
+  // Audit PRC license verification and reveal event
+  await logAuditEvent({
+    category: "USER_MANAGEMENT",
+    action: "USER_PRC_ACCESSED",
+    outcome: "SUCCESS",
+    actorUserId: user.id,
+    actorEmail: user.email,
+    actorRole: "admin",
+    targetType: "user",
+    targetId: targetUserId,
+    reason: "Administrator verified identity and viewed PRC license",
+  });
+
   return { prc: targetUser.user.user_metadata?.prc };
 }
 
@@ -199,19 +213,47 @@ export async function approveUser(userId: string, schoolId: string, role: string
     return { error: updateError.message };
   }
 
+  const operationId = crypto.randomUUID();
+
   // Update authoritative status, role, and school assignment in database table public.user_roles
   const { error: roleDbErr } = await adminClient
     .from("user_roles")
     .update({ 
       account_status: "Approved",
       role: validRole,
-      school_id: schoolId
+      school_id: schoolId,
+      updated_by: user.id,
+      last_operation_id: operationId,
     })
     .eq("user_id", userId);
 
   if (roleDbErr) {
     return { error: roleDbErr.message };
   }
+
+  // Audit account approval
+  await logAuditEvent({
+    requestId: operationId,
+    category: "USER_MANAGEMENT",
+    action: "ACCOUNT_APPROVED",
+    outcome: "SUCCESS",
+    actorUserId: user.id,
+    actorEmail: user.email,
+    actorRole: "admin",
+    actorSchoolId: schoolId,
+    actorSchoolName: school.name,
+    targetType: "user",
+    targetId: userId,
+    targetLabel: `${targetUser.user.user_metadata?.first_name || ""} ${targetUser.user.user_metadata?.last_name || ""}`.trim() || targetUser.user.email,
+    reason: `Administrator approved registration for ${validRole} at ${school.name}`,
+    details: {
+      previous_status: currentMetadata.account_status || "Pending",
+      new_status: "Approved",
+      assigned_role: validRole,
+      assigned_school_id: schoolId,
+      assigned_school_name: school.name,
+    },
+  });
 
   revalidatePath("/admin/users");
   return { success: true };
@@ -253,11 +295,36 @@ export async function declineUser(userId: string) {
     return { error: updateError.message };
   }
 
+  const operationId = crypto.randomUUID();
+
   // Update authoritative status in database table public.user_roles
   await adminClient
     .from("user_roles")
-    .update({ account_status: "Declined" })
+    .update({ 
+      account_status: "Declined",
+      updated_by: user.id,
+      last_operation_id: operationId,
+    })
     .eq("user_id", userId);
+
+  // Audit account decline
+  await logAuditEvent({
+    requestId: operationId,
+    category: "USER_MANAGEMENT",
+    action: "ACCOUNT_DECLINED",
+    outcome: "SUCCESS",
+    actorUserId: user.id,
+    actorEmail: user.email,
+    actorRole: "admin",
+    targetType: "user",
+    targetId: userId,
+    targetLabel: `${targetUser.user.user_metadata?.first_name || ""} ${targetUser.user.user_metadata?.last_name || ""}`.trim() || targetUser.user.email,
+    reason: "Administrator declined staff account registration",
+    details: {
+      previous_status: currentMetadata.account_status || "Pending",
+      new_status: "Declined",
+    },
+  });
 
   revalidatePath("/admin/users");
   return { success: true };
@@ -418,6 +485,17 @@ export async function deleteDeclinedUser(targetUserId: string) {
     };
   }
 
+  const operationId = crypto.randomUUID();
+
+  // Explicitly attribute deletion to the authenticated admin before removal
+  await adminClient
+    .from("user_roles")
+    .update({
+      updated_by: user.id,
+      last_operation_id: operationId,
+    })
+    .eq("user_id", targetUserId);
+
   // 8. Use Supabase Admin API only on the server to safely remove user
   const { error: deleteAuthErr } = await adminClient.auth.admin.deleteUser(targetUserId);
   if (deleteAuthErr) {
@@ -434,6 +512,25 @@ export async function deleteDeclinedUser(targetUserId: string) {
   if (deleteRoleErr) {
     console.warn("Notice: user_roles cleanup error or already removed by cascade:", deleteRoleErr.message);
   }
+
+  // Audit permanent account deletion
+  await logAuditEvent({
+    requestId: operationId,
+    category: "USER_MANAGEMENT",
+    action: "ACCOUNT_DELETED",
+    outcome: "SUCCESS",
+    actorUserId: user.id,
+    actorEmail: user.email,
+    actorRole: "admin",
+    targetType: "user",
+    targetId: targetUserId,
+    targetLabel: `Teacher ID: ${targetUserId}`,
+    reason: "Administrator permanently deleted declined teacher account",
+    details: {
+      deleted_role: targetRoleRow.role,
+      deleted_status: targetRoleRow.account_status,
+    },
+  });
 
   revalidatePath("/admin/users");
   return { success: true };
@@ -462,6 +559,9 @@ export async function updateUser(targetUserId: string, adminPassword: string, up
 }) {
   const verifyRes = await verifyAdminPassword(adminPassword);
   if (verifyRes.error) return verifyRes;
+
+  const serverClient = await createServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
 
   const adminClient = getAdminClient();
   const { data: targetUser, error: getUserError } = await adminClient.auth.admin.getUserById(targetUserId);
@@ -511,7 +611,10 @@ export async function updateUser(targetUserId: string, adminPassword: string, up
   }
 
   // Synchronize authoritative role and school assignment in public.user_roles
-  const roleUpdates: { role?: any; school_id?: any } = {};
+  const roleUpdates: { role?: any; school_id?: any; updated_by?: string; last_operation_id?: string } = {
+    updated_by: user?.id,
+    last_operation_id: crypto.randomUUID(),
+  };
   if (normalizedRole) roleUpdates.role = normalizedRole;
   if (updates.school_id !== undefined) roleUpdates.school_id = updates.school_id;
   

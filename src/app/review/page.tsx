@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import DocumentTable from "@/components/documents/DocumentTable";
-import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { LoadingState } from "@/components/ui/LoadingState";
+import { DataTableContainer } from "@/components/ui/DataTableContainer";
+import { Button } from "@/components/ui/Button";
+import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 import { type Document } from "@/types/database";
 
 export default function ReviewQueuePage() {
@@ -14,20 +17,23 @@ export default function ReviewQueuePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchReviewQueue() {
-      try {
-        const res = await fetch("/api/documents?status=needs_review");
-        if (!res.ok) throw new Error("Failed to fetch review queue");
-        const data = await res.json();
-        const docs = Array.isArray(data) ? data : (data.documents || []);
-        setDocuments(docs);
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
+  async function fetchReviewQueue() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/documents?status=needs_review");
+      if (!res.ok) throw new Error("Failed to fetch review queue");
+      const data = await res.json();
+      const docs = Array.isArray(data) ? data : (data.documents || []);
+      setDocuments(docs);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
+  }
+
+  useEffect(() => {
     fetchReviewQueue();
   }, []);
 
@@ -37,28 +43,62 @@ export default function ReviewQueuePage() {
 
   return (
     <PageContainer>
-      <Header title="Review Queue" />
-      <div className="mt-6">
-        <p className="mb-4 text-zinc-600 dark:text-zinc-400">
-          The following documents require manual review before they can be finalized.
-        </p>
-        
-        {loading ? (
-          <div className="flex justify-center p-8">
-            <LoadingSpinner size="lg" />
+      <Header 
+        title="Review & Verification Queue" 
+        description="Documents flagged with grade discrepancies, missing quarters, or name mismatches requiring teacher examination before final approval."
+        roleBadge={{ role: "teacher", label: "Faculty Validator" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        actions={
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={fetchReviewQueue}
+            leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          >
+            Refresh Queue
+          </Button>
+        }
+      />
+
+      <div className="mt-6 flex flex-col gap-6">
+        {/* Notice banner */}
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200/80 flex items-start gap-3 shadow-xs">
+          <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="text-xs sm:text-sm text-amber-900 leading-relaxed">
+            <strong className="font-semibold block mb-0.5">Faculty Verification Duty:</strong>
+            DepEd policy (DO 8, s. 2015 & DO 55, s. 2016) mandates that teachers must inspect the original scanned document image to confirm printed grades versus computed quarter averages. Flagged items do NOT automatically pass or fail.
           </div>
-        ) : error ? (
-          <div className="text-red-600 p-4 bg-red-50 dark:bg-red-900/20 dark:text-red-400 rounded-md">
-            Error: {error}
+        </div>
+
+        {error && (
+          <div role="alert" className="p-4 rounded-xl bg-red-50 border border-red-200 text-xs sm:text-sm text-red-700">
+            Error loading queue: {error}
           </div>
-        ) : documents.length === 0 ? (
-          <div className="p-8 text-center bg-zinc-50 dark:bg-zinc-800 rounded-lg border border-zinc-200 dark:border-zinc-700">
-            <h3 className="text-lg font-medium text-zinc-800 dark:text-zinc-200">All caught up!</h3>
-            <p className="text-zinc-500 dark:text-zinc-400 mt-2">There are no documents currently awaiting review.</p>
-          </div>
-        ) : (
-          <DocumentTable documents={documents} onRowClick={handleRowClick} />
         )}
+
+        <DataTableContainer
+          title="Flagged Submissions"
+          description="Click any document to inspect OCR extraction fields against the original scan."
+          itemCount={documents.length}
+        >
+          {loading ? (
+            <div className="py-12">
+              <LoadingState message="Checking verification queue..." subMessage="Filtering documents flagged for review" />
+            </div>
+          ) : documents.length === 0 ? (
+            <div className="p-10 text-center bg-white rounded-xl border border-dashed border-slate-300">
+              <div className="h-12 w-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto mb-3 border border-emerald-200">
+                <CheckCircle2 className="h-6 w-6" />
+              </div>
+              <h3 className="text-base font-bold text-[#0B1F33]">Review Queue is Clear!</h3>
+              <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-sm mx-auto">
+                There are no documents currently awaiting manual teacher verification.
+              </p>
+            </div>
+          ) : (
+            <DocumentTable documents={documents} onRowClick={handleRowClick} />
+          )}
+        </DataTableContainer>
       </div>
     </PageContainer>
   );

@@ -28,7 +28,7 @@ export function ProcessingChart({ data, title = "Processing Volume Distribution"
           "#059669", // Emerald 600
           "#2563eb", // Blue 600
           "#db2777", // Pink 600
-          "#7c3aed", // Violet 600
+          "#174EA6", // Royal Blue
           "#ea580c", // Orange 600
           "#0891b2", // Cyan 600
         ],

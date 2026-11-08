@@ -1,12 +1,14 @@
 "use client";
 
-import React from 'react';
+import React from "react";
+import { FolderOpen } from "lucide-react";
 
 export interface EmptyStateProps {
   icon?: React.ReactNode;
   title: string;
   description?: string;
   action?: React.ReactNode;
+  className?: string;
 }
 
 export const EmptyState: React.FC<EmptyStateProps> = ({
@@ -14,19 +16,24 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   title,
   description,
   action,
+  className = "",
 }) => {
   return (
-    <div className="flex flex-col items-center justify-center p-8 text-center rounded-xl border border-dashed border-zinc-300 bg-zinc-50/50 dark:border-zinc-800 dark:bg-zinc-900/20">
-      {icon && (
-        <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
-          {icon}
-        </div>
-      )}
-      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{title}</h3>
+    <div
+      className={`flex flex-col items-center justify-center p-8 sm:p-12 text-center rounded-xl border border-dashed border-slate-300 bg-slate-50/50 ${className}`}
+    >
+      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-[#174EA6]/10 text-[#174EA6] shadow-sm">
+        {icon || <FolderOpen className="h-7 w-7" />}
+      </div>
+      <h3 className="text-base font-semibold text-[#0B1F33]">{title}</h3>
       {description && (
-        <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400 max-w-sm">{description}</p>
+        <p className="mt-1.5 text-xs sm:text-sm text-slate-500 max-w-md leading-relaxed">
+          {description}
+        </p>
       )}
-      {action && <div className="mt-6">{action}</div>}
+      {action && <div className="mt-5">{action}</div>}
     </div>
   );
 };
+
+export default EmptyState;

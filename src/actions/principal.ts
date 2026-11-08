@@ -6,6 +6,7 @@ import { compareUnifiedStudentDocuments, RawNameFields } from "@/lib/validation/
 import { evaluateShsStudentEligibility, EvaluatedSubject, ShsEligibilityType } from "@/lib/eligibility/evaluator";
 import type { RemedialStatus } from "@/lib/remedial/remedialEvaluator";
 import { revalidatePath } from "next/cache";
+import { logAuditEvent } from "@/lib/audit/auditLogger";
 
 // Default single institution scope (TRIS)
 const TRIS_UUID = "a0000000-0000-0000-0000-000000000001";
@@ -1130,6 +1131,7 @@ export async function approveStudentEligibility(input: {
 
     // Upsert into eligibility_approvals
     let approvalId: string | null = null;
+    const operationId = crypto.randomUUID();
     const normalizedGrade: "Grade 11" | "Grade 12" = /12/i.test(gradeLevel) ? "Grade 12" : "Grade 11";
     const approvalPayload = {
       student_id: studentId,
@@ -1143,6 +1145,7 @@ export async function approveStudentEligibility(input: {
       approved_at: new Date().toISOString(),
       remarks: remarks?.trim() || null,
       updated_at: new Date().toISOString(),
+      last_operation_id: operationId,
     };
 
     const { data: upsertData, error: upsertError } = await supabase
@@ -1197,6 +1200,29 @@ export async function approveStudentEligibility(input: {
           .eq("id", studentId);
       }
     }
+
+    // Centralized administrative audit logging for graduation/progression eligibility decision
+    await logAuditEvent({
+      requestId: operationId,
+      category: "ELIGIBILITY",
+      action: "ELIGIBILITY_DECISION",
+      outcome: decision === "Approved" ? "SUCCESS" : "WARNING",
+      actorUserId: user.id,
+      actorEmail: user.email,
+      actorRole: "principal",
+      actorSchoolId: schoolId,
+      targetType: "student",
+      targetId: studentId,
+      targetLabel: `${studentDetails.student.firstName || ""} ${studentDetails.student.lastName || ""}`.trim() || studentId,
+      reason: remarks || `Principal ${decision} eligibility for ${eligibilityType}`,
+      details: {
+        eligibility_type: eligibilityType,
+        decision,
+        grade_level: gradeLevel,
+        school_year: schoolYear,
+        approval_id: approvalId,
+      },
+    });
 
     revalidatePath("/principal/students");
     revalidatePath("/principal/academic");

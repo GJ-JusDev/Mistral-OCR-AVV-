@@ -110,7 +110,7 @@ export default function PrincipalAcademicView({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-6 border-b border-zinc-200">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#7c3aed]/10 text-[#7c3aed]">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#174EA6]/10 text-[#174EA6]">
               <GraduationCap className="h-3.5 w-3.5" />
               Academic Performance Overview
             </span>
@@ -128,16 +128,16 @@ export default function PrincipalAcademicView({
       </div>
 
       {/* Authoritative Data Banner */}
-      <div className="mt-6 p-3.5 bg-[#7c3aed]/5 border border-[#7c3aed]/20 rounded-lg flex items-start gap-3">
-        <ShieldCheck className="h-5 w-5 text-[#7c3aed] shrink-0 mt-0.5" />
+      <div className="mt-6 p-3.5 bg-[#174EA6]/5 border border-[#174EA6]/20 rounded-lg flex items-start gap-3">
+        <ShieldCheck className="h-5 w-5 text-[#174EA6] shrink-0 mt-0.5" />
         <div className="text-xs text-zinc-700">
-          <span className="font-semibold text-[#7c3aed]">DepEd Policy Compliance:</span> All grades, averages, and academic standings displayed below reflect authoritative database records verified from official SF9 and SF10 documents. In accordance with school policy, no grades are computed, predicted, or fabricated.
+          <span className="font-semibold text-[#174EA6]">DepEd Policy Compliance:</span> All grades, averages, and academic standings displayed below reflect authoritative database records verified from official SF9 and SF10 documents. In accordance with school policy, no grades are computed, predicted, or fabricated.
         </div>
       </div>
 
       {/* Metrics Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mt-6">
-        <Card padding="md" className="bg-white border-l-4 border-l-[#7c3aed]">
+        <Card padding="md" className="bg-white border-l-4 border-l-[#174EA6]">
           <p className="text-[0.65rem] font-bold text-zinc-500 uppercase">Total Evaluated</p>
           <p className="text-2xl font-bold text-zinc-900 mt-1">{metrics.totalEvaluated}</p>
           <p className="text-[0.65rem] text-zinc-500 mt-2">Active SHS records</p>
@@ -172,7 +172,7 @@ export default function PrincipalAcademicView({
       <Card padding="none" className="bg-white mt-6 overflow-hidden shadow-xs border border-zinc-200">
         <div className="p-4 border-b border-zinc-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Layers className="h-4 w-4 text-[#7c3aed]" />
+            <Layers className="h-4 w-4 text-[#174EA6]" />
             <h3 className="text-sm font-semibold text-zinc-900">Performance Summary by Section</h3>
           </div>
           <span className="text-xs text-zinc-500">{sectionSummaries.length} Sections</span>
@@ -217,7 +217,7 @@ export default function PrincipalAcademicView({
                       <div className="flex items-center justify-end gap-2">
                         <div className="w-16 bg-zinc-100 rounded-full h-1.5 overflow-hidden">
                           <div 
-                            className="bg-[#7c3aed] h-1.5 rounded-full" 
+                            className="bg-[#174EA6] h-1.5 rounded-full" 
                             style={{ width: `${sec.passingRate}%` }} 
                           />
                         </div>
@@ -251,7 +251,7 @@ export default function PrincipalAcademicView({
                   setGrade(e.target.value);
                   applyFilters(e.target.value, section, schoolYear);
                 }}
-                className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+                className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
               >
                 <option value="All">All Grades (11 & 12)</option>
                 <option value="Grade 11">Grade 11</option>
@@ -267,7 +267,7 @@ export default function PrincipalAcademicView({
                   setSection(e.target.value);
                   applyFilters(grade, e.target.value, schoolYear);
                 }}
-                className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+                className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
               >
                 <option value="All">All Sections</option>
                 {Array.from(new Set(sectionSummaries.map(s => s.section))).map(sec => (
@@ -278,7 +278,7 @@ export default function PrincipalAcademicView({
 
             <div className="flex items-end justify-between">
               <span className="text-xs text-zinc-500">Showing {students.length} learner records</span>
-              {isPending && <span className="text-xs text-[#7c3aed] font-medium">Updating...</span>}
+              {isPending && <span className="text-xs text-[#174EA6] font-medium">Updating...</span>}
             </div>
           </div>
         </Card>
@@ -350,7 +350,7 @@ export default function PrincipalAcademicView({
                           <TableCell className="text-right">
                             <button
                               onClick={() => toggleExpand(st.id)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#7c3aed] bg-[#7c3aed]/10 hover:bg-[#7c3aed]/20 transition-colors"
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#174EA6] bg-[#174EA6]/10 hover:bg-[#174EA6]/20 transition-colors"
                             >
                               <span>{st.gradesCount} Subjects</span>
                               {isExpanded ? (
@@ -369,7 +369,7 @@ export default function PrincipalAcademicView({
                               <div className="p-3 bg-white rounded-md border border-zinc-200">
                                 <div className="flex items-center justify-between mb-2">
                                   <h4 className="text-xs font-bold text-zinc-800 uppercase tracking-wider flex items-center gap-1.5">
-                                    <BookOpen className="h-3.5 w-3.5 text-[#7c3aed]" />
+                                    <BookOpen className="h-3.5 w-3.5 text-[#174EA6]" />
                                     <span>Verified Subject Grades for {st.fullName}</span>
                                   </h4>
                                   <span className="text-[0.65rem] text-zinc-500">

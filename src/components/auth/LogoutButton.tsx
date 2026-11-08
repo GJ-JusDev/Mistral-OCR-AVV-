@@ -17,10 +17,10 @@ export function LogoutButton() {
       <button 
         type="submit" 
         disabled={isPending}
-        className="flex w-full items-center gap-3 px-3 py-2 text-sm font-medium text-[#495057] hover:bg-[#e9ecef] hover:text-[#212529] transition-none rounded-sm"
+        className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:bg-white/10 rounded-lg transition-colors disabled:opacity-50"
       >
-        <LogOut className="h-4 w-4" />
-        <span>{isPending ? "Signing out..." : "Sign out"}</span>
+        <LogOut className="h-4 w-4 shrink-0 text-slate-400 group-hover:text-white" />
+        <span>{isPending ? "Signing out..." : "Sign Out"}</span>
       </button>
     </form>
   );

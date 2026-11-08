@@ -22,10 +22,14 @@ export interface FieldComparisonResult {
 export interface AcademicGradeComparisonItem {
   subject: string;
   semester?: string;
+  gradeLevel?: string;
   doc1Grade?: number | string;
   doc2Grade?: number | string;
   doc1Quarter?: { q1?: any; q2?: any; q3?: any; q4?: any };
   doc2Quarter?: { q1?: any; q2?: any; q3?: any; q4?: any };
+  doc1SourceSide?: "front" | "back" | "both";
+  doc1SourcePage?: number | string;
+  doc2SourcePage?: number | string;
   status: ComparisonStatus;
   details?: string;
 }
@@ -38,6 +42,25 @@ export interface DocumentComparisonSummary {
   hasDiscrepancies: boolean;
   hasUnverifiedFields: boolean;
   summaryMessage: string;
+  summaryMetrics: {
+    totalAcademicFieldsCompared: number;
+    matchingFieldsCount: number;
+    discrepanciesCount: number;
+    missingOrUnverifiedCount: number;
+    identityStatus: "MATCH" | "MISMATCH" | "NEEDS_VERIFICATION";
+  };
+  requiresTeacherReview: boolean;
+  sf9Meta?: {
+    isTwoSided?: boolean;
+    hasIdentityConflict?: boolean;
+    identityConflicts?: string[];
+  };
+}
+
+export interface CompareAcademicGradesOptions {
+  targetGradeLevel?: string;
+  targetSchoolYear?: string;
+  targetSemester?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,13 +79,14 @@ const EXCLUDED_OBSERVED_VALUES = [
   "descriptors",
 ];
 
-function isNonAcademicSubject(subject: string): boolean {
+export function isNonAcademicSubject(subject: string): boolean {
+  if (!subject) return true;
   const lower = subject.toLowerCase();
   return EXCLUDED_OBSERVED_VALUES.some((kw) => lower.includes(kw));
 }
 
 export function cleanSubjectName(raw: string): string {
-  let cleaned = raw
+  let cleaned = (raw || "")
     .replace(/^(?:core\s+subjects?|applied\s+and\s+specialized\s+subjects?|applied\s+subjects?|specialized\s+subjects?)[\s:\-–|]*/i, "")
     .replace(/[|*_`]/g, "")
     .replace(/\s+/g, " ")
@@ -85,6 +109,15 @@ export function cleanSubjectName(raw: string): string {
   if (cleaned.startsWith("pe and health") || cleaned.startsWith("physical education")) {
     return cleaned.replace(/physical education/, "pe");
   }
+  if (cleaned.startsWith("21st century literature")) {
+    return "21st century literature from the philippines and the world";
+  }
+  if (cleaned.startsWith("disaster readiness")) {
+    return "disaster readiness and risk reduction";
+  }
+  if (cleaned.startsWith("contemporary philippine arts")) {
+    return "contemporary philippine arts from the regions";
+  }
 
   return cleaned;
 }
@@ -98,7 +131,7 @@ export function cleanNamePart(name?: string | null): string {
     .trim();
 }
 
-function normalizeDate(raw?: string | null): string {
+export function normalizeDate(raw?: string | null): string {
   if (!raw) return "";
   const trimmed = raw.trim();
   // YYYY-MM-DD
@@ -112,6 +145,25 @@ function normalizeDate(raw?: string | null): string {
     return `${yyyy}-${mm}-${dd}`;
   }
   return trimmed.toLowerCase();
+}
+
+export function normalizeGradeLevel(raw?: string | null): string {
+  if (!raw) return "";
+  const match = String(raw).match(/\b(?:grade\s*|gr\.?\s*|g)?(11|12|10|9|8|7|[1-6])\b/i);
+  if (match) return match[1];
+  return String(raw).trim().toLowerCase();
+}
+
+export function normalizeSemester(raw?: string | null): string {
+  if (!raw) return "";
+  const s = String(raw).toLowerCase().trim();
+  if (s.includes("1st") || s.includes("first") || s.includes("sem 1") || s.includes("semester 1") || s === "1") {
+    return "1st Semester";
+  }
+  if (s.includes("2nd") || s.includes("second") || s.includes("sem 2") || s.includes("semester 2") || s === "2") {
+    return "2nd Semester";
+  }
+  return s;
 }
 
 function isValuePresent(val: any): boolean {
@@ -152,7 +204,7 @@ export function compareIdentityFields(
         lrnStatus = "MISMATCH";
         isSameLearner = false;
         reason = `LRN mismatch: Document 1 has ${lrn1}, but Document 2 has ${lrn2}.`;
-        lrnDetails = "LRNs do not match. These documents may belong to different learners.";
+        lrnDetails = "LRNs do not match. These documents belong to different learners.";
       }
     } else {
       lrnStatus = lrn1 === lrn2 ? "MATCH" : "NEEDS_VERIFICATION";
@@ -176,7 +228,7 @@ export function compareIdentityFields(
     details: lrnDetails,
   });
 
-  // 2. Name Parts (Last, First, Middle, Full)
+  // 2. Name Parts (Last, First, Middle)
   const last1 = cleanNamePart(doc1.last_name || doc1.name?.split(",")[0]);
   const last2 = cleanNamePart(doc2.last_name || doc2.name?.split(",")[0]);
   const last3 = doc3 ? cleanNamePart(doc3.last_name || doc3.name?.split(",")[0]) : undefined;
@@ -270,9 +322,9 @@ export function compareIdentityFields(
       midStatus = "MISMATCH";
     }
   } else if (!mid1 && !mid2 && (!doc3 || !mid3)) {
-    midStatus = "MATCH"; // Legitimately blank or absent across compared documents
+    midStatus = "MATCH"; // Blank across compared documents
   } else {
-    midStatus = "NEEDS_VERIFICATION"; // One is populated, other unextracted
+    midStatus = "NEEDS_VERIFICATION";
   }
   results.push({
     field: "middle_name",
@@ -355,46 +407,142 @@ export function compareIdentityFields(
 // 2. Academic Grade Comparison
 // ---------------------------------------------------------------------------
 
+function compareQuarterBreakdown(
+  g1?: GradeRecord,
+  g2?: GradeRecord
+): { hasDiscrepancy: boolean; mismatches: string[]; partialInfo: string[] } {
+  const quarters = [
+    { label: "Q1", v1: g1?.q1, v2: g2?.q1 },
+    { label: "Q2", v1: g1?.q2, v2: g2?.q2 },
+    { label: "Q3", v1: g1?.q3, v2: g2?.q3 },
+    { label: "Q4", v1: g1?.q4, v2: g2?.q4 },
+  ];
+
+  const mismatches: string[] = [];
+  const partialInfo: string[] = [];
+
+  for (const q of quarters) {
+    const has1 = isValuePresent(q.v1);
+    const has2 = isValuePresent(q.v2);
+
+    if (has1 && has2) {
+      const n1 = parseFloat(String(q.v1));
+      const n2 = parseFloat(String(q.v2));
+      if (!isNaN(n1) && !isNaN(n2)) {
+        if (n1 !== n2) {
+          mismatches.push(`${q.label}: SF9=${n1}, SF10=${n2}`);
+        }
+      } else {
+        if (String(q.v1).trim().toUpperCase() !== String(q.v2).trim().toUpperCase()) {
+          mismatches.push(`${q.label}: SF9="${q.v1}", SF10="${q.v2}"`);
+        }
+      }
+    } else if (has1 !== has2) {
+      partialInfo.push(`${q.label} present on ${has1 ? "SF9" : "SF10"} only`);
+    }
+  }
+
+  return {
+    hasDiscrepancy: mismatches.length > 0,
+    mismatches,
+    partialInfo,
+  };
+}
+
 export function compareAcademicGrades(
   doc1Grades: GradeRecord[] = [],
-  doc2Grades: GradeRecord[] = []
+  doc2Grades: GradeRecord[] = [],
+  options?: CompareAcademicGradesOptions
 ): AcademicGradeComparisonItem[] {
   const results: AcademicGradeComparisonItem[] = [];
 
   // Filter out Observed Values / non-academic tables
-  const valid1 = doc1Grades.filter((g) => !isNonAcademicSubject(g.subject));
-  const valid2 = doc2Grades.filter((g) => !isNonAcademicSubject(g.subject));
+  const valid1Raw = doc1Grades.filter((g) => !isNonAcademicSubject(g.subject));
+  let valid2Raw = doc2Grades.filter((g) => !isNonAcademicSubject(g.subject));
 
-  const bothHaveSemesters =
-    valid1.some((g) => Boolean(g.semester)) && valid2.some((g) => Boolean(g.semester));
+  // Determine target grade level scope (Grade 11 vs Grade 12 isolation)
+  const targetGrade = options?.targetGradeLevel
+    ? normalizeGradeLevel(options.targetGradeLevel)
+    : "";
+
+  // If a target grade level is designated, isolate SF10 records that match or have unassigned grade levels
+  if (targetGrade) {
+    valid2Raw = valid2Raw.filter((g) => {
+      const gGrade = normalizeGradeLevel(g.grade_level);
+      return !gGrade || gGrade === targetGrade;
+    });
+  }
 
   const makeSubjectKey = (g: GradeRecord): string => {
     const base = cleanSubjectName(g.subject);
     if (!base) return "";
-    if (bothHaveSemesters && g.semester) {
-      return `${g.semester.toLowerCase().trim()}::${base}`;
-    }
-    return base;
+
+    const parts: string[] = [];
+    const gl = normalizeGradeLevel(g.grade_level);
+    if (gl) parts.push(`g${gl}`);
+
+    const sem = normalizeSemester(g.semester);
+    if (sem) parts.push(sem);
+
+    parts.push(base);
+    return parts.join("::");
   };
 
   // Build subject map
-  const subjectMap = new Map<string, { g1?: GradeRecord; g2?: GradeRecord; originalName: string; semester?: string }>();
+  const subjectMap = new Map<
+    string,
+    {
+      g1?: GradeRecord;
+      g2?: GradeRecord;
+      originalName: string;
+      semester?: string;
+      gradeLevel?: string;
+    }
+  >();
 
-  for (const g of valid1) {
+  for (const g of valid1Raw) {
     const key = makeSubjectKey(g);
     if (!key) continue;
-    subjectMap.set(key, { g1: g, originalName: g.subject, semester: g.semester });
+    subjectMap.set(key, {
+      g1: g,
+      originalName: g.subject,
+      semester: normalizeSemester(g.semester) || g.semester,
+      gradeLevel: g.grade_level || targetGrade,
+    });
   }
 
-  for (const g of valid2) {
+  for (const g of valid2Raw) {
     const key = makeSubjectKey(g);
     if (!key) continue;
     const existing = subjectMap.get(key);
     if (existing) {
       existing.g2 = g;
-      if (!existing.semester && g.semester) existing.semester = g.semester;
+      if (!existing.semester && g.semester) existing.semester = normalizeSemester(g.semester) || g.semester;
+      if (!existing.gradeLevel && g.grade_level) existing.gradeLevel = g.grade_level;
     } else {
-      subjectMap.set(key, { g2: g, originalName: g.subject, semester: g.semester });
+      // If doc1 didn't have this key, check if there's a fuzzy subject match in the same semester
+      let matchedKey: string | null = null;
+      const gSem = normalizeSemester(g.semester);
+      const gBase = cleanSubjectName(g.subject);
+
+      for (const [k, v] of subjectMap.entries()) {
+        if (!v.g2 && v.semester === gSem && cleanSubjectName(v.originalName) === gBase) {
+          matchedKey = k;
+          break;
+        }
+      }
+
+      if (matchedKey) {
+        const item = subjectMap.get(matchedKey)!;
+        item.g2 = g;
+      } else {
+        subjectMap.set(key, {
+          g2: g,
+          originalName: g.subject,
+          semester: normalizeSemester(g.semester) || g.semester,
+          gradeLevel: g.grade_level || targetGrade,
+        });
+      }
     }
   }
 
@@ -408,6 +556,8 @@ export function compareAcademicGrades(
     const hasVal1 = isValuePresent(val1);
     const hasVal2 = isValuePresent(val2);
 
+    const quarterComp = compareQuarterBreakdown(g1, g2);
+
     let status: ComparisonStatus = "NEEDS_VERIFICATION";
     let details: string | undefined = undefined;
 
@@ -417,10 +567,21 @@ export function compareAcademicGrades(
 
       if (!isNaN(num1) && !isNaN(num2)) {
         if (num1 === num2) {
-          status = "MATCH";
+          if (quarterComp.hasDiscrepancy) {
+            status = "MISMATCH";
+            details = `Final grade matches (${num1}), but quarter grade mismatch detected: ${quarterComp.mismatches.join(", ")}.`;
+          } else {
+            status = "MATCH";
+            if (quarterComp.partialInfo.length > 0) {
+              details = `Final grade matches (${num1}). Quarter details on one document only.`;
+            }
+          }
         } else {
           status = "MISMATCH";
           details = `Grade discrepancy: SF9 has ${num1}, but SF10 has ${num2}.`;
+          if (quarterComp.hasDiscrepancy) {
+            details += ` (${quarterComp.mismatches.join(", ")})`;
+          }
         }
       } else {
         // Text mark comparison (e.g. INC, DRP)
@@ -432,8 +593,13 @@ export function compareAcademicGrades(
         }
       }
     } else if (!hasVal1 && !hasVal2) {
-      status = "MISSING_DATA";
-      details = "Grade is missing from both documents.";
+      if (quarterComp.hasDiscrepancy) {
+        status = "MISMATCH";
+        details = `Quarter grade mismatch: ${quarterComp.mismatches.join(", ")}.`;
+      } else {
+        status = "MISSING_DATA";
+        details = "Grade is missing from both documents.";
+      }
     } else {
       // One document has the grade, the other does not
       status = "NEEDS_VERIFICATION";
@@ -443,10 +609,14 @@ export function compareAcademicGrades(
     results.push({
       subject: item.originalName,
       semester: item.semester,
+      gradeLevel: item.gradeLevel,
       doc1Grade: hasVal1 ? val1 : "-",
       doc2Grade: hasVal2 ? val2 : "-",
       doc1Quarter: g1 ? { q1: g1.q1, q2: g1.q2, q3: g1.q3, q4: g1.q4 } : undefined,
       doc2Quarter: g2 ? { q1: g2.q1, q2: g2.q2, q3: g2.q3, q4: g2.q4 } : undefined,
+      doc1SourceSide: (g1 as any)?.source_side,
+      doc1SourcePage: (g1 as any)?.source_page,
+      doc2SourcePage: (g2 as any)?.source_page || (g2 as any)?.source_side,
       status,
       details,
     });
@@ -462,13 +632,61 @@ export function compareAcademicGrades(
 export function compareDocuments(
   doc1: ExtractedFields,
   doc2: ExtractedFields,
-  doc3?: ExtractedFields
+  doc3?: ExtractedFields,
+  options?: {
+    targetGradeLevel?: string;
+    targetSchoolYear?: string;
+    targetSemester?: string;
+    sf9Meta?: {
+      isTwoSided?: boolean;
+      hasIdentityConflict?: boolean;
+      identityConflicts?: string[];
+    };
+  }
 ): DocumentComparisonSummary {
   const { results: identityResults, isSameLearner, reason } = compareIdentityFields(doc1, doc2, doc3);
 
   let academicResults: AcademicGradeComparisonItem[] = [];
   if (isSameLearner) {
-    academicResults = compareAcademicGrades(doc1.grades || [], doc2.grades || []);
+    const targetGrade = options?.targetGradeLevel || doc1.grade_level;
+    academicResults = compareAcademicGrades(doc1.grades || [], doc2.grades || [], {
+      targetGradeLevel: targetGrade,
+      targetSchoolYear: options?.targetSchoolYear || doc1.school_year,
+      targetSemester: options?.targetSemester || doc1.semester,
+    });
+
+    // General Average Comparison
+    const ga1 = doc1.general_average;
+    const ga2 = doc2.general_average;
+    if (isValuePresent(ga1) || isValuePresent(ga2)) {
+      let gaStatus: ComparisonStatus = "NEEDS_VERIFICATION";
+      let gaDetails: string | undefined = undefined;
+
+      if (isValuePresent(ga1) && isValuePresent(ga2)) {
+        const n1 = typeof ga1 === "number" ? ga1 : parseFloat(String(ga1));
+        const n2 = typeof ga2 === "number" ? ga2 : parseFloat(String(ga2));
+        if (!isNaN(n1) && !isNaN(n2)) {
+          if (n1 === n2) {
+            gaStatus = "MATCH";
+          } else {
+            gaStatus = "MISMATCH";
+            gaDetails = `General average discrepancy: SF9 has ${n1}, SF10 has ${n2}.`;
+          }
+        }
+      } else {
+        gaStatus = "NEEDS_VERIFICATION";
+        gaDetails = `General average missing on ${!isValuePresent(ga1) ? "SF9" : "SF10"}.`;
+      }
+
+      academicResults.push({
+        subject: "General Average",
+        gradeLevel: targetGrade,
+        doc1Grade: isValuePresent(ga1) ? ga1 : "-",
+        doc2Grade: isValuePresent(ga2) ? ga2 : "-",
+        status: gaStatus,
+        details: gaDetails,
+      });
+    }
   }
 
   const hasIdentityDiscrepancy = identityResults.some((r) => r.status === "MISMATCH");
@@ -488,7 +706,7 @@ export function compareDocuments(
 
   if (!isSameLearner) {
     overallStatus = "DISCREPANCIES_FOUND";
-    summaryMessage = reason || "Documents belong to different learners.";
+    summaryMessage = reason || "Documents belong to different learners. Academic comparison blocked.";
   } else if (hasDiscrepancies) {
     overallStatus = "DISCREPANCIES_FOUND";
     summaryMessage = "Discrepancies found between documents. Review flagged fields.";
@@ -496,6 +714,21 @@ export function compareDocuments(
     overallStatus = "NEEDS_ATTENTION";
     summaryMessage = "Some fields are missing or require human verification against physical cards.";
   }
+
+  const totalAcademicFieldsCompared = academicResults.length;
+  const matchingFieldsCount = academicResults.filter((r) => r.status === "MATCH").length;
+  const discrepanciesCount =
+    identityResults.filter((r) => r.status === "MISMATCH").length +
+    academicResults.filter((r) => r.status === "MISMATCH").length;
+  const missingOrUnverifiedCount =
+    identityResults.filter((r) => r.status === "NEEDS_VERIFICATION" || r.status === "MISSING_DATA").length +
+    academicResults.filter((r) => r.status === "NEEDS_VERIFICATION" || r.status === "MISSING_DATA").length;
+
+  const identityStatus: "MATCH" | "MISMATCH" | "NEEDS_VERIFICATION" = !isSameLearner || hasIdentityDiscrepancy
+    ? "MISMATCH"
+    : hasUnverifiedIdentity
+    ? "NEEDS_VERIFICATION"
+    : "MATCH";
 
   return {
     isSameLearner,
@@ -505,5 +738,14 @@ export function compareDocuments(
     hasDiscrepancies,
     hasUnverifiedFields,
     summaryMessage,
+    summaryMetrics: {
+      totalAcademicFieldsCompared,
+      matchingFieldsCount,
+      discrepanciesCount,
+      missingOrUnverifiedCount,
+      identityStatus,
+    },
+    requiresTeacherReview: true,
+    sf9Meta: options?.sf9Meta,
   };
 }

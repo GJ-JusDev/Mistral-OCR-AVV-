@@ -48,6 +48,13 @@ export async function POST(request: Request) {
       .eq("user_id", user.id)
       .maybeSingle();
 
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json(
+        { error: "Forbidden: Account is pending administrator approval." },
+        { status: 403 }
+      );
+    }
+
     // Hindi pinapayagang mag-upload ang Principal para maiwasan ang conflict of interest sa pag-apruba
     if (roleRow?.role?.toLowerCase() === "principal") {
       return NextResponse.json(

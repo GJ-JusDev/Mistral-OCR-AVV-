@@ -24,6 +24,13 @@ export async function POST(request: NextRequest) {
       .eq("user_id", user.id)
       .maybeSingle();
 
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json(
+        { error: "Forbidden: Account is pending administrator approval." },
+        { status: 403 }
+      );
+    }
+
     if (roleRow?.role?.toLowerCase() === "principal") {
       return NextResponse.json(
         { error: "Forbidden: Principal role is monitoring-only and cannot trigger document validation." },

@@ -100,7 +100,7 @@ export default function PrincipalDocumentsView({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-6 border-b border-zinc-200">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#7c3aed]/10 text-[#7c3aed]">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#174EA6]/10 text-[#174EA6]">
               <FileText className="h-3.5 w-3.5" />
               Document Monitoring Queue
             </span>
@@ -126,7 +126,7 @@ export default function PrincipalDocumentsView({
           }}
           className={`p-3 rounded-lg border text-left transition-all ${
             docType === "All"
-              ? "bg-[#7c3aed]/10 border-[#7c3aed] ring-1 ring-[#7c3aed]"
+              ? "bg-[#174EA6]/10 border-[#174EA6] ring-1 ring-[#174EA6]"
               : "bg-white border-zinc-200 hover:bg-zinc-50"
           }`}
         >
@@ -204,7 +204,7 @@ export default function PrincipalDocumentsView({
                   setQuery(e.target.value);
                   applyFilters(e.target.value, docType, grade, section, status);
                 }}
-                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-zinc-300 focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-zinc-300 focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
               />
             </div>
           </div>
@@ -218,7 +218,7 @@ export default function PrincipalDocumentsView({
                 setDocType(e.target.value);
                 applyFilters(query, e.target.value, grade, section, status);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Supported Types</option>
               <option value="sf9">Old SHS SF9 (Report Card)</option>
@@ -236,7 +236,7 @@ export default function PrincipalDocumentsView({
                 setGrade(e.target.value);
                 applyFilters(query, docType, e.target.value, section, status);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Grades (11 & 12)</option>
               <option value="Grade 11">Grade 11</option>
@@ -253,7 +253,7 @@ export default function PrincipalDocumentsView({
                 setSection(e.target.value);
                 applyFilters(query, docType, grade, e.target.value, status);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Sections</option>
               {availableSections.map((sec) => (
@@ -271,7 +271,7 @@ export default function PrincipalDocumentsView({
                 setStatus(e.target.value);
                 applyFilters(query, docType, grade, section, e.target.value);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Statuses</option>
               <option value="approved">Approved</option>
@@ -285,7 +285,7 @@ export default function PrincipalDocumentsView({
 
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-100 text-xs text-zinc-500">
           <span>Showing {documents.length} scanned documents</span>
-          {isPending && <span className="text-[#7c3aed] font-medium">Filtering records...</span>}
+          {isPending && <span className="text-[#174EA6] font-medium">Filtering records...</span>}
         </div>
       </Card>
 
@@ -372,7 +372,7 @@ export default function PrincipalDocumentsView({
                       <TableCell className="text-right">
                         <Link
                           href={`/documents/${doc.id}`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#7c3aed] bg-[#7c3aed]/10 hover:bg-[#7c3aed]/20 transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#174EA6] bg-[#174EA6]/10 hover:bg-[#174EA6]/20 transition-colors"
                         >
                           <span>View Scans</span>
                           <ExternalLink className="h-3 w-3" />

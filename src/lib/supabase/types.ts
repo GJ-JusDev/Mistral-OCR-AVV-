@@ -125,6 +125,8 @@ export interface Database {
           general_average_action_taken: string | null
           shs_general_average_printed: number | null
           storage_path: string | null
+          reviewed_by: string | null
+          last_operation_id: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -153,6 +155,8 @@ export interface Database {
           general_average_action_taken?: string | null
           shs_general_average_printed?: number | null
           storage_path?: string | null
+          reviewed_by?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -181,6 +185,8 @@ export interface Database {
           general_average_action_taken?: string | null
           shs_general_average_printed?: number | null
           storage_path?: string | null
+          reviewed_by?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -387,6 +393,8 @@ export interface Database {
           role: string
           account_status: string
           school_id: string | null
+          updated_by: string | null
+          last_operation_id: string | null
           created_at: string | null
         }
         Insert: {
@@ -395,6 +403,8 @@ export interface Database {
           role: string
           account_status?: string
           school_id?: string | null
+          updated_by?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
         }
         Update: {
@@ -403,6 +413,8 @@ export interface Database {
           role?: string
           account_status?: string
           school_id?: string | null
+          updated_by?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
         }
         Relationships: any[]
@@ -495,6 +507,7 @@ export interface Database {
           approved_by: string | null
           approved_at: string | null
           remarks: string | null
+          last_operation_id: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -510,6 +523,7 @@ export interface Database {
           approved_by?: string | null
           approved_at?: string | null
           remarks?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -525,6 +539,7 @@ export interface Database {
           approved_by?: string | null
           approved_at?: string | null
           remarks?: string | null
+          last_operation_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -563,6 +578,75 @@ export interface Database {
           performed_by?: string | null
           remarks?: string | null
           created_at?: string | null
+        }
+        Relationships: any[]
+      }
+      audit_logs: {
+        Row: {
+          id: string
+          created_at: string
+          transaction_id: number | null
+          actor_user_id: string | null
+          actor_email: string | null
+          actor_role: string
+          actor_school_id: string | null
+          actor_school_name: string | null
+          school_id: string | null
+          category: string
+          action: string
+          target_type: string | null
+          target_id: string | null
+          target_label: string | null
+          outcome: "SUCCESS" | "FAILURE" | "DENIED" | "WARNING"
+          details: Json
+          reason: string | null
+          request_id: string | null
+          ip_address: string | null
+          user_agent: string | null
+        }
+        Insert: {
+          id?: string
+          created_at?: string
+          transaction_id?: number | null
+          actor_user_id?: string | null
+          actor_email?: string | null
+          actor_role?: string
+          actor_school_id?: string | null
+          actor_school_name?: string | null
+          school_id?: string | null
+          category: string
+          action: string
+          target_type?: string | null
+          target_id?: string | null
+          target_label?: string | null
+          outcome: "SUCCESS" | "FAILURE" | "DENIED" | "WARNING"
+          details?: Json
+          reason?: string | null
+          request_id?: string | null
+          ip_address?: string | null
+          user_agent?: string | null
+        }
+        Update: {
+          id?: string
+          created_at?: string
+          transaction_id?: number | null
+          actor_user_id?: string | null
+          actor_email?: string | null
+          actor_role?: string
+          actor_school_id?: string | null
+          actor_school_name?: string | null
+          school_id?: string | null
+          category?: string
+          action?: string
+          target_type?: string | null
+          target_id?: string | null
+          target_label?: string | null
+          outcome?: "SUCCESS" | "FAILURE" | "DENIED" | "WARNING"
+          details?: Json
+          reason?: string | null
+          request_id?: string | null
+          ip_address?: string | null
+          user_agent?: string | null
         }
         Relationships: any[]
       }

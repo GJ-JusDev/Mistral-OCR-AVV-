@@ -59,11 +59,24 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url)
   }
 
-  // 2. Kung naka-login na pero pumunta sa /login o /register, dalhin sa dashboard
+  // 2. Kung naka-login na pero pumunta sa /login o /register, dalhin sa dashboard kung Approved lamang
   if (user && isAuthRoute) {
-    const url = request.nextUrl.clone()
-    url.pathname = '/'
-    return NextResponse.redirect(url)
+    if (request.nextUrl.searchParams.get('registered') === 'pending') {
+      return supabaseResponse;
+    }
+
+    const { data: roleRow } = await supabase
+      .from('user_roles')
+      .select('account_status')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    const isApproved = roleRow?.account_status === 'Approved' || user.user_metadata?.account_status === 'Approved';
+    if (isApproved) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/'
+      return NextResponse.redirect(url)
+    }
   }
 
   // 3. Authoritative role and status check para sa mga protected routes

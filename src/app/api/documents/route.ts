@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server';
 import { validateFields } from '@/lib/validation/engine';
 import { evaluateStudentIdentity, verifyStudentCollision } from '@/lib/validation/studentMatcher';
 import { normalizeGradeRecords } from '@/lib/validation/gradeUtils';
+import { logAuditEvent } from '@/lib/audit/auditLogger';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,6 +16,16 @@ export async function GET(request: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
       return NextResponse.json({ error: "Unauthorized: Please log in to view documents." }, { status: 401 });
+    }
+
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status, school_id")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
     }
 
     let query = supabase
@@ -49,6 +60,17 @@ export async function POST(request: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: "Unauthorized: Please log in to submit documents." }, { status: 401 });
     }
+
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status, school_id")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
+    }
+
     const uploadedBy = user.id;
 
     // 2. Enforce active document_type: strictly 'sf9' | 'sf10' | 'birth_cert'
@@ -146,12 +168,6 @@ export async function POST(request: NextRequest) {
 
     // 5. Server-enforced institutional identity resolution (TRIS)
     // 5a. Retrieve user's assigned school from user_roles
-    const { data: roleRow } = await supabase
-      .from('user_roles')
-      .select('school_id')
-      .eq('user_id', user.id)
-      .maybeSingle();
-
     let trustedSchoolUuid: string | null = roleRow?.school_id || null;
 
     // 5b. Authoritative institutional record lookup for TRIS (Taysan Resettlement Integrated School)
@@ -302,6 +318,28 @@ export async function POST(request: NextRequest) {
         console.error("[api/documents] Validation execution error:", valErr);
       }
     }
+
+    // Administrative audit logging for document submission
+    await logAuditEvent({
+      category: "DOCUMENT",
+      action: "DOCUMENT_UPLOADED",
+      outcome: "SUCCESS",
+      actorUserId: user.id,
+      actorEmail: user.email,
+      actorRole: roleRow?.role || "teacher",
+      actorSchoolId: userSchoolId,
+      actorSchoolName: authoritativeSchool?.name,
+      targetType: "document",
+      targetId: docData.id,
+      targetLabel: `${documentType.toUpperCase()} - ${body.original_filename || "Document"}`,
+      reason: "User staged document for validation and review",
+      details: {
+        document_type: documentType,
+        grade_level: extractedFields.grade_level,
+        final_status: docData.status,
+        student_id: studentId,
+      },
+    });
 
     return NextResponse.json(docData, { status: 201 });
   } catch (error: any) {

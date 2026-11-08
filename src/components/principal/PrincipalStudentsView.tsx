@@ -253,12 +253,12 @@ export default function PrincipalStudentsView({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between pb-6 border-b border-zinc-200">
         <div>
           <div className="flex items-center gap-2 mb-1">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#7c3aed]/10 text-[#7c3aed]">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#174EA6]/10 text-[#174EA6]">
               <Users className="h-3.5 w-3.5" />
               Unified Student Records Directory
             </span>
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-700">
-              <School className="h-3.5 w-3.5 text-[#7c3aed]" />
+              <School className="h-3.5 w-3.5 text-[#174EA6]" />
               TRIS DepEd ID: 300792
             </span>
           </div>
@@ -307,7 +307,7 @@ export default function PrincipalStudentsView({
                   setQuery(e.target.value);
                   applyFilters(e.target.value, grade, section, schoolYear, status, completenessFilter, eligibilityFilter);
                 }}
-                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-zinc-300 focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-zinc-300 focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
               />
             </div>
           </div>
@@ -321,7 +321,7 @@ export default function PrincipalStudentsView({
                 setGrade(e.target.value);
                 applyFilters(query, e.target.value, section, schoolYear, status, completenessFilter, eligibilityFilter);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Grades (11 & 12)</option>
               <option value="Grade 11">Grade 11</option>
@@ -338,7 +338,7 @@ export default function PrincipalStudentsView({
                 setSection(e.target.value);
                 applyFilters(query, grade, e.target.value, schoolYear, status, completenessFilter, eligibilityFilter);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Sections</option>
               {initialSections.map((sec) => (
@@ -356,7 +356,7 @@ export default function PrincipalStudentsView({
                 setSchoolYear(e.target.value);
                 applyFilters(query, grade, section, e.target.value, status, completenessFilter, eligibilityFilter);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All School Years</option>
               {initialSchoolYears.map((sy) => (
@@ -377,7 +377,7 @@ export default function PrincipalStudentsView({
                 setCompletenessFilter(e.target.value);
                 applyFilters(query, grade, section, schoolYear, status, e.target.value, eligibilityFilter);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Completeness Statuses</option>
               <option value="Complete">Complete (SF9, SF10, PSA)</option>
@@ -398,7 +398,7 @@ export default function PrincipalStudentsView({
                 setEligibilityFilter(e.target.value);
                 applyFilters(query, grade, section, schoolYear, status, completenessFilter, e.target.value);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Eligibility Assessments</option>
               <option value="Eligible">Eligible (Progression or Graduation)</option>
@@ -417,7 +417,7 @@ export default function PrincipalStudentsView({
                 setStatus(e.target.value);
                 applyFilters(query, grade, section, schoolYear, e.target.value, completenessFilter, eligibilityFilter);
               }}
-              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed] focus:border-[#7c3aed]"
+              className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All OCR Statuses</option>
               <option value="Approved">Approved</option>
@@ -429,7 +429,7 @@ export default function PrincipalStudentsView({
 
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-100 text-xs text-zinc-500">
           <span>Showing {students.length} of {totalCount} records</span>
-          {isPending && <span className="text-[#7c3aed] font-medium animate-pulse">Filtering unified records...</span>}
+          {isPending && <span className="text-[#174EA6] font-medium animate-pulse">Filtering unified records...</span>}
         </div>
       </Card>
 
@@ -587,7 +587,7 @@ export default function PrincipalStudentsView({
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             onClick={() => handleOpenDetails(st.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#7c3aed] bg-[#7c3aed]/10 hover:bg-[#7c3aed]/20 transition-colors"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded text-[#174EA6] bg-[#174EA6]/10 hover:bg-[#174EA6]/20 transition-colors"
                           >
                             <span>Inspect</span>
                           </button>
@@ -622,7 +622,7 @@ export default function PrincipalStudentsView({
             {/* Modal Header */}
             <div className="flex items-center justify-between p-4 border-b border-zinc-200 bg-zinc-50 sticky top-0 z-10">
               <div className="flex items-center gap-2">
-                <div className="p-1.5 rounded-md bg-[#7c3aed]/10 text-[#7c3aed]">
+                <div className="p-1.5 rounded-md bg-[#174EA6]/10 text-[#174EA6]">
                   <GraduationCap className="h-5 w-5" />
                 </div>
                 <div>
@@ -646,7 +646,7 @@ export default function PrincipalStudentsView({
             <div className="p-5">
               {detailsLoading ? (
                 <div className="py-16 text-center text-sm text-zinc-500">
-                  <Clock className="h-6 w-6 text-[#7c3aed] animate-spin mx-auto mb-2" />
+                  <Clock className="h-6 w-6 text-[#174EA6] animate-spin mx-auto mb-2" />
                   Loading verified student records and original files...
                 </div>
               ) : studentDetails?.student ? (
@@ -742,7 +742,7 @@ export default function PrincipalStudentsView({
                   }`}>
                     <div className="flex items-start gap-2.5">
                       {studentDetails.identityComparison?.overallStatus === "IDENTITY_REVIEW_REQUIRED" ? (
-                        <AlertCircle className="h-5 w-5 text-[#7c3aed] shrink-0 mt-0.5" />
+                        <AlertCircle className="h-5 w-5 text-[#174EA6] shrink-0 mt-0.5" />
                       ) : (
                         <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" />
                       )}
@@ -768,7 +768,7 @@ export default function PrincipalStudentsView({
                           <div className="mt-2.5 space-y-1">
                             {studentDetails.identityComparison.discrepancies.map((disc: string, idx: number) => (
                               <div key={idx} className="text-xs flex items-center gap-1.5 font-medium text-purple-800">
-                                <span className="h-1.5 w-1.5 rounded-full bg-[#7c3aed]" />
+                                <span className="h-1.5 w-1.5 rounded-full bg-[#174EA6]" />
                                 <span>{disc}</span>
                               </div>
                             ))}
@@ -782,7 +782,7 @@ export default function PrincipalStudentsView({
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <h4 className="text-xs font-bold text-zinc-800 uppercase tracking-wider flex items-center gap-1.5">
-                        <FileCheck className="h-4 w-4 text-[#7c3aed]" />
+                        <FileCheck className="h-4 w-4 text-[#174EA6]" />
                         <span>Attached Original Scanned Documents ({studentDetails.documents?.length || 0})</span>
                       </h4>
                       <span className="text-[0.65rem] text-zinc-500">
@@ -822,7 +822,7 @@ export default function PrincipalStudentsView({
                                   href={doc.originalImageUrl}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="w-full inline-flex items-center justify-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md text-white bg-[#7c3aed] hover:bg-[#6d28d9] transition-colors"
+                                  className="w-full inline-flex items-center justify-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md text-white bg-[#174EA6] hover:bg-[#0B1F33] transition-colors"
                                 >
                                   <span>View Original File</span>
                                   <ExternalLink className="h-3 w-3" />
@@ -943,7 +943,7 @@ export default function PrincipalStudentsView({
                   <div className="p-4 rounded-lg border border-purple-200 bg-purple-50/40">
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-1.5">
-                        <ShieldCheck className="h-4 w-4 text-[#7c3aed]" />
+                        <ShieldCheck className="h-4 w-4 text-[#174EA6]" />
                         <h4 className="text-xs font-bold text-zinc-900 uppercase tracking-wider">
                           Principal Eligibility Decision Action
                         </h4>
@@ -997,7 +997,7 @@ export default function PrincipalStudentsView({
                         placeholder="e.g. Verified against physical records and confirmed eligible for progression..."
                         value={approvalRemarks}
                         onChange={(e) => setApprovalRemarks(e.target.value)}
-                        className="w-full px-2.5 py-1.5 text-xs rounded border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#7c3aed]"
+                        className="w-full px-2.5 py-1.5 text-xs rounded border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6]"
                       />
                     </div>
 
@@ -1050,7 +1050,7 @@ export default function PrincipalStudentsView({
             <div className="flex items-center justify-between p-4 border-t border-zinc-200 bg-zinc-50">
               <button
                 onClick={() => handleOpenDigitalRecord(studentDetails)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md text-white bg-[#7c3aed] hover:bg-[#6d28d9] transition-colors shadow-xs"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md text-white bg-[#174EA6] hover:bg-[#0B1F33] transition-colors shadow-xs"
               >
                 <Printer className="h-3.5 w-3.5" />
                 <span>Open Digital Academic Record</span>

@@ -1,11 +1,13 @@
 import { createClient } from "@/lib/supabase/server";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
+import { StatCard } from "@/components/ui/StatCard";
 import { StatsGrid } from "@/components/dashboard/StatsGrid";
+import { DashboardCard } from "@/components/ui/DashboardCard";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ValidationActivityChart } from "@/components/dashboard/ValidationActivityChart";
 import { ValidationResultsChart } from "@/components/dashboard/ValidationResultsChart";
-import { FileText, AlertTriangle, CheckCircle, XCircle, ArrowRight } from "lucide-react";
-import { Card } from "@/components/ui/Card";
+import { FileText, AlertTriangle, CheckCircle, XCircle, ArrowRight, ShieldAlert, Sparkles, Upload } from "lucide-react";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
 import DocumentStatusBadge from "@/components/documents/DocumentStatusBadge";
 import Link from "next/link";
@@ -15,6 +17,7 @@ import PrincipalDashboard from "@/components/principal/PrincipalDashboard";
 import { getPrincipalDashboardData } from "@/actions/principal";
 import LandingPage from "@/components/landing/LandingPage";
 import { LogoutButton } from "@/components/auth/LogoutButton";
+import { Button } from "@/components/ui/Button";
 
 export default async function DashboardPage({
   searchParams,
@@ -188,23 +191,59 @@ export default async function DashboardPage({
     });
   }
 
-  const stats = [
-    { title: "Total Validations", value: totalValidations ?? 0, icon: <FileText className="h-5 w-5 text-indigo-500" /> },
-    { title: "Matched", value: matched ?? 0, icon: <CheckCircle className="h-5 w-5 text-emerald-500" /> },
-    { title: "Needs Review", value: needsReview ?? 0, icon: <AlertTriangle className="h-5 w-5 text-amber-500" /> },
-    { title: "Mismatches", value: mismatched ?? 0, icon: <XCircle className="h-5 w-5 text-red-500" /> },
-  ];
-
   return (
     <PageContainer>
       <Header 
-        title="Dashboard" 
-        description={`Welcome back, ${teacherName}!`} 
+        title="Teacher Validation Dashboard" 
+        description={`Welcome back, ${teacherName}. Manage SF9, SF10, and PSA document verifications with automated DepEd grade recalculations.`}
+        roleBadge={{ role: role || "teacher", label: "Faculty Validator" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        actions={
+          <Link href="/upload">
+            <Button
+              size="sm"
+              leftIcon={<Upload className="h-4 w-4" />}
+              className="bg-[#174EA6] hover:bg-[#0B1F33] text-white shadow-sm"
+            >
+              Upload Form
+            </Button>
+          </Link>
+        }
       />
       
       <div className="mt-6 flex flex-col gap-6">
-        <StatsGrid stats={stats} />
+        {/* KPI Stats Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatCard
+            title="Total Submitted"
+            value={totalValidations ?? 0}
+            icon={<FileText className="h-5 w-5 text-[#174EA6]" />}
+            variant="royal"
+          />
+          <StatCard
+            title="Verified & Validated"
+            value={matched ?? 0}
+            subtitle="Grades passed recalculation"
+            icon={<CheckCircle className="h-5 w-5 text-emerald-600" />}
+            variant="success"
+          />
+          <StatCard
+            title="Review Required"
+            value={needsReview ?? 0}
+            subtitle={needsReview ? "Requires teacher verification" : "Queue clear"}
+            icon={<AlertTriangle className="h-5 w-5 text-amber-600" />}
+            variant={needsReview ? "warning" : "default"}
+          />
+          <StatCard
+            title="Discrepancies / Rejections"
+            value={mismatched ?? 0}
+            subtitle="Flagged by validation engine"
+            icon={<XCircle className="h-5 w-5 text-red-600" />}
+            variant="danger"
+          />
+        </div>
         
+        {/* Activity & Validation Breakdown Charts */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2">
             <ValidationActivityChart data={activityData} />
@@ -218,35 +257,39 @@ export default async function DashboardPage({
           </div>
         </div>
 
+        {/* Lower Grid: Recent Validations & Needs Attention */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* Recent Validations (2 cols) */}
           <div className="lg:col-span-2">
-            <Card padding="md" className="flex flex-col h-full">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Recent Validations</h3>
+            <DashboardCard
+              title="Recent Submissions"
+              description="Latest processed student forms and OCR results"
+              headerAction={
                 <Link 
                   href="/documents" 
-                  className="text-sm text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 font-medium"
+                  className="text-xs font-semibold text-[#174EA6] hover:text-[#0B1F33] hover:underline"
                 >
-                  View All
+                  View All Documents &rarr;
                 </Link>
-              </div>
-              
-              <div className="flex-1 overflow-x-auto">
+              }
+              padding="none"
+            >
+              <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Student</TableHead>
-                      <TableHead>Documents</TableHead>
-                      <TableHead>Result</TableHead>
-                      <TableHead>Date</TableHead>
+                      <TableHead>Document Type</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Date Processed</TableHead>
                       <TableHead className="text-right">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {!recentValidations || recentValidations.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={5} className="text-center text-sm text-slate-500 py-8">
-                          No recent validations found.
+                        <TableCell colSpan={5} className="text-center text-xs text-slate-500 py-8">
+                          No recent validations found in your queue.
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -257,24 +300,24 @@ export default async function DashboardPage({
                         
                         return (
                           <TableRow key={doc.id}>
-                            <TableCell className="font-medium text-slate-900 dark:text-slate-100">
+                            <TableCell className="font-semibold text-slate-900 text-xs sm:text-sm">
                               {studentName}
                             </TableCell>
-                            <TableCell className="text-slate-500 dark:text-slate-400">
+                            <TableCell className="text-xs text-slate-600 uppercase font-mono">
                               {docType}
                             </TableCell>
                             <TableCell>
                               <DocumentStatusBadge status={doc.status as any} />
                             </TableCell>
-                            <TableCell className="text-sm text-slate-500 dark:text-slate-400">
+                            <TableCell className="text-xs text-slate-500">
                               {doc.created_at ? format(new Date(doc.created_at), "MMM d, yyyy") : "-"}
                             </TableCell>
                             <TableCell className="text-right">
                               <Link 
                                 href={`/documents/${doc.id}`}
-                                className="inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-md dark:bg-indigo-900/30 dark:text-indigo-300 dark:hover:bg-indigo-900/50"
+                                className="inline-flex items-center justify-center px-2.5 py-1 text-xs font-semibold text-[#174EA6] bg-[#174EA6]/10 hover:bg-[#174EA6]/20 rounded-md transition-colors"
                               >
-                                View
+                                View Details
                               </Link>
                             </TableCell>
                           </TableRow>
@@ -284,35 +327,35 @@ export default async function DashboardPage({
                   </TableBody>
                 </Table>
               </div>
-            </Card>
+            </DashboardCard>
           </div>
 
+          {/* Needs Your Attention Panel (1 col) */}
           <div className="lg:col-span-1">
-            <Card padding="md" className="flex flex-col h-full bg-orange-50/50 dark:bg-orange-950/20 border-orange-100 dark:border-orange-900/30">
-              <div className="flex items-center gap-2 mb-4">
-                <AlertTriangle className="h-5 w-5 text-orange-500" />
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Needs Your Attention</h3>
-              </div>
-              
+            <DashboardCard
+              title="Needs Your Attention"
+              description="Flagged discrepancies awaiting verification"
+              icon={<AlertTriangle className="h-4 w-4 text-amber-600" />}
+              className="border-amber-200/80 bg-gradient-to-b from-amber-50/40 to-white"
+            >
               <div className="flex-1 flex flex-col">
                 {!attentionDocs || attentionDocs.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center py-8 text-center">
-                    <CheckCircle className="h-10 w-10 text-emerald-400 mb-3 opacity-50" />
-                    <p className="text-sm font-medium text-slate-700 dark:text-slate-300">You're all caught up!</p>
-                    <p className="text-xs text-slate-500 mt-1">No validations require review.</p>
+                    <CheckCircle className="h-10 w-10 text-emerald-500 mb-2 opacity-80" />
+                    <p className="text-sm font-semibold text-slate-800">You're all caught up!</p>
+                    <p className="text-xs text-slate-500 mt-0.5">No flagged discrepancies require review.</p>
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-4">
-                    <p className="text-sm text-slate-600 dark:text-slate-400 mb-2">
-                      <strong className="text-slate-900 dark:text-slate-200">{needsReview}</strong> validation{needsReview === 1 ? '' : 's'} require review.
+                  <div className="flex flex-col gap-3">
+                    <p className="text-xs text-slate-600">
+                      <strong className="text-slate-900 font-bold">{needsReview}</strong> record{needsReview === 1 ? "" : "s"} require manual teacher verification before principal approval.
                     </p>
                     
-                    <ul className="space-y-3">
+                    <div className="space-y-2">
                       {attentionDocs.map(doc => {
                         const fields = doc.extracted_fields as ExtractedFields;
                         const studentName = fields?.name || "Unknown Student";
                         
-                        // Find discrepancy
                         let discrepancy = "Requires manual review";
                         const docWithResults = doc as any;
                         const results = docWithResults.validation_results as any[];
@@ -324,29 +367,34 @@ export default async function DashboardPage({
                         }
 
                         return (
-                          <li key={doc.id} className="flex flex-col bg-white dark:bg-zinc-900 p-3 rounded-md shadow-sm border border-orange-100 dark:border-orange-900/30">
-                            <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                              {studentName}
-                            </span>
-                            <span className="text-xs text-red-600 dark:text-red-400 truncate mt-0.5">
+                          <div key={doc.id} className="p-3 bg-white rounded-lg border border-amber-200/80 shadow-xs">
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-xs font-bold text-slate-900 truncate">
+                                {studentName}
+                              </span>
+                              <span className="text-[10px] uppercase font-semibold text-amber-700 bg-amber-100/60 px-1.5 py-0.2 rounded">
+                                {(doc.document_type || "Doc").toUpperCase()}
+                              </span>
+                            </div>
+                            <span className="text-[11px] text-red-600 line-clamp-2 mt-1 font-medium">
                               {discrepancy}
                             </span>
-                          </li>
+                          </div>
                         );
                       })}
-                    </ul>
+                    </div>
                     
                     <Link 
                       href="/review" 
-                      className="mt-4 flex items-center justify-center gap-2 w-full px-4 py-2 text-sm font-medium text-orange-700 bg-orange-100 hover:bg-orange-200 rounded-md transition-colors dark:bg-orange-900/40 dark:text-orange-300 dark:hover:bg-orange-900/60"
+                      className="mt-2 flex items-center justify-center gap-1.5 w-full px-3 py-2 text-xs font-bold text-[#174EA6] bg-[#174EA6]/10 hover:bg-[#174EA6]/20 rounded-lg transition-colors"
                     >
-                      View Review Queue
-                      <ArrowRight className="h-4 w-4" />
+                      <span>Open Review Queue</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
                     </Link>
                   </div>
                 )}
               </div>
-            </Card>
+            </DashboardCard>
           </div>
         </div>
       </div>

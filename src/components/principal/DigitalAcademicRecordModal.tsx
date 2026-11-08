@@ -104,7 +104,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
         {/* Modal Toolbar (hidden when printing) */}
         <div className="flex items-center justify-between p-4 border-b border-zinc-200 bg-zinc-50 sticky top-0 z-10 print:hidden">
           <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-md bg-[#7c3aed]/10 text-[#7c3aed]">
+            <div className="p-1.5 rounded-md bg-[#174EA6]/10 text-[#174EA6]">
               <FileText className="h-5 w-5" />
             </div>
             <div>
@@ -210,7 +210,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
           <div className="mt-6">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-800 flex items-center gap-1.5">
-                <GraduationCap className="h-4 w-4 text-[#7c3aed]" />
+                <GraduationCap className="h-4 w-4 text-[#174EA6]" />
                 <span>Verified Scholastic Record</span>
               </h3>
               <span className="text-[0.65rem] text-zinc-500">
@@ -326,7 +326,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
           {/* Original Images Access Links (shown on web, preserved for audit) */}
           <div className="mt-6 p-4 border border-zinc-200 rounded-lg bg-zinc-50 print:border-none print:p-0">
             <h4 className="font-bold text-zinc-800 uppercase text-[0.7rem] mb-2 flex items-center gap-1.5">
-              <ShieldCheck className="h-4 w-4 text-[#7c3aed]" />
+              <ShieldCheck className="h-4 w-4 text-[#174EA6]" />
               <span>Complete Original Scanned Documents Preservation</span>
             </h4>
             <div className="space-y-2">
@@ -341,7 +341,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
                       href={doc.originalImageUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-[#7c3aed] font-semibold hover:underline print:hidden"
+                      className="inline-flex items-center gap-1 text-[#174EA6] font-semibold hover:underline print:hidden"
                     >
                       <span>View Complete Original Image</span>
                       <ExternalLink className="h-3 w-3" />

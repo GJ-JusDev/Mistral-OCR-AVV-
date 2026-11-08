@@ -36,6 +36,9 @@ export type GradeRecord = {
   curriculum_id?: string;
   source_form_version?: string;
   grading_policy_version?: string;
+  source_side?: "front" | "back" | "both";
+  source_page?: number | string;
+  discrepancy_note?: string;
 };
 
 export type AttendanceRecord = {

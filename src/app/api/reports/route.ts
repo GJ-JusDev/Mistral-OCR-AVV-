@@ -4,6 +4,20 @@ import { format, subDays, startOfDay, endOfDay } from "date-fns";
 
 export async function GET() {
   const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized: Please log in." }, { status: 401 });
+  }
+
+  const { data: roleRow } = await supabase
+    .from("user_roles")
+    .select("role, account_status")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (!roleRow || roleRow.account_status !== "Approved") {
+    return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
+  }
 
   try {
     const [

@@ -8,6 +8,7 @@ import { validateFields } from "@/lib/validation/engine";
 import { normalizeGradeRecords } from "@/lib/validation/gradeUtils";
 import { evaluateAttendanceRecords } from "@/lib/attendance/attendanceEvaluator";
 import type { ExtractedFields } from "@/types/documents";
+import { logAuditEvent } from "@/lib/audit/auditLogger";
 
 export type ReviewResult = {
   success?: boolean;
@@ -89,7 +90,7 @@ export async function submitDocumentReview(
     // 2. Kunin ang kasalukuyang dokumento at extracted fields
     const { data: doc, error: fetchError } = await supabase
       .from("documents")
-      .select("id, status, student_id, extracted_fields, school_id, uploaded_by")
+      .select("id, status, student_id, extracted_fields, school_id, uploaded_by, document_type")
       .eq("id", documentId)
       .single();
 
@@ -177,9 +178,14 @@ export async function submitDocumentReview(
     }
 
     const newStatus = action === "approve" ? "approved" : "rejected";
+    const operationId = crypto.randomUUID();
 
     // 3. Update document status & ensure normalized grades for approval trigger
-    const updatePayload: any = { status: newStatus };
+    const updatePayload: any = { 
+      status: newStatus,
+      reviewed_by: user.id,
+      last_operation_id: operationId,
+    };
     if (action === "approve") {
       let needsExtractedUpdate = false;
       if (Array.isArray(extractedFields.grades)) {
@@ -324,6 +330,27 @@ export async function submitDocumentReview(
       reviewed_by: user.id,
     });
 
+    // 5. Record structured administrative audit log
+    await logAuditEvent({
+      requestId: operationId,
+      category: "REVIEW",
+      action: action === "approve" ? "REVIEW_APPROVED" : "REVIEW_REJECTED",
+      outcome: "SUCCESS",
+      actorUserId: user.id,
+      actorEmail: user.email,
+      actorRole: roleRow?.role || "teacher",
+      targetType: "document",
+      targetId: documentId,
+      targetLabel: `${(doc.document_type || "Document").toUpperCase()} #${documentId.slice(0, 8)}`,
+      reason: comment || (action === "approve" ? "Approved by reviewer" : "Rejected by reviewer"),
+      details: {
+        previous_status: doc.status,
+        new_status: newStatus,
+        document_type: doc.document_type,
+        student_id: studentId || doc.student_id,
+      },
+    });
+
     revalidatePath(`/documents/${documentId}`);
     revalidatePath("/documents");
     revalidatePath("/review");
@@ -384,7 +411,7 @@ export async function saveDocumentCorrections(
 
     const { data: doc, error: fetchError } = await supabase
       .from("documents")
-      .select("id, status, extracted_fields, student_id, school_id, uploaded_by, ocr_confidence")
+      .select("id, status, extracted_fields, student_id, school_id, uploaded_by, ocr_confidence, document_type")
       .eq("id", documentId)
       .single();
 
@@ -438,12 +465,16 @@ export async function saveDocumentCorrections(
       ? doc.status
       : validationReport.status === "valid" ? "validated" : "needs_review";
 
+    const operationId = crypto.randomUUID();
+
     // Update document record
     const { error: updateError } = await supabase
       .from("documents")
       .update({
         extracted_fields: mergedFields,
         status: newStatus,
+        reviewed_by: user.id,
+        last_operation_id: operationId,
       })
       .eq("id", documentId);
 
@@ -460,6 +491,26 @@ export async function saveDocumentCorrections(
       corrections: updatedFields as any,
       comment: comment || "Field corrections saved by reviewer.",
       reviewed_by: user.id,
+    });
+
+    // Administrative audit logging for grade correction
+    await logAuditEvent({
+      requestId: operationId,
+      category: "ACADEMIC",
+      action: "GRADE_CORRECTED",
+      outcome: "SUCCESS",
+      actorUserId: user.id,
+      actorEmail: user.email,
+      actorRole: roleRow?.role || "teacher",
+      targetType: "document",
+      targetId: documentId,
+      targetLabel: `${(doc.document_type || "Document").toUpperCase()} #${documentId.slice(0, 8)}`,
+      reason: comment || "Manual grade correction saved by reviewer",
+      details: {
+        previous_status: doc.status,
+        new_status: newStatus,
+        corrections: updatedFields,
+      },
     });
 
     revalidatePath(`/documents/${documentId}`);
