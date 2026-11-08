@@ -6,6 +6,7 @@ import { evaluateStudentIdentity, verifyStudentCollision } from "@/lib/validatio
 import { isValidSchoolYear } from "@/lib/validation/patterns";
 import { validateFields } from "@/lib/validation/engine";
 import { normalizeGradeRecords } from "@/lib/validation/gradeUtils";
+import { evaluateAttendanceRecords } from "@/lib/attendance/attendanceEvaluator";
 import type { ExtractedFields } from "@/types/documents";
 
 export type ReviewResult = {
@@ -179,9 +180,24 @@ export async function submitDocumentReview(
 
     // 3. Update document status & ensure normalized grades for approval trigger
     const updatePayload: any = { status: newStatus };
-    if (action === "approve" && Array.isArray(extractedFields.grades)) {
-      extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
-      updatePayload.extracted_fields = extractedFields;
+    if (action === "approve") {
+      let needsExtractedUpdate = false;
+      if (Array.isArray(extractedFields.grades)) {
+        extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
+        needsExtractedUpdate = true;
+      }
+      if (Array.isArray(extractedFields.attendance) && extractedFields.attendance.length > 0) {
+        const attEval = evaluateAttendanceRecords(extractedFields.attendance, extractedFields.attendance_months);
+        extractedFields.attendance_totals = attEval.totals;
+        extractedFields.attendance_percentage = attEval.attendancePercentage;
+        extractedFields.absence_percentage = attEval.absencePercentage;
+        extractedFields.attendance_risk_status = attEval.riskStatus;
+        extractedFields.attendance_discrepancy_details = attEval.discrepancyDetails;
+        needsExtractedUpdate = true;
+      }
+      if (needsExtractedUpdate) {
+        updatePayload.extracted_fields = extractedFields;
+      }
     }
 
     const { error: updateError } = await supabase
@@ -191,6 +207,111 @@ export async function submitDocumentReview(
 
     if (updateError) {
       return { error: updateError.message };
+    }
+
+    // 3.1 Synchronize attendance and remedial records if migration 013 tables exist
+    if (action === "approve" && studentId) {
+      try {
+        if (Array.isArray(extractedFields.attendance) && extractedFields.attendance.length > 0) {
+          const sy = extractedFields.school_year || (doc as any).school_year || "Unknown";
+          const gl = extractedFields.grade_level || "Grade 11";
+          const schoolId = doc.school_id || null;
+          const attEval = evaluateAttendanceRecords(extractedFields.attendance, extractedFields.attendance_months);
+
+          // Synchronize attendance summary
+          await (supabase as any).from("attendance_summaries").upsert({
+            student_id: studentId,
+            document_id: documentId,
+            school_id: schoolId,
+            grade_level: gl,
+            school_year: sy,
+            semester: (extractedFields as any).semester || null,
+            total_school_days: attEval.totals.computed_school_days ?? null,
+            total_days_present: attEval.totals.computed_days_present ?? null,
+            total_days_absent: attEval.totals.computed_days_absent ?? null,
+            attendance_percentage: attEval.attendancePercentage ?? null,
+            absence_percentage: attEval.absencePercentage ?? null,
+            risk_status: attEval.riskStatus,
+            verification_status: "ATTENDANCE_VERIFIED",
+            verified_by: user.id,
+            verified_at: new Date().toISOString(),
+            discrepancy_details: attEval.discrepancyDetails,
+          });
+
+          // Synchronize metric rows
+          for (const rec of extractedFields.attendance) {
+            const metricMap: Record<string, string> = {
+              "school days": "No. of School Days",
+              "bilang ng araw ng pasok": "No. of School Days",
+              "present": "No. of Days Present",
+              "pumasok": "No. of Days Present",
+              "absent": "No. of Days Absent",
+              "lumiban": "No. of Days Absent",
+            };
+            let mappedMetric: string | null = null;
+            const lowerLabel = (rec.label || "").toLowerCase();
+            for (const [kw, standardLabel] of Object.entries(metricMap)) {
+              if (lowerLabel.includes(kw)) {
+                mappedMetric = standardLabel;
+                break;
+              }
+            }
+            if (mappedMetric) {
+              const months = extractedFields.attendance_months || [];
+              const monthlyValues: Record<string, number | null> = {};
+              rec.values.forEach((v: string, idx: number) => {
+                const m = months[idx] || `M${idx + 1}`;
+                const parsed = parseFloat(v);
+                monthlyValues[m] = isNaN(parsed) ? null : parsed;
+              });
+
+              await (supabase as any).from("attendance_records").upsert({
+                student_id: studentId,
+                document_id: documentId,
+                school_id: schoolId,
+                grade_level: gl,
+                school_year: sy,
+                semester: (extractedFields as any).semester || null,
+                metric_label: mappedMetric,
+                monthly_values: monthlyValues,
+                computed_total: rec.total ? parseFloat(String(rec.total)) : null,
+                printed_total: rec.total ? parseFloat(String(rec.total)) : null,
+              });
+            }
+          }
+        }
+
+        // Synchronize remedial records for subjects with failed grades or remedial marks
+        if (Array.isArray(extractedFields.grades)) {
+          for (const g of extractedFields.grades) {
+            const origFinal = typeof g.final === "number" ? g.final : parseFloat(String(g.final || ""));
+            const rMark = g.remedial_class_mark ? parseFloat(String(g.remedial_class_mark)) : null;
+            const recomputed = g.recomputed_final_grade ? parseFloat(String(g.recomputed_final_grade)) : null;
+
+            if (!isNaN(origFinal) && (origFinal < 75 || rMark !== null)) {
+              await (supabase as any).from("remedial_records").upsert({
+                student_id: studentId,
+                document_id: documentId,
+                school_id: doc.school_id || null,
+                subject: g.subject || "General Subject",
+                semester: g.semester || null,
+                school_year: extractedFields.school_year || "Unknown",
+                original_final_grade: origFinal,
+                remedial_class_mark: rMark,
+                recomputed_final_grade: recomputed,
+                status: recomputed && recomputed >= 75 ? "REMEDIAL_PASSED" : rMark ? "REMEDIAL_COMPLETED_PENDING_VERIFICATION" : "REMEDIAL_REQUIRED",
+                is_deficiency_resolved: Boolean(recomputed && recomputed >= 75 && !g.needsVerification),
+                is_verified: !g.needsVerification,
+                verified_by: user.id,
+                verified_at: new Date().toISOString(),
+              });
+            }
+          }
+        }
+      } catch (syncErr) {
+        // Migration 013 tables might not yet be applied; log notice without disrupting document approval
+        console.warn("Notice: Migration 013 attendance/remedial relational sync deferred:", syncErr);
+      }
     }
 
     // 4. Log the review decision in review_logs
@@ -298,6 +419,16 @@ export async function saveDocumentCorrections(
     // Normalize grades using semester-aware rules to avoid stale status
     if (Array.isArray(mergedFields.grades)) {
       mergedFields.grades = normalizeGradeRecords(mergedFields.grades);
+    }
+
+    // Evaluate attendance whenever attendance records are provided or modified
+    if (Array.isArray(mergedFields.attendance) && mergedFields.attendance.length > 0) {
+      const attEval = evaluateAttendanceRecords(mergedFields.attendance, mergedFields.attendance_months);
+      mergedFields.attendance_totals = attEval.totals;
+      mergedFields.attendance_percentage = attEval.attendancePercentage;
+      mergedFields.absence_percentage = attEval.absencePercentage;
+      mergedFields.attendance_risk_status = attEval.riskStatus;
+      mergedFields.attendance_discrepancy_details = attEval.discrepancyDetails;
     }
 
     // Re-evaluate validation report using document's recorded OCR confidence

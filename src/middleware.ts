@@ -50,9 +50,10 @@ export async function middleware(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname;
   const isAuthRoute = pathname.startsWith('/login') || pathname.startsWith('/register');
+  const isPublicRoute = pathname === '/' || pathname.startsWith('/landing') || pathname.startsWith('/terms') || isAuthRoute;
   
-  // 1. Kung walang active session at hindi login/register page, pabalikin sa /login
-  if (!user && !isAuthRoute) {
+  // 1. Kung walang active session at hindi public page, pabalikin sa /login
+  if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
@@ -71,7 +72,10 @@ export async function middleware(request: NextRequest) {
       pathname.startsWith('/admin') || 
       pathname.startsWith('/principal') || 
       pathname.startsWith('/upload') || 
-      pathname.startsWith('/review');
+      pathname.startsWith('/review') ||
+      pathname.startsWith('/documents') ||
+      pathname.startsWith('/students') ||
+      pathname.startsWith('/settings');
 
     if (needsRoleCheck) {
       const { data: roleRow } = await supabase
@@ -82,6 +86,13 @@ export async function middleware(request: NextRequest) {
 
       const role = roleRow?.role?.toLowerCase() || '';
       const isApproved = roleRow?.account_status === 'Approved';
+
+      // 3.0 Proteksyon para sa hindi pa approved (Pending o Declined): ibalik sa '/'
+      if (!isApproved) {
+        const url = request.nextUrl.clone();
+        url.pathname = '/';
+        return NextResponse.redirect(url);
+      }
 
       // 3.1 Proteksyon sa Admin routes: Approved Admin lamang ang pwedeng pumasok
       if (pathname.startsWith('/admin')) {

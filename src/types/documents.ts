@@ -28,6 +28,9 @@ export type GradeRecord = {
   final?: number | string;
   action_taken?: string;
   remark?: string;
+  computed_final_grade?: number;
+  has_calculation_discrepancy?: boolean;
+  calculation_notes?: string;
   status: "Passed" | "Failed" | "Missing";
   needsVerification?: boolean;
   curriculum_id?: string;
@@ -38,6 +41,7 @@ export type GradeRecord = {
 export type AttendanceRecord = {
   label: string;
   values: string[];
+  total?: string | number;
 };
 
 export type ExtractedFields = {
@@ -72,6 +76,18 @@ export type ExtractedFields = {
   shs_general_average_printed?: number
   attendance?: AttendanceRecord[]
   attendance_months?: string[]
+  attendance_totals?: {
+    computed_school_days?: number
+    computed_days_present?: number
+    computed_days_absent?: number
+    printed_school_days?: number
+    printed_days_present?: number
+    printed_days_absent?: number
+  }
+  attendance_percentage?: number
+  absence_percentage?: number
+  attendance_risk_status?: "NORMAL" | "ATTENDANCE_WARNING" | "ATTENDANCE_REVIEW_REQUIRED" | "INCOMPLETE_ATTENDANCE_DATA"
+  attendance_discrepancy_details?: string[]
   flags?: string[]
   school_id_source?: "school_configuration" | "ocr" | "system_config" | "user_override"
   school_uuid?: string

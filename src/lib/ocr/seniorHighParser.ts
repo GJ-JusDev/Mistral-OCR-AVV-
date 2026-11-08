@@ -1,6 +1,7 @@
-import type { ExtractedFields, GradeRecord } from "@/types/documents";
+import type { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
 import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
+import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
 
 /**
  * MGA KEYWORDS NA HINDI DAPAT ITURING NA ACADEMIC SUBJECT
@@ -113,6 +114,21 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       if (tableResult.attendance_months && tableResult.attendance_months.length > 0) {
         fields.attendance_months = tableResult.attendance_months;
       }
+      if (tableResult.attendance_totals) {
+        fields.attendance_totals = tableResult.attendance_totals;
+      }
+      if (tableResult.attendance_percentage !== undefined) {
+        fields.attendance_percentage = tableResult.attendance_percentage;
+      }
+      if (tableResult.absence_percentage !== undefined) {
+        fields.absence_percentage = tableResult.absence_percentage;
+      }
+      if (tableResult.attendance_risk_status !== undefined) {
+        fields.attendance_risk_status = tableResult.attendance_risk_status;
+      }
+      if (tableResult.attendance_discrepancy_details) {
+        fields.attendance_discrepancy_details = tableResult.attendance_discrepancy_details;
+      }
       if (tableResult.general_average !== undefined) {
         fields.general_average = tableResult.general_average;
       }
@@ -123,7 +139,8 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   // Phase 14: Fallback sa Markdown pipe table parser (para sa Mistral OCR o text-only output)
   const lines = text.split(/\r?\n/).map((l) => l.trim());
   const grades: GradeRecord[] = [];
-  const attendance: { label: string; values: string[] }[] = [];
+  const attendance: AttendanceRecord[] = [];
+  let attendanceTotalColIdx = -1;
 
   let currentCategory = "";
   let currentSemester: "1st Semester" | "2nd Semester" | undefined = undefined;
@@ -198,7 +215,16 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         return monthKeywords.some(kw => lower === kw || lower.includes(kw));
       });
       if (hasMonths && cells.length >= 5) {
-        fields.attendance_months = cells.filter(c => c.length > 0 && c !== "-");
+        const foundTotal = cells.findIndex((c, idx) => idx > 0 && c.toLowerCase().includes("total"));
+        if (foundTotal > 0) {
+          attendanceTotalColIdx = foundTotal;
+          fields.attendance_months = cells.slice(1, attendanceTotalColIdx).filter(c => c.length > 0 && c !== "-");
+        } else {
+          fields.attendance_months = cells.slice(1).filter(c => {
+            const l = c.toLowerCase();
+            return monthKeywords.some(kw => l === kw || l.includes(kw));
+          });
+        }
         continue;
       }
 
@@ -228,13 +254,22 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       ].some(kw => subjectLower.includes(kw));
 
       if (isAttendance) {
-        const values = cells.slice(1).map(c => c.replace(/[^\d]/g, ''));
-        if (values.some(v => v !== "")) {
-          attendance.push({
-            label: subject,
-            values: values
-          });
+        let values: string[] = [];
+        let totalVal: string | undefined = undefined;
+
+        if (attendanceTotalColIdx > 0 && attendanceTotalColIdx < cells.length) {
+          values = cells.slice(1, attendanceTotalColIdx).map(c => c.replace(/[^0-9.]/g, '').trim());
+          const rawTotal = cells[attendanceTotalColIdx]?.replace(/[^0-9.]/g, '').trim();
+          totalVal = rawTotal !== "" ? rawTotal : undefined;
+        } else {
+          values = cells.slice(1).map(c => c.replace(/[^0-9.]/g, '').trim());
         }
+
+        attendance.push({
+          label: subject,
+          values,
+          total: totalVal,
+        });
         continue;
       }
 
@@ -389,6 +424,40 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   }
   if (attendance.length > 0) {
     fields.attendance = attendance;
+    if (fields.attendance_months && fields.attendance_months.length > 0) {
+      const schoolDaysRec = attendance.find((a) =>
+        a.label.toLowerCase().includes("school days") || a.label.toLowerCase().includes("bilang ng araw ng pasok")
+      );
+      const daysPresentRec = attendance.find((a) =>
+        a.label.toLowerCase().includes("present") || a.label.toLowerCase().includes("pumasok")
+      );
+      const daysAbsentRec = attendance.find((a) =>
+        a.label.toLowerCase().includes("absent") || a.label.toLowerCase().includes("lumiban")
+      );
+
+      const evaluated = evaluateAttendanceData({
+        months: fields.attendance_months,
+        schoolDaysRow: schoolDaysRec?.values,
+        daysPresentRow: daysPresentRec?.values,
+        daysAbsentRow: daysAbsentRec?.values,
+        printedSchoolDaysTotal: schoolDaysRec?.total,
+        printedDaysPresentTotal: daysPresentRec?.total,
+        printedDaysAbsentTotal: daysAbsentRec?.total,
+      });
+
+      fields.attendance_totals = {
+        computed_school_days: evaluated.computedSchoolDays,
+        computed_days_present: evaluated.computedDaysPresent,
+        computed_days_absent: evaluated.computedDaysAbsent,
+        printed_school_days: evaluated.printedSchoolDays,
+        printed_days_present: evaluated.printedDaysPresent,
+        printed_days_absent: evaluated.printedDaysAbsent,
+      };
+      fields.attendance_percentage = evaluated.attendancePercentage;
+      fields.absence_percentage = evaluated.absencePercentage;
+      fields.attendance_risk_status = evaluated.riskStatus;
+      fields.attendance_discrepancy_details = evaluated.discrepancyDetails;
+    }
   }
   return fields;
 }

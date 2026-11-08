@@ -13,15 +13,24 @@ import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import type { ExtractedFields } from "@/types/validation";
 import PrincipalDashboard from "@/components/principal/PrincipalDashboard";
 import { getPrincipalDashboardData } from "@/actions/principal";
+import LandingPage from "@/components/landing/LandingPage";
+import { LogoutButton } from "@/components/auth/LogoutButton";
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const supabase = await createClient();
 
   // Get current user
   const { data: { user } } = await supabase.auth.getUser();
 
-  if (!user) {
-    return null; // Let middleware handle redirect
+  const resolvedParams = searchParams ? await searchParams : {};
+  const forceLanding = resolvedParams?.view === "landing";
+
+  if (!user || forceLanding) {
+    return <LandingPage user={user} />;
   }
 
   // Check authoritative user role from user_roles
@@ -32,6 +41,39 @@ export default async function DashboardPage() {
     .maybeSingle();
 
   const role = roleRow?.role?.toLowerCase() || user?.user_metadata?.role?.toLowerCase();
+  const accountStatus = roleRow?.account_status || user?.user_metadata?.account_status || "Pending";
+  const isApproved = accountStatus === "Approved";
+
+  if (!isApproved) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#0B1F33] text-white p-6">
+        <div className="max-w-md w-full bg-[#102A43] border border-white/10 rounded-2xl p-8 text-center shadow-2xl">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#F4C542]/15 text-[#F4C542] mb-5 border border-[#F4C542]/30">
+            <AlertTriangle className="h-7 w-7" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">
+            {accountStatus === "Declined" ? "Account Declined" : "Account Pending Approval"}
+          </h2>
+          <p className="text-sm text-[#CBD5E1] leading-relaxed mb-6">
+            {accountStatus === "Declined"
+              ? "Your account registration was declined by the administrator. Please contact your school administrator for assistance."
+              : "Your account registration is currently pending administrator verification. You will be able to access the validation dashboard once approved."}
+          </p>
+          <div className="flex flex-col gap-3">
+            <Link
+              href="/?view=landing"
+              className="w-full inline-flex items-center justify-center px-4 py-2.5 rounded-full bg-white/10 hover:bg-white/15 text-sm font-medium text-white transition-colors"
+            >
+              Return to Landing Page
+            </Link>
+            <div className="flex justify-center pt-2">
+              <LogoutButton />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Route Principal directly to dedicated executive monitoring dashboard
   if (role === "principal") {

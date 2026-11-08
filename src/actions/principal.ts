@@ -4,6 +4,7 @@ import { createClient as createServerClient } from "@/lib/supabase/server";
 import { parseGradeNumber } from "@/lib/students/studentDirectory";
 import { compareUnifiedStudentDocuments, RawNameFields } from "@/lib/validation/nameComparison";
 import { evaluateShsStudentEligibility, EvaluatedSubject, ShsEligibilityType } from "@/lib/eligibility/evaluator";
+import type { RemedialStatus } from "@/lib/remedial/remedialEvaluator";
 import { revalidatePath } from "next/cache";
 
 // Default single institution scope (TRIS)
@@ -288,9 +289,20 @@ export async function getPrincipalDashboardData() {
 
       // Evaluate eligibility
       const studentGrades = allGrades.filter(g => g.student_id === st.id);
+      const sf9Doc = studentDocs.find((d: any) => d.document_type === "sf9");
+      const sf9Fields = (sf9Doc?.extracted_fields as any) || {};
+      const attendanceSummary = sf9Fields.attendance_risk_status
+        ? {
+            riskStatus: sf9Fields.attendance_risk_status,
+            absencePercentage: sf9Fields.absence_percentage,
+            attendancePercentage: sf9Fields.attendance_percentage,
+          }
+        : null;
+
       const evalResult = evaluateShsStudentEligibility({
         gradeLevel: st.grade_level,
         subjects: studentGrades,
+        attendanceSummary,
         documentCompleteness: {
           isComplete: hasSf9 && hasSf10 && hasPsa,
           hasSf9,
@@ -547,11 +559,21 @@ export async function getPrincipalStudentRecords(filters?: {
       // Phase 7: Academic Eligibility Evaluation
       const studentGrades = allGrades.filter(g => g.student_id === st.id);
       const existingApproval = eligibilityMap.get(st.id) || null;
+      const sf9DocItem = docs.find((d: any) => d.document_type === "sf9");
+      const sf9FieldsItem = (sf9DocItem?.extracted_fields as any) || {};
+      const attendanceSummary = sf9FieldsItem.attendance_risk_status
+        ? {
+            riskStatus: sf9FieldsItem.attendance_risk_status,
+            absencePercentage: sf9FieldsItem.absence_percentage,
+            attendancePercentage: sf9FieldsItem.attendance_percentage,
+          }
+        : null;
 
       const eligibility = evaluateShsStudentEligibility({
         gradeLevel: grade,
         schoolYear,
         subjects: studentGrades,
+        attendanceSummary,
         documentCompleteness: {
           isComplete: completenessStatus === "COMPLETE",
           hasSf9,
@@ -603,6 +625,11 @@ export async function getPrincipalStudentRecords(filters?: {
           hasPsa,
         },
         eligibility,
+        academicStatus: eligibility.academicCategory,
+        attendanceStatus: eligibility.attendanceCategory,
+        documentStatus: eligibility.documentCategory,
+        attendanceSummary,
+        taglishAdvisory: eligibility.taglishAdvisory,
         identityComparison,
         documentsCount: docs.length,
         latestDocumentId: latestDoc?.id || null,
@@ -880,7 +907,21 @@ export async function getPrincipalStudentDetails(identifier: string) {
         finalGrade: g.final_grade,
         status: g.status || (g.final_grade >= 75 ? "Passed" : g.final_grade ? "Failed" : "Missing"),
         needsVerification: g.needs_verification,
+        remedialClassMark: g.remedial_class_mark,
+        recomputedFinalGrade: g.recomputed_final_grade,
+        remedialStatus: (g.recomputed_final_grade >= 75 ? "REMEDIAL_PASSED" : g.failed_final_grade ? "REMEDIAL_REQUIRED" : null) as RemedialStatus | null,
+        isRemedialVerified: Boolean(g.recomputed_final_grade && !g.needs_verification),
       }));
+
+      // Attendance summary from SF9
+      const sf9Fields = (sf9Doc?.extractedFields as any) || {};
+      const attendanceSummary = sf9Fields.attendance_risk_status
+        ? {
+            riskStatus: sf9Fields.attendance_risk_status,
+            absencePercentage: sf9Fields.absence_percentage,
+            attendancePercentage: sf9Fields.attendance_percentage,
+          }
+        : null;
 
       // Evaluate eligibility
       const gradeLevel = normalizeShsGrade(student.grade_level);
@@ -889,6 +930,7 @@ export async function getPrincipalStudentDetails(identifier: string) {
         gradeLevel,
         schoolYear,
         subjects: rawGradesList,
+        attendanceSummary,
         documentCompleteness: {
           isComplete: completenessStatus === "COMPLETE",
           hasSf9,
@@ -929,6 +971,11 @@ export async function getPrincipalStudentDetails(identifier: string) {
         },
         identityComparison,
         eligibility,
+        academicStatus: eligibility.academicCategory,
+        attendanceStatus: eligibility.attendanceCategory,
+        documentStatus: eligibility.documentCategory,
+        attendanceSummary,
+        taglishAdvisory: eligibility.taglishAdvisory,
         approvalRecord: existingApproval,
       };
     }

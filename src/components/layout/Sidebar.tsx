@@ -51,7 +51,7 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
 
-  if (pathname === "/login" || pathname === "/register") {
+  if (pathname === "/login" || pathname === "/register" || pathname === "/landing") {
     return null;
   }
 

@@ -69,10 +69,19 @@ interface StudentRecord {
     eligibilityType: string;
     status: "Eligible" | "Not Eligible" | "Needs Review";
     approvalDecision: "Approved" | "Not Approved" | "Pending";
+    academicCategory?: string;
+    attendanceCategory?: string;
+    documentCategory?: string;
+    taglishAdvisory?: string;
     reasons: string[];
     blockingFactors: string[];
     canPrincipalApprove: boolean;
   };
+  academicStatus?: string;
+  attendanceStatus?: string;
+  documentStatus?: string;
+  attendanceSummary?: any;
+  taglishAdvisory?: string;
   identityComparison: {
     overallStatus: "MATCH" | "IDENTITY_REVIEW_REQUIRED";
     isSameLearner: boolean;
@@ -434,8 +443,9 @@ export default function PrincipalStudentsView({
                 <TableHead>LRN</TableHead>
                 <TableHead>Grade & Section</TableHead>
                 <TableHead>School Year</TableHead>
-                <TableHead>Scanned Documents</TableHead>
-                <TableHead>Completeness</TableHead>
+                <TableHead>Academic Status</TableHead>
+                <TableHead>Attendance Status</TableHead>
+                <TableHead>Document Status</TableHead>
                 <TableHead>Academic Eligibility</TableHead>
                 <TableHead>Principal Action</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
@@ -471,66 +481,54 @@ export default function PrincipalStudentsView({
                         {st.schoolYear}
                       </TableCell>
 
-                      {/* Scanned Documents Set */}
+                      {/* 1. Academic Status */}
                       <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          {/* SF9 */}
-                          <span
-                            title={st.availableDocuments.sf9 ? `SF9: ${st.availableDocuments.sf9.status}` : "SF9 Missing"}
-                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[0.65rem] font-bold ${
-                              st.availableDocuments.sf9
-                                ? "bg-purple-100 text-purple-800 border border-purple-200"
-                                : "bg-zinc-100 text-zinc-400"
-                            }`}
-                          >
-                            SF9
-                          </span>
-                          {/* SF10 */}
-                          <span
-                            title={st.availableDocuments.sf10 ? `SF10: ${st.availableDocuments.sf10.status}` : "SF10 Missing"}
-                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[0.65rem] font-bold ${
-                              st.availableDocuments.sf10
-                                ? "bg-blue-100 text-blue-800 border border-blue-200"
-                                : "bg-zinc-100 text-zinc-400"
-                            }`}
-                          >
-                            SF10
-                          </span>
-                          {/* PSA */}
-                          <span
-                            title={st.availableDocuments.psa ? `PSA: ${st.availableDocuments.psa.status}` : "PSA Missing"}
-                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[0.65rem] font-bold ${
-                              st.availableDocuments.psa
-                                ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                                : "bg-zinc-100 text-zinc-400"
-                            }`}
-                          >
-                            PSA
-                          </span>
-                        </div>
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-semibold ${
+                          (st.academicStatus || st.eligibility?.academicCategory) === "Remedial Required"
+                            ? "bg-red-50 text-red-700 border border-red-200"
+                            : (st.academicStatus || st.eligibility?.academicCategory) === "Remedial In Progress"
+                            ? "bg-blue-50 text-blue-700 border border-blue-200"
+                            : (st.academicStatus || st.eligibility?.academicCategory) === "Academic Review Required"
+                            ? "bg-amber-50 text-amber-700 border border-amber-200"
+                            : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                        }`}>
+                          {st.academicStatus || st.eligibility?.academicCategory || "Passed"}
+                        </span>
                       </TableCell>
 
-                      {/* Document Completeness Indicator */}
+                      {/* 2. Attendance Status */}
                       <TableCell>
-                        {isIdentityReview ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-semibold bg-purple-50 text-[#7c3aed] border border-purple-200">
-                            <AlertCircle className="h-3 w-3" />
-                            Identity Review Required
-                          </span>
-                        ) : isComplete ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Complete Set
-                          </span>
-                        ) : (
-                          <span 
-                            title={st.completeness?.label}
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-medium bg-amber-50 text-amber-700 border border-amber-200"
-                          >
-                            <AlertTriangle className="h-3 w-3" />
-                            {!st.completeness?.hasPsa ? "Missing PSA" : "Incomplete"}
-                          </span>
-                        )}
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-semibold ${
+                          (st.attendanceStatus || st.eligibility?.attendanceCategory) === "Review Required"
+                            ? "bg-red-50 text-red-700 border border-red-200"
+                            : (st.attendanceStatus || st.eligibility?.attendanceCategory) === "Warning"
+                            ? "bg-amber-50 text-amber-700 border border-amber-200"
+                            : (st.attendanceStatus || st.eligibility?.attendanceCategory) === "Incomplete Data"
+                            ? "bg-zinc-100 text-zinc-600 border border-zinc-200"
+                            : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                        }`}>
+                          {st.attendanceStatus || st.eligibility?.attendanceCategory || "Normal"}
+                        </span>
+                      </TableCell>
+
+                      {/* 3. Document Status */}
+                      <TableCell>
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[0.7rem] font-semibold ${
+                          isComplete || (st.documentStatus || st.eligibility?.documentCategory) === "Complete"
+                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                            : isIdentityReview || (st.documentStatus || st.eligibility?.documentCategory) === "Identity Review Required"
+                            ? "bg-purple-50 text-purple-700 border border-purple-200"
+                            : "bg-amber-50 text-amber-700 border border-amber-200"
+                        }`}>
+                          {isComplete ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              Complete Set
+                            </>
+                          ) : (
+                            st.documentStatus || st.eligibility?.documentCategory || "Incomplete"
+                          )}
+                        </span>
                       </TableCell>
 
                       {/* Academic Eligibility Assessment */}
@@ -675,6 +673,65 @@ export default function PrincipalStudentsView({
                         <p className="text-sm text-zinc-800 mt-0.5">{studentDetails.student.schoolYear || "N/A"}</p>
                       </div>
                     </div>
+                  </div>
+
+                  {/* Phase 8: Three Independent Monitoring Categories & Taglish Guidance */}
+                  <div className="p-4 rounded-lg border border-zinc-200 bg-white shadow-xs space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-zinc-100">
+                      <span className="text-xs font-bold uppercase tracking-wider text-zinc-900">
+                        Official Monitoring Overview (3 Independent Categories)
+                      </span>
+                      <span className="text-[0.65rem] text-zinc-400 font-medium">TRIS School ID: 300792</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {/* 1. Academic Status */}
+                      <div className="p-3 rounded-lg bg-zinc-50 border border-zinc-200">
+                        <span className="text-[0.65rem] font-bold text-zinc-500 uppercase block">Academic Status</span>
+                        <p className="text-sm font-bold text-zinc-900 mt-0.5">
+                          {studentDetails.academicStatus || studentDetails.eligibility?.academicCategory || "Passed"}
+                        </p>
+                        <p className="text-[0.7rem] text-zinc-500 mt-1">
+                          {studentDetails.eligibility?.failedSubjectsCount > 0
+                            ? `Affected: ${studentDetails.eligibility.failedSubjectsCount} subject(s)`
+                            : "All evaluated subjects passing"}
+                        </p>
+                      </div>
+
+                      {/* 2. Attendance Status */}
+                      <div className="p-3 rounded-lg bg-zinc-50 border border-zinc-200">
+                        <span className="text-[0.65rem] font-bold text-zinc-500 uppercase block">Attendance Status</span>
+                        <p className="text-sm font-bold text-zinc-900 mt-0.5">
+                          {studentDetails.attendanceStatus || studentDetails.eligibility?.attendanceCategory || "Normal"}
+                        </p>
+                        <p className="text-[0.7rem] text-zinc-500 mt-1">
+                          {studentDetails.attendanceSummary?.absencePercentage !== undefined
+                            ? `${studentDetails.attendanceSummary.absencePercentage}% absences recorded`
+                            : "Standard attendance range"}
+                        </p>
+                      </div>
+
+                      {/* 3. Document Status */}
+                      <div className="p-3 rounded-lg bg-zinc-50 border border-zinc-200">
+                        <span className="text-[0.65rem] font-bold text-zinc-500 uppercase block">Document Status</span>
+                        <p className="text-sm font-bold text-zinc-900 mt-0.5">
+                          {studentDetails.documentStatus || studentDetails.eligibility?.documentCategory || "Complete"}
+                        </p>
+                        <p className="text-[0.7rem] text-zinc-500 mt-1">
+                          {studentDetails.completeness?.hasSf9 && studentDetails.completeness?.hasSf10 && studentDetails.completeness?.hasPsa
+                            ? "Complete (SF9, SF10, PSA)"
+                            : "Incomplete document set"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Taglish Advisory Guidance */}
+                    {studentDetails.taglishAdvisory && (
+                      <div className="p-3 rounded-lg bg-purple-50 border border-purple-200 text-purple-900 text-xs">
+                        <span className="font-bold block mb-0.5">Taglish Principal Advisory:</span>
+                        <span>{studentDetails.taglishAdvisory}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Phase 5: Cross-Document Identity Comparison Banner */}

@@ -47,6 +47,37 @@ export function getAuthoritativeSemesterFinalGrade(
 }
 
 /**
+ * DEPED SEMESTER FINAL GRADE COMPUTATION (DO 8, s. 2015)
+ *
+ * Kinakalkula ang semestral final grade ayon sa opisyal na DepEd guidelines:
+ * Para sa 1st Semester: (Q1 + Q2) / 2
+ * Para sa 2nd Semester: (Q3 + Q4) / 2
+ *
+ * Ginagamitan ng standard rounding (half-up sa pinakamalapit na buong numero):
+ * Halimbawa: 87.5 -> 88, 74.5 -> 75, 74.49 -> 74.
+ *
+ * Zero Grade Invention: Kung kulang o non-numeric ang alinmang quarter,
+ * ibinabalik nito ang undefined upang hindi mag-imbento ng grado.
+ */
+export function computeSemesterFinalGrade(
+  qA: number | string | undefined | null,
+  qB: number | string | undefined | null
+): number | undefined {
+  if (qA === undefined || qA === null || qB === undefined || qB === null) return undefined;
+  const strA = String(qA).trim();
+  const strB = String(qB).trim();
+  if (strA === "" || strB === "" || strA === "-" || strB === "-") return undefined;
+
+  const numA = typeof qA === "number" ? qA : parseFloat(strA);
+  const numB = typeof qB === "number" ? qB : parseFloat(strB);
+
+  if (isNaN(numA) || isNaN(numB)) return undefined;
+
+  // Opisyal na formula ng DepEd: Average ng dalawang quarters, rounded to whole number
+  return Math.round((numA + numB) / 2);
+}
+
+/**
  * DEPED K-12 SHS GRADE STATUS RECALCULATOR & VERIFICATION FLAGS
  *
  * Bakit ito kailangan para sa Capstone Defense:
@@ -59,12 +90,41 @@ export function getAuthoritativeSemesterFinalGrade(
  * 3. Zero Grade Fabrication:
  *    Kapag blank o may nakasulat na "INC" o "DRP", minamarkahan itong "Missing".
  *    Hindi kailanman nag-iimbento o nagpe-peke ng grado ang ating AVV system!
+ * 4. Discrepancy Detection:
+ *    Kinukumpara ang printed semester final grade laban sa computed average ng quarters.
+ *    Kapag hindi tugma, tinatatakan ng `has_calculation_discrepancy = true` para sa teacher review.
  */
 export function recalculateSubjectGradeStatus(record: GradeRecord): GradeRecord {
   const updated: GradeRecord = { ...record };
 
   // Alamin ang authoritative semestral final grade
   const candidate = getAuthoritativeSemesterFinalGrade(updated);
+
+  // Alamin kung may quarters na pwedeng kwentahin ayon sa semester
+  let qA: number | string | undefined | null = undefined;
+  let qB: number | string | undefined | null = undefined;
+
+  if (updated.semester === "1st Semester" || updated.semester === "First Semester") {
+    qA = updated.q1;
+    qB = updated.q2;
+  } else if (updated.semester === "2nd Semester" || updated.semester === "Second Semester") {
+    qA = updated.q3;
+    qB = updated.q4;
+  } else {
+    // Kung walang explicit semester pero may Q1 at Q2 o Q3 at Q4
+    if (updated.q1 !== undefined && updated.q2 !== undefined) {
+      qA = updated.q1;
+      qB = updated.q2;
+    } else if (updated.q3 !== undefined && updated.q4 !== undefined) {
+      qA = updated.q3;
+      qB = updated.q4;
+    }
+  }
+
+  const computedGrade = computeSemesterFinalGrade(qA, qB);
+  if (computedGrade !== undefined) {
+    updated.computed_final_grade = computedGrade;
+  }
 
   // Synchronize across properties based on semester context
   if (updated.semester === "1st Semester" || updated.semester === "First Semester") {
@@ -97,6 +157,10 @@ export function recalculateSubjectGradeStatus(record: GradeRecord): GradeRecord 
     }
     updated.status = "Missing";
     updated.needsVerification = true;
+    if (computedGrade !== undefined) {
+      updated.has_calculation_discrepancy = false;
+      updated.calculation_notes = `May quarterly marks (${qA}, ${qB}) na may computed grade na ${computedGrade}, ngunit blank ang printed final grade.`;
+    }
     return updated;
   }
 
@@ -108,6 +172,19 @@ export function recalculateSubjectGradeStatus(record: GradeRecord): GradeRecord 
     const num = parseFloat(numMatch[1]);
     if (!isNaN(num)) {
       updated.status = num >= 75 ? "Passed" : "Failed";
+
+      // Kung bagsak (< 75), itala ang failed_final_grade at suriin kung may remedial_class_mark
+      if (num < 75) {
+        if (!updated.failed_final_grade) {
+          updated.failed_final_grade = num;
+        }
+        if (updated.remedial_class_mark !== undefined && updated.remedial_class_mark !== null && String(updated.remedial_class_mark).trim() !== "") {
+          const rMark = typeof updated.remedial_class_mark === "number" ? updated.remedial_class_mark : parseFloat(String(updated.remedial_class_mark));
+          if (!isNaN(rMark)) {
+            updated.recomputed_final_grade = Math.round((num + rMark) / 2);
+          }
+        }
+      }
 
       // Borderline final grade warning [72, 77]
       let needsVerif = num >= 72 && num <= 77;
@@ -127,6 +204,18 @@ export function recalculateSubjectGradeStatus(record: GradeRecord): GradeRecord 
         }
       }
 
+      // Discrepancy detection sa pagitan ng printed final at computed average ng quarters
+      if (computedGrade !== undefined) {
+        const printedRounded = Math.round(num);
+        if (printedRounded !== computedGrade) {
+          updated.has_calculation_discrepancy = true;
+          needsVerif = true;
+          updated.calculation_notes = `Discrepancy sa grado: Ang nakasulat na final grade ay ${candidateStr}, ngunit ang computed average ng quarters ay ${computedGrade}.`;
+        } else {
+          updated.has_calculation_discrepancy = false;
+        }
+      }
+
       updated.needsVerification = needsVerif;
       return updated;
     }
@@ -135,6 +224,10 @@ export function recalculateSubjectGradeStatus(record: GradeRecord): GradeRecord 
   // DepEd non-numeric mark (e.g., INC, DRP, N/A)
   updated.status = "Missing";
   updated.needsVerification = true;
+  if (computedGrade !== undefined) {
+    updated.has_calculation_discrepancy = true;
+    updated.calculation_notes = `Nakasulat na marka ay "${candidateStr}", ngunit may computed quarter average na ${computedGrade}. Kailangan itong i-verify ng guro.`;
+  }
   return updated;
 }
 

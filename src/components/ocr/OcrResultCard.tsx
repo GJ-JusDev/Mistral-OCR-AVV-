@@ -165,6 +165,18 @@ export default function OcrResultCard({
     onFieldChange("attendance", updatedAttendance);
   };
 
+  const handleAttendanceTotalChange = (
+    recordIndex: number,
+    valStr: string
+  ) => {
+    if (!onFieldChange || !Array.isArray(fields.attendance)) return;
+    const updatedAttendance = [...fields.attendance];
+    const rec = { ...updatedAttendance[recordIndex] };
+    rec.total = valStr.trim() === "" ? undefined : valStr;
+    updatedAttendance[recordIndex] = rec;
+    onFieldChange("attendance", updatedAttendance);
+  };
+
   return (
     <Card
       title="Extraction & Verification Panel"
@@ -655,6 +667,42 @@ export default function OcrResultCard({
                                       </span>
                                     </td>
                                   </tr>
+                                  {(item.status === "Failed" || item.remedial_class_mark !== undefined || item.recomputed_final_grade !== undefined) && (
+                                    <tr className="bg-amber-50/60 dark:bg-amber-950/20 text-xs">
+                                      <td colSpan={5} className="py-1.5 px-3">
+                                        <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                                          <span className="font-semibold text-amber-900 dark:text-amber-300">
+                                            Remedial Record:
+                                          </span>
+                                          <div className="flex items-center gap-1">
+                                            <span className="text-zinc-600 dark:text-zinc-400">Class Mark:</span>
+                                            {onFieldChange ? (
+                                              <input
+                                                type="text"
+                                                value={item.remedial_class_mark !== undefined ? String(item.remedial_class_mark) : ""}
+                                                placeholder="e.g. 78"
+                                                onChange={(e) => handleGradeCellChange(item.origIndex, "remedial_class_mark" as any, e.target.value)}
+                                                className="w-14 text-center bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 font-mono focus:border-blue-500 focus:outline-none"
+                                              />
+                                            ) : (
+                                              <span className="font-mono font-semibold">{item.remedial_class_mark ?? "None"}</span>
+                                            )}
+                                          </div>
+                                          {item.recomputed_final_grade !== undefined && (
+                                            <div className="flex items-center gap-1">
+                                              <span className="text-zinc-600 dark:text-zinc-400">Recomputed Final:</span>
+                                              <span className={`font-mono font-bold ${Number(item.recomputed_final_grade) >= 75 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                                                {item.recomputed_final_grade}
+                                              </span>
+                                              <span className="text-[10px] text-zinc-500 italic">
+                                                ({Number(item.recomputed_final_grade) >= 75 ? "Passed" : "Failed"} via round((orig+mark)/2))
+                                              </span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
                                 </React.Fragment>
                               );
                             })
@@ -801,6 +849,42 @@ export default function OcrResultCard({
                                       </span>
                                     </td>
                                   </tr>
+                                  {(item.status === "Failed" || item.remedial_class_mark !== undefined || item.recomputed_final_grade !== undefined) && (
+                                    <tr className="bg-amber-50/60 dark:bg-amber-950/20 text-xs">
+                                      <td colSpan={5} className="py-1.5 px-3">
+                                        <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                                          <span className="font-semibold text-amber-900 dark:text-amber-300">
+                                            Remedial Record:
+                                          </span>
+                                          <div className="flex items-center gap-1">
+                                            <span className="text-zinc-600 dark:text-zinc-400">Class Mark:</span>
+                                            {onFieldChange ? (
+                                              <input
+                                                type="text"
+                                                value={item.remedial_class_mark !== undefined ? String(item.remedial_class_mark) : ""}
+                                                placeholder="e.g. 78"
+                                                onChange={(e) => handleGradeCellChange(item.origIndex, "remedial_class_mark" as any, e.target.value)}
+                                                className="w-14 text-center bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 font-mono focus:border-blue-500 focus:outline-none"
+                                              />
+                                            ) : (
+                                              <span className="font-mono font-semibold">{item.remedial_class_mark ?? "None"}</span>
+                                            )}
+                                          </div>
+                                          {item.recomputed_final_grade !== undefined && (
+                                            <div className="flex items-center gap-1">
+                                              <span className="text-zinc-600 dark:text-zinc-400">Recomputed Final:</span>
+                                              <span className={`font-mono font-bold ${Number(item.recomputed_final_grade) >= 75 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                                                {item.recomputed_final_grade}
+                                              </span>
+                                              <span className="text-[10px] text-zinc-500 italic">
+                                                ({Number(item.recomputed_final_grade) >= 75 ? "Passed" : "Failed"} via round((orig+mark)/2))
+                                              </span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
                                 </React.Fragment>
                               );
                             })
@@ -981,11 +1065,16 @@ export default function OcrResultCard({
                     <tr className="border-b border-zinc-200 dark:border-zinc-700">
                       <th className="py-2.5 px-3">Metric</th>
                       {fields.attendance_months && fields.attendance_months.length > 0 ? (
-                        fields.attendance_months.map((m: string, i: number) => (
-                          <th key={i} className="py-2.5 px-2 font-semibold text-center text-xs">
-                            {m}
+                        <>
+                          {fields.attendance_months.map((m: string, i: number) => (
+                            <th key={i} className="py-2.5 px-2 font-semibold text-center text-xs">
+                              {m}
+                            </th>
+                          ))}
+                          <th className="py-2.5 px-2 font-bold text-center text-xs bg-zinc-200/50 dark:bg-zinc-700/50">
+                            Total
                           </th>
-                        ))
+                        </>
                       ) : (
                         <th className="py-2.5 px-3">Values</th>
                       )}
@@ -998,22 +1087,40 @@ export default function OcrResultCard({
                           {a.label}
                         </td>
                         {fields.attendance_months && fields.attendance_months.length > 0 ? (
-                          fields.attendance_months.map((_, cIdx: number) => (
-                            <td key={cIdx} className="py-2 px-1 text-center">
+                          <>
+                            {fields.attendance_months.map((_, cIdx: number) => (
+                              <td key={cIdx} className="py-2 px-1 text-center">
+                                {onFieldChange ? (
+                                  <input
+                                    type="text"
+                                    value={a.values[cIdx] || ""}
+                                    onChange={(e) =>
+                                      handleAttendanceCellChange(rIdx, cIdx, e.target.value)
+                                    }
+                                    className="w-10 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded px-1 py-0.5 text-xs focus:border-blue-500 focus:outline-none"
+                                  />
+                                ) : (
+                                  <span className="text-xs font-mono">{a.values[cIdx] || "-"}</span>
+                                )}
+                              </td>
+                            ))}
+                            <td className="py-2 px-2 text-center bg-zinc-50/50 dark:bg-zinc-800/50 font-bold text-xs">
                               {onFieldChange ? (
                                 <input
                                   type="text"
-                                  value={a.values[cIdx] || ""}
+                                  value={a.total !== undefined ? String(a.total) : ""}
                                   onChange={(e) =>
-                                    handleAttendanceCellChange(rIdx, cIdx, e.target.value)
+                                    handleAttendanceTotalChange(rIdx, e.target.value)
                                   }
-                                  className="w-10 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded px-1 py-0.5 text-xs focus:border-blue-500 focus:outline-none"
+                                  className="w-12 text-center bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
                                 />
                               ) : (
-                                <span className="text-xs font-mono">{a.values[cIdx] || "-"}</span>
+                                <span className="font-mono text-zinc-900 dark:text-zinc-100">
+                                  {a.total !== undefined ? a.total : "-"}
+                                </span>
                               )}
                             </td>
-                          ))
+                          </>
                         ) : (
                           <td className="py-2 px-3 text-xs font-mono">
                             {a.values.join("  ")}
@@ -1024,6 +1131,66 @@ export default function OcrResultCard({
                   </tbody>
                 </table>
               </div>
+
+              {/* Computed Attendance Summary & Risk Banner */}
+              {fields.attendance_totals && (
+                <div className="mt-3 p-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div>
+                      <span className="font-bold text-zinc-700 dark:text-zinc-300">Total School Days: </span>
+                      <span className="font-mono">{fields.attendance_totals.computed_school_days ?? "-"}</span>
+                      {fields.attendance_totals.printed_school_days !== undefined && (
+                        <span className="text-zinc-500 text-[0.7rem] ml-1">
+                          (Printed: {fields.attendance_totals.printed_school_days})
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <span className="font-bold text-zinc-700 dark:text-zinc-300">Present: </span>
+                      <span className="font-mono text-emerald-600">{fields.attendance_totals.computed_days_present ?? "-"}</span>
+                      {fields.attendance_percentage !== undefined && (
+                        <span className="text-zinc-500 text-[0.7rem] ml-1">({fields.attendance_percentage}%)</span>
+                      )}
+                    </div>
+                    <div>
+                      <span className="font-bold text-zinc-700 dark:text-zinc-300">Absent: </span>
+                      <span className="font-mono text-red-600">{fields.attendance_totals.computed_days_absent ?? "-"}</span>
+                      {fields.absence_percentage !== undefined && (
+                        <span className="text-zinc-500 text-[0.7rem] ml-1">({fields.absence_percentage}%)</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Attendance Risk Banner */}
+                  {fields.attendance_risk_status && fields.attendance_risk_status !== "NORMAL" && (
+                    <div className={`p-2.5 rounded text-xs border ${
+                      fields.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED"
+                        ? "bg-red-50 text-red-800 border-red-200 dark:bg-red-950/40 dark:text-red-300"
+                        : "bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300"
+                    }`}>
+                      <span className="font-bold block mb-0.5">
+                        {fields.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED"
+                          ? "ATTENDANCE REVIEW REQUIRED (>20% Absences)"
+                          : "ATTENDANCE EARLY WARNING (15-20% Absences)"}
+                      </span>
+                      <p className="text-[0.7rem]">
+                        {fields.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED"
+                          ? "Posibleng lumagpas sa attendance limit ang student. Warning lang ito, hindi automatic failure. Kailangan ng verification ng guro."
+                          : "Mataas ang recorded absences ng student. Kailangan i-verify ng Teacher ang attendance record at i-review ang applicable school policy."}
+                      </p>
+                    </div>
+                  )}
+
+                  {fields.attendance_discrepancy_details && fields.attendance_discrepancy_details.length > 0 && (
+                    <div className="p-2 rounded bg-amber-50 text-amber-900 border border-amber-200 text-xs space-y-1">
+                      <span className="font-semibold block">Discrepancy Alerts:</span>
+                      {fields.attendance_discrepancy_details.map((d: string, i: number) => (
+                        <p key={i} className="text-[0.7rem]">&bull; {d}</p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -10,11 +10,24 @@
  */
 
 import type { GradeRecord, AttendanceRecord, ExtractedFields } from "@/types/documents";
+import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
 
 export interface ParsedTableGradesResult {
   grades: GradeRecord[];
   attendance?: AttendanceRecord[];
   attendance_months?: string[];
+  attendance_totals?: {
+    computed_school_days?: number;
+    computed_days_present?: number;
+    computed_days_absent?: number;
+    printed_school_days?: number;
+    printed_days_present?: number;
+    printed_days_absent?: number;
+  };
+  attendance_percentage?: number;
+  absence_percentage?: number;
+  attendance_risk_status?: "NORMAL" | "ATTENDANCE_WARNING" | "ATTENDANCE_REVIEW_REQUIRED" | "INCOMPLETE_ATTENDANCE_DATA";
+  attendance_discrepancy_details?: string[];
   general_average?: number;
 }
 
@@ -234,11 +247,12 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
       continue;
     }
 
-    // 2. Attendance Table Detection
+    // 2. Attendance Table Detection (Phase C & D)
     if (isAttendanceTable(table)) {
       const matrix = buildCellMatrix(table);
       const attendanceRecords: AttendanceRecord[] = [];
       let months: string[] = [];
+      let totalColIdx = -1;
 
       for (let r = 0; r < matrix.length; r++) {
         const row = matrix[r];
@@ -251,15 +265,34 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
           return MONTH_KEYWORDS.some((kw) => l === kw || l.includes(kw));
         });
         if (rowMonths.length >= 4) {
-          months = row.slice(1).filter(Boolean);
+          // Suriin kung may "Total" column sa header row
+          const foundTotal = row.findIndex((c, idx) => idx > 0 && c.toLowerCase().includes("total"));
+          if (foundTotal > 0) {
+            totalColIdx = foundTotal;
+            months = row.slice(1, totalColIdx).map((c) => c.trim()).filter(Boolean);
+          } else {
+            months = row.slice(1).map((c) => c.trim()).filter((c) => {
+              const l = c.toLowerCase();
+              return MONTH_KEYWORDS.some((kw) => l === kw || l.includes(kw));
+            });
+          }
           continue;
         }
 
         if (ATTENDANCE_KEYWORDS.some((kw) => lowerLabel.includes(kw))) {
-          const values = row.slice(1).map((c) => c.replace(/[^\d]/g, ""));
-          if (values.some((v) => v !== "")) {
-            attendanceRecords.push({ label, values });
+          let values: string[] = [];
+          let printedTotal: string | undefined = undefined;
+
+          // Panatilihin ang decimal/fractions (0.5, 19.5) at ihiwalay ang Total column
+          if (totalColIdx > 0 && totalColIdx < row.length) {
+            values = row.slice(1, totalColIdx).map((c) => c.replace(/[^0-9.]/g, "").trim());
+            const rawTotal = row[totalColIdx]?.replace(/[^0-9.]/g, "").trim();
+            printedTotal = rawTotal !== "" ? rawTotal : undefined;
+          } else {
+            values = row.slice(1).map((c) => c.replace(/[^0-9.]/g, "").trim());
           }
+
+          attendanceRecords.push({ label, values, total: printedTotal });
         }
       }
 
@@ -268,6 +301,42 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
       }
       if (months.length > 0) {
         result.attendance_months = months;
+      }
+
+      // Kalkulahin ang attendance totals, percentage, at warnings kapag may records
+      if (attendanceRecords.length > 0 && months.length > 0) {
+        const schoolDaysRec = attendanceRecords.find((a) =>
+          a.label.toLowerCase().includes("school days") || a.label.toLowerCase().includes("bilang ng araw ng pasok")
+        );
+        const daysPresentRec = attendanceRecords.find((a) =>
+          a.label.toLowerCase().includes("present") || a.label.toLowerCase().includes("pumasok")
+        );
+        const daysAbsentRec = attendanceRecords.find((a) =>
+          a.label.toLowerCase().includes("absent") || a.label.toLowerCase().includes("lumiban")
+        );
+
+        const evaluated = evaluateAttendanceData({
+          months,
+          schoolDaysRow: schoolDaysRec?.values,
+          daysPresentRow: daysPresentRec?.values,
+          daysAbsentRow: daysAbsentRec?.values,
+          printedSchoolDaysTotal: schoolDaysRec?.total,
+          printedDaysPresentTotal: daysPresentRec?.total,
+          printedDaysAbsentTotal: daysAbsentRec?.total,
+        });
+
+        result.attendance_totals = {
+          computed_school_days: evaluated.computedSchoolDays,
+          computed_days_present: evaluated.computedDaysPresent,
+          computed_days_absent: evaluated.computedDaysAbsent,
+          printed_school_days: evaluated.printedSchoolDays,
+          printed_days_present: evaluated.printedDaysPresent,
+          printed_days_absent: evaluated.printedDaysAbsent,
+        };
+        result.attendance_percentage = evaluated.attendancePercentage;
+        result.absence_percentage = evaluated.absencePercentage;
+        result.attendance_risk_status = evaluated.riskStatus;
+        result.attendance_discrepancy_details = evaluated.discrepancyDetails;
       }
       continue;
     }
