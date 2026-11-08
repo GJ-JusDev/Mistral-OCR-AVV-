@@ -9,6 +9,7 @@ import type { ExtractedFields } from "@/types/documents";
 import {
   isValidLrn,
   NAME_PATTERN,
+  SHS_GRADE_PATTERN,
   GRADE_PATTERN,
   looksLikeDate,
   normalizeSex,
@@ -16,7 +17,7 @@ import {
   SCHOOL_ID_PATTERN,
 } from "./patterns";
 
-import { ValidationContext, ValidationRule } from "@/types/validation";
+import type { ValidationContext, ValidationRule } from "@/types/validation";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,6 +29,16 @@ function isPresent(value: string): boolean {
 
 function normalize(value: string): string {
   return value.toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isPsaBirthCertificate(ctx?: ValidationContext): boolean {
+  const docType = String(ctx?.allFields?.document_type || "").toLowerCase().trim();
+  return (
+    docType === "birth_cert" ||
+    docType === "psa" ||
+    docType === "psa_birth_certificate" ||
+    Boolean((ctx?.allFields as any)?.registry_number)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -57,14 +68,14 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "lrn",
     message: "Learner Reference Number (LRN) is required.",
     severity: "error",
-    check: (v) => isPresent(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
   },
   {
     name: "lrn_format",
     field: "lrn",
     message: "LRN must be exactly 12 digits.",
     severity: "error",
-    check: (v) => !isPresent(v) || isValidLrn(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || isValidLrn(v),
   },
 
   // ── Grade ─────────────────────────────────────────────────────────────
@@ -73,23 +84,47 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "grade_level",
     message: "Grade level cannot be blank.",
     severity: "error",
-    check: (v) => isPresent(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
   },
   {
     name: "grade_valid",
     field: "grade_level",
-    message: "Grade level format is not recognized (expected Grade 1–12 or Kinder).",
+    message: "Grade level format is not recognized or outside Senior High School scope (expected Grade 11 or Grade 12).",
     severity: "warning",
-    check: (v) => !isPresent(v) || GRADE_PATTERN.test(v.trim()),
+    check: (v, ctx) => {
+      if (isPsaBirthCertificate(ctx)) return true;
+      if (!isPresent(v)) return true;
+      const isShs =
+        ctx?.allFields?.academic_level === "Senior High School" ||
+        ctx?.allFields?.selected_grade_level === "Grade 11" ||
+        ctx?.allFields?.selected_grade_level === "Grade 12";
+      if (isShs) {
+        return SHS_GRADE_PATTERN.test(v.trim());
+      }
+      return GRADE_PATTERN.test(v.trim());
+    },
   },
 
   // ── School ────────────────────────────────────────────────────────────
   {
     name: "school_present",
     field: "school_name",
-    message: "School name must be present.",
-    severity: "error",
-    check: (v) => isPresent(v),
+    message: (_v, ctx) => {
+      const isUnextracted =
+        ctx.allFields.flags?.includes("school_name_unextracted") ||
+        (ctx.allFields as any).school_name_unextracted === true;
+      if (isUnextracted) {
+        return "School name could not be reliably extracted. Verify against the original SF9.";
+      }
+      return "School name must be present.";
+    },
+    severity: (_v, ctx) => {
+      const isUnextracted =
+        ctx.allFields.flags?.includes("school_name_unextracted") ||
+        (ctx.allFields as any).school_name_unextracted === true;
+      return isUnextracted ? "warning" : "error";
+    },
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
   },
   {
     name: "school_recognized",
@@ -97,9 +132,14 @@ export const VALIDATION_RULES: ValidationRule[] = [
     message: "School is not in the recognized list.",
     severity: "warning",
     check: (v, ctx) => {
+      if (isPsaBirthCertificate(ctx)) return true;
       // If no known schools loaded, skip this check (pass by default).
       if (ctx.knownSchools.length === 0) return true;
-      return ctx.knownSchools.includes(normalize(v));
+      if (!isPresent(v)) return true;
+      const norm = normalize(v);
+      const normWithoutDeped = normalize(v.replace(/^deped\s+/i, ""));
+      const normalizedKnown = ctx.knownSchools.map((s) => normalize(s));
+      return normalizedKnown.includes(norm) || normalizedKnown.includes(normWithoutDeped);
     },
   },
 
@@ -134,40 +174,89 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "school_year",
     message: "School year is missing. Required for DepEd academic progression records.",
     severity: "warning",
-    check: (v) => isPresent(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
   },
   {
     name: "school_year_valid",
     field: "school_year",
     message: "School year must be in consecutive YYYY-YYYY format (e.g. 2023-2024).",
     severity: "warning",
-    check: (v) => !isPresent(v) || isValidSchoolYear(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || isValidSchoolYear(v),
   },
 
   // ── School ID ─────────────────────────────────────────────────────────
   {
+    name: "school_id_present",
+    field: "school_id",
+    message: (_v, ctx) => {
+      const isExplicitlyMissing =
+        ctx.allFields.flags?.includes("missing_school_id") ||
+        (ctx.allFields as any).school_id_missing === true;
+      if (isExplicitlyMissing) {
+        return "DepEd School ID must be present.";
+      }
+      return "DepEd School ID could not be reliably extracted. Verify against the original SF9.";
+    },
+    severity: (_v, ctx) => {
+      const isExplicitlyMissing =
+        ctx.allFields.flags?.includes("missing_school_id") ||
+        (ctx.allFields as any).school_id_missing === true;
+      return isExplicitlyMissing ? "error" : "warning";
+    },
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+  },
+  {
+    name: "school_id_match_institution",
+    field: "school_id",
+    message: "Document school identity conflicts with authorized institutional configuration (TRIS — 300792).",
+    severity: "error",
+    check: (v, ctx) => {
+      if (isPsaBirthCertificate(ctx)) return true;
+      const flags = ctx?.allFields?.flags;
+      if (Array.isArray(flags) && flags.includes("school_id_discrepancy")) {
+        return false;
+      }
+      const ocrId = (ctx?.allFields as any)?.ocr_extracted_school_id;
+      if (ocrId && isPresent(ocrId) && isPresent(v) && ocrId.trim() !== v.trim()) {
+        return false;
+      }
+      return true;
+    },
+  },
+  {
     name: "school_id_format",
     field: "school_id",
-    message: "DepEd School ID must be a 6-digit number.",
-    severity: "warning",
-    check: (v) => !isPresent(v) || SCHOOL_ID_PATTERN.test(v.trim()),
+    message: (v) =>
+      isPresent(v) && SCHOOL_ID_PATTERN.test(v.trim())
+        ? "DepEd School ID is a valid 6-digit number."
+        : "DepEd School ID must be a 6-digit number.",
+    severity: "error",
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || SCHOOL_ID_PATTERN.test(v.trim()),
   },
 
   // ── Class Adviser ─────────────────────────────────────────────────────
   {
     name: "adviser_present",
     field: "adviser",
-    message: "Class adviser name should be recorded.",
+    message: (_v, ctx) => {
+      const isUnextracted =
+        ctx.allFields.flags?.includes("adviser_unextracted") ||
+        (ctx.allFields as any).adviser_unextracted === true;
+      if (isUnextracted) {
+        return "Adviser name could not be reliably extracted. Verify against the original SF9.";
+      }
+      return "Class adviser name should be recorded.";
+    },
     severity: "warning",
-    check: (v) => isPresent(v),
+    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
   },
 
   // ── OCR confidence ────────────────────────────────────────────────────
   {
     name: "ocr_confidence",
     field: "name", // Applies globally but needs a field; use name as anchor.
-    message: "OCR confidence is low — manual review recommended.",
+    message: "OCR confidence is unmeasured or below required threshold — manual review recommended.",
     severity: "warning",
-    check: (_v, ctx) => ctx.ocrConfidence >= 0.6,
+    check: (_v, ctx) => typeof ctx.ocrConfidence === "number" && ctx.ocrConfidence >= 0.6,
   },
 ];

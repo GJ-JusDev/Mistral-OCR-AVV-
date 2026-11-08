@@ -11,6 +11,8 @@ import DocumentStatusBadge from "@/components/documents/DocumentStatusBadge";
 import Link from "next/link";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import type { ExtractedFields } from "@/types/validation";
+import PrincipalDashboard from "@/components/principal/PrincipalDashboard";
+import { getPrincipalDashboardData } from "@/actions/principal";
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -20,6 +22,35 @@ export default async function DashboardPage() {
 
   if (!user) {
     return null; // Let middleware handle redirect
+  }
+
+  // Check authoritative user role from user_roles
+  const { data: roleRow } = await supabase
+    .from("user_roles")
+    .select("role, account_status")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  const role = roleRow?.role?.toLowerCase() || user?.user_metadata?.role?.toLowerCase();
+
+  // Route Principal directly to dedicated executive monitoring dashboard
+  if (role === "principal") {
+    const dashboardData = await getPrincipalDashboardData();
+    if ("error" in dashboardData) {
+      return (
+        <PageContainer>
+          <div className="p-6 bg-red-50 border border-red-200 rounded-lg text-red-700">
+            <h2 className="text-lg font-bold">Principal Dashboard Error</h2>
+            <p className="mt-1 text-sm">{dashboardData.error}</p>
+          </div>
+        </PageContainer>
+      );
+    }
+    const principalName = [user?.user_metadata?.first_name, user?.user_metadata?.last_name]
+      .filter(Boolean)
+      .join(" ") || "Principal";
+
+    return <PrincipalDashboard data={dashboardData} userName={principalName} />;
   }
 
   const teacherName = [user?.user_metadata?.first_name, user?.user_metadata?.last_name]

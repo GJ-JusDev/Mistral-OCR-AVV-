@@ -141,7 +141,7 @@ export function useCamera(): UseCameraResult {
       canvas.height
     );
 
-    return canvas.toDataURL("image/png");
+    return canvas.toDataURL("image/jpeg", 0.92);
   }, [cameraZoom]);
 
   return {

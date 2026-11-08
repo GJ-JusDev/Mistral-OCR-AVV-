@@ -24,6 +24,8 @@ export default function DocumentDetailPage() {
   const [hasModifications, setHasModifications] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isSavingCorrections, setIsSavingCorrections] = useState(false);
+  const [activeSide, setActiveSide] = useState<"front" | "back">("front");
+  const [psaViewMode, setPsaViewMode] = useState<"original" | "full_corrected" | "identity_crop">("original");
 
   useEffect(() => {
     if (!documentId) return;
@@ -179,21 +181,132 @@ export default function DocumentDetailPage() {
       )}
       
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left Column: Image Preview */}
-        <div className="bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700 flex flex-col items-center">
-          <h2 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100 mb-4 w-full text-left">Original Image</h2>
-          {document.image_url && document.image_url !== "uploaded-document" && !document.image_url.startsWith("uploaded-") ? (
-            <img 
-              src={document.image_url} 
-              alt={`Document ${document.id}`} 
-              className="max-w-full h-auto rounded-md shadow-sm border border-zinc-300 dark:border-zinc-600"
-            />
-          ) : (
-            <div className="text-zinc-500 italic py-16 text-center">
-              Scanned capture attached to this record.
+        {/* Left Column: Image Preview with Front / Back Toggle or PSA 3-Way Toggle */}
+        {(() => {
+          const isBirthCert = document.document_type === "birth_cert";
+          const originalPsaUrl = document.extracted_fields?.original_image_url || document.image_url;
+          const fullCorrectedPsaUrl = document.extracted_fields?.full_corrected_image_url;
+          const identityCropPsaUrl =
+            document.extracted_fields?.identity_crop_image_url ||
+            document.extracted_fields?.processed_image_url;
+          const hasMultiplePsaViews = Boolean(
+            isBirthCert &&
+              ((fullCorrectedPsaUrl && fullCorrectedPsaUrl !== originalPsaUrl) ||
+                (identityCropPsaUrl && identityCropPsaUrl !== originalPsaUrl))
+          );
+
+          const backImageUrl = document.extracted_fields?.back_image_url || document.extracted_fields?.images?.back;
+
+          let displayImageUrl = document.image_url;
+          let imageTitle = "Original Image";
+
+          if (isBirthCert && hasMultiplePsaViews) {
+            if (psaViewMode === "identity_crop" && identityCropPsaUrl) {
+              displayImageUrl = identityCropPsaUrl;
+              imageTitle = "PSA Identity Region (2× Upscaled B&W OCR)";
+            } else if (psaViewMode === "full_corrected" && fullCorrectedPsaUrl) {
+              displayImageUrl = fullCorrectedPsaUrl;
+              imageTitle = "Full Document (Auto-Cropped & Upright)";
+            } else {
+              displayImageUrl = originalPsaUrl;
+              imageTitle = "Original Document (Color)";
+            }
+          } else if (backImageUrl) {
+            displayImageUrl = activeSide === "back" ? backImageUrl : document.image_url;
+            imageTitle = activeSide === "front" ? "Original Document — Front Side" : "Original Document — Back Side";
+          } else if (isBirthCert) {
+            displayImageUrl = originalPsaUrl;
+            imageTitle = "Original Document (Color)";
+          }
+
+          return (
+            <div className="bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700 flex flex-col items-center">
+              <div className="w-full flex flex-wrap items-center justify-between gap-2 mb-4">
+                <h2 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">
+                  {imageTitle}
+                </h2>
+                {isBirthCert && hasMultiplePsaViews && (
+                  <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
+                    <button
+                      type="button"
+                      onClick={() => setPsaViewMode("original")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${
+                        psaViewMode === "original"
+                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                      }`}
+                    >
+                      Original (Color)
+                    </button>
+                    {fullCorrectedPsaUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPsaViewMode("full_corrected")}
+                        className={`px-3 py-1.5 rounded-md transition-colors ${
+                          psaViewMode === "full_corrected"
+                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Full Corrected
+                      </button>
+                    )}
+                    {identityCropPsaUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPsaViewMode("identity_crop")}
+                        className={`px-3 py-1.5 rounded-md transition-colors ${
+                          psaViewMode === "identity_crop"
+                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Identity OCR Crop
+                      </button>
+                    )}
+                  </div>
+                )}
+                {!isBirthCert && backImageUrl && (
+                  <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
+                    <button
+                      type="button"
+                      onClick={() => setActiveSide("front")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${
+                        activeSide === "front"
+                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                      }`}
+                    >
+                      Front Side (Identity)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSide("back")}
+                      className={`px-3 py-1.5 rounded-md transition-colors ${
+                        activeSide === "back"
+                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                      }`}
+                    >
+                      Back Side (Grades)
+                    </button>
+                  </div>
+                )}
+              </div>
+              {displayImageUrl && displayImageUrl !== "uploaded-document" && !displayImageUrl.startsWith("uploaded-") ? (
+                <img 
+                  src={displayImageUrl} 
+                  alt={`Document ${document.id}`} 
+                  className="max-w-full h-auto rounded-md shadow-sm border border-zinc-300 dark:border-zinc-600"
+                />
+              ) : (
+                <div className="text-zinc-500 italic py-16 text-center">
+                  Scanned capture attached to this record.
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })()}
 
         {/* Right Column: OCR Results, Validation, Review Panel */}
         <div className="flex flex-col gap-6">
@@ -202,6 +315,9 @@ export default function DocumentDetailPage() {
               fields={document.extracted_fields} 
               rawText={document.extracted_text}
               onFieldChange={handleFieldChange}
+              confidence={document.extracted_fields?.ocr_confidence}
+              model={document.extracted_fields?.ocr_model}
+              provider={document.extracted_fields?.ocr_provider}
             />
             {hasModifications && (
               <div className="flex justify-end mt-2">

@@ -1,11 +1,28 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { createServerClient } from '@supabase/ssr'
 
+/**
+ * NEXT.JS MIDDLEWARE (AUTHENTICATION & RBAC ROUTE GUARD)
+ *
+ * Bakit ito napakahalaga sa Defense:
+ * Ito ang unang humaharang sa bawat incoming request bago pa man mag-render ang page:
+ * 1. Session & Cookie Refresh:
+ *    - Pinapanatiling aktibo ang Supabase session cookies ng user.
+ * 2. Unauthenticated Guard:
+ *    - Kapag hindi naka-login ang user, kusa silang ire-redirect papuntang `/login`.
+ * 3. Authoritative Role-Based Access Control (RBAC):
+ *    - Kinukuha ang role direkta sa `user_roles` database table (hindi lang sa cookie o metadata)
+ *      para hindi mapalsipika o ma-bypass.
+ * 4. Principal Isolation:
+ *    - Dahil monitoring-only ang School Head / Principal, binablock ang access nila sa `/upload`
+ *      at `/review` upang mapanatili ang separation of duties (ang mga guro ang nag-e-encode).
+ */
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   })
 
+  // I-initialize ang Supabase client gamit ang request cookies
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -31,25 +48,67 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser()
 
-  const isAuthRoute = request.nextUrl.pathname.startsWith('/login') || request.nextUrl.pathname.startsWith('/register');
+  const pathname = request.nextUrl.pathname;
+  const isAuthRoute = pathname.startsWith('/login') || pathname.startsWith('/register');
   
+  // 1. Kung walang active session at hindi login/register page, pabalikin sa /login
   if (!user && !isAuthRoute) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
   }
 
+  // 2. Kung naka-login na pero pumunta sa /login o /register, dalhin sa dashboard
   if (user && isAuthRoute) {
     const url = request.nextUrl.clone()
     url.pathname = '/'
     return NextResponse.redirect(url)
   }
 
-  // Protect admin routes (optional extra safety layer)
-  if (user && request.nextUrl.pathname.startsWith('/admin')) {
-    // Cannot easily check user_roles in middleware without a new query
-    // We do it in the API/Component, but we could do it here if needed.
-    // For now we leave it since API blocks it anyway.
+  // 3. Authoritative role and status check para sa mga protected routes
+  if (user) {
+    const needsRoleCheck = 
+      pathname.startsWith('/admin') || 
+      pathname.startsWith('/principal') || 
+      pathname.startsWith('/upload') || 
+      pathname.startsWith('/review');
+
+    if (needsRoleCheck) {
+      const { data: roleRow } = await supabase
+        .from('user_roles')
+        .select('role, account_status')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      const role = roleRow?.role?.toLowerCase() || '';
+      const isApproved = roleRow?.account_status === 'Approved';
+
+      // 3.1 Proteksyon sa Admin routes: Approved Admin lamang ang pwedeng pumasok
+      if (pathname.startsWith('/admin')) {
+        if (!isApproved || role !== 'admin') {
+          const url = request.nextUrl.clone();
+          url.pathname = '/';
+          return NextResponse.redirect(url);
+        }
+      }
+
+      // 3.2 Proteksyon sa Principal routes: Approved Principal at Admin lamang
+      if (pathname.startsWith('/principal')) {
+        if (!isApproved || (role !== 'principal' && role !== 'admin')) {
+          const url = request.nextUrl.clone();
+          url.pathname = '/';
+          return NextResponse.redirect(url);
+        }
+      }
+
+      // 3.3 Principal accounts are monitoring-only:
+      // Mahigpit na binablock ang Principal sa /upload at /review para maiwasan ang self-encoding
+      if (role === 'principal' && (pathname.startsWith('/upload') || pathname.startsWith('/review'))) {
+        const url = request.nextUrl.clone();
+        url.pathname = '/';
+        return NextResponse.redirect(url);
+      }
+    }
   }
 
   return supabaseResponse

@@ -23,7 +23,18 @@ export const metadata: Metadata = {
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  const role = user?.user_metadata?.role?.toLowerCase() || "teacher";
+  
+  let role = user?.user_metadata?.role?.toLowerCase() || "teacher";
+  if (user) {
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (roleRow?.role) {
+      role = roleRow.role.toLowerCase();
+    }
+  }
 
   return (
     <html

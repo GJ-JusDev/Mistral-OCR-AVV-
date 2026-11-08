@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { evaluateStudentIdentity, verifyStudentCollision } from "@/lib/validation/studentMatcher";
 import { isValidSchoolYear } from "@/lib/validation/patterns";
 import { validateFields } from "@/lib/validation/engine";
+import { normalizeGradeRecords } from "@/lib/validation/gradeUtils";
 import type { ExtractedFields } from "@/types/documents";
 
 export type ReviewResult = {
@@ -14,8 +15,22 @@ export type ReviewResult = {
 };
 
 /**
- * Submit an approval or rejection review decision for a document.
- * Enforces strict DepEd identity validation and requires valid school year upon approval.
+ * SUBMIT DOCUMENT REVIEW DECISION (APPROVE O REJECT)
+ *
+ * Bakit ito ang puso ng Teacher/Admin Review Queue:
+ * Dito nire-review ng tao ang OCR extracted data bago ito pumasok bilang official database record.
+ *
+ * Mga Mahahalagang DepEd Proteksyon:
+ * 1. Role Authorization:
+ *    - Tanging authorized Administrator ang may final approval/rejection authority.
+ *    - Ang Principal ay monitoring-only at hindi nag-e-encode para may checks-and-balances.
+ * 2. Strict School Year Validation:
+ *    - Bawal mag-default o mag-assume ng School Year (hal. bawal basta gawing 2023-2024).
+ *    - Kailangang i-verify ng guro ang nakasulat sa pisikal na dokumento.
+ * 3. Identity Verification & Anti-Collision:
+ *    - Bawal mag-auto-create ng "Unknown Learner".
+ *    - Kinakailangan ang 12-digit LRN at student name.
+ *    - Sinusuri ang collision detection upang hindi magkamaling mai-link ang record sa ibang mag-aaral.
  */
 export async function submitDocumentReview(
   documentId: string,
@@ -34,29 +49,43 @@ export async function submitDocumentReview(
       return { error: "Unauthorized: Please log in to review documents." };
     }
 
-    // Authoritative role, status, and school assignment check directly from user_roles
-    const { data: roleRow } = await supabase
+    // 1. Authoritative role, status, at school assignment check mula sa user_roles
+    const { data: roleRow, error: roleError } = await supabase
       .from("user_roles")
       .select("role, account_status, school_id")
       .eq("user_id", user.id)
       .maybeSingle();
 
-    const role = (roleRow?.role || user.user_metadata?.role || "").toLowerCase();
-    const isApproved = roleRow?.account_status === "Approved" || role === "admin" || user.user_metadata?.account_status === "Approved";
+    if (roleError || !roleRow || !roleRow.role) {
+      return { error: "Forbidden: No authoritative role assigned. Please contact an administrator." };
+    }
 
-    if (!isApproved) {
+    const role = roleRow.role.toLowerCase();
+    const supportedRoles = ["admin", "principal", "teacher"];
+    if (!supportedRoles.includes(role)) {
+      return { error: "Forbidden: Unsupported role." };
+    }
+
+    if (roleRow.account_status !== "Approved") {
       return { error: "Forbidden: Account is not approved. Administrator authorization is required." };
     }
 
-    // Official approval and rejection is restricted to Admins and Principals (School Heads)
-    const canFinalize = role === "admin" || role === "principal";
-    if (!canFinalize) {
+    // Principal accounts are restricted to monitoring-only
+    if (role === "principal") {
       return {
-        error: "Forbidden: Only authorized Administrators or Principals can approve or reject official academic documents.",
+        error: "Forbidden: Principal role is monitoring-only and cannot approve or reject review decisions.",
       };
     }
 
-    // 1. Fetch current document
+    // Official approval and rejection is restricted to Admins
+    const canFinalize = role === "admin";
+    if (!canFinalize) {
+      return {
+        error: "Forbidden: Only authorized Administrators can approve or reject official academic documents.",
+      };
+    }
+
+    // 2. Kunin ang kasalukuyang dokumento at extracted fields
     const { data: doc, error: fetchError } = await supabase
       .from("documents")
       .select("id, status, student_id, extracted_fields, school_id, uploaded_by")
@@ -67,22 +96,12 @@ export async function submitDocumentReview(
       return { error: fetchError?.message || "Document not found." };
     }
 
-    // Principal school isolation: Principal can only review documents in their assigned school
-    if (role === "principal") {
-      if (!roleRow?.school_id) {
-        return { error: "Forbidden: Principal account is not assigned to an authorized school." };
-      }
-      if (doc.school_id && doc.school_id !== roleRow.school_id) {
-        return { error: "Forbidden: Principals can only review and finalize documents belonging to their assigned school." };
-      }
-    }
-
     let studentId = doc.student_id;
     const extractedFields = (doc.extracted_fields as ExtractedFields) || {};
 
-    // 2. Strict validation when approving
+    // 3. Mahigpit na pagsusuri kapag "approve" ang pinili
     if (action === "approve") {
-      // School Year validation: NEVER silently assign 2023-2024
+      // 3.1 School Year Validation: Bawal mag-imbento ng S.Y. kung blangko sa OCR
       const schoolYear = extractedFields.school_year?.trim();
       if (!schoolYear || !isValidSchoolYear(schoolYear)) {
         return {
@@ -90,7 +109,7 @@ export async function submitDocumentReview(
         };
       }
 
-      // Learner Identity validation: NEVER auto-create "Unknown Learner"
+      // 3.2 Learner Identity Validation: Bawal ang "Unknown Learner", mandatory ang 12-digit LRN
       const identityEval = evaluateStudentIdentity(extractedFields);
       if (!identityEval.isValidLrn) {
         return {
@@ -104,7 +123,7 @@ export async function submitDocumentReview(
         };
       }
 
-      // Verify or link student
+      // 3.3 Verify at i-link ang student record
       if (!studentId && identityEval.normalizedLrn) {
         const { data: existingStudent } = await supabase
           .from("students")
@@ -113,12 +132,15 @@ export async function submitDocumentReview(
           .maybeSingle();
 
         if (existingStudent?.id) {
+          // Collision Check: Kapag may kaparehong LRN sa database,
+          // sinusuri kung tugma ang apelyido para hindi magka-interchange ang dalawang mag-aaral
           const collision = verifyStudentCollision(identityEval.lastName, existingStudent);
           if (collision.hasConflict) {
             return { error: `Cannot approve document due to identity conflict: ${collision.reason}` };
           }
           studentId = existingStudent.id;
         } else if (identityEval.canAutoCreate) {
+          // Kung bagong estudyante at kumpleto ang verified identity, i-create sa students table
           const gradeLevel = extractedFields.grade_level || null;
           const sex = extractedFields.sex === "M" || extractedFields.sex === "F" ? extractedFields.sex : null;
 
@@ -132,6 +154,7 @@ export async function submitDocumentReview(
               suffix: identityEval.suffix,
               grade_level: gradeLevel,
               sex: sex,
+              school_id: doc.school_id ?? null,
               status: "active",
             })
             .select("id")
@@ -154,10 +177,16 @@ export async function submitDocumentReview(
 
     const newStatus = action === "approve" ? "approved" : "rejected";
 
-    // 3. Update document status
+    // 3. Update document status & ensure normalized grades for approval trigger
+    const updatePayload: any = { status: newStatus };
+    if (action === "approve" && Array.isArray(extractedFields.grades)) {
+      extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
+      updatePayload.extracted_fields = extractedFields;
+    }
+
     const { error: updateError } = await supabase
       .from("documents")
-      .update({ status: newStatus })
+      .update(updatePayload)
       .eq("id", documentId);
 
     if (updateError) {
@@ -187,8 +216,13 @@ export async function submitDocumentReview(
 }
 
 /**
- * Save manual corrections made by a reviewer to the extracted document fields.
- * Re-evaluates validation rules and logs corrections in review_logs.
+ * MANUAL FIELD CORRECTIONS (HUMAN-IN-THE-LOOP)
+ *
+ * Bakit ito kailangan sa AVV:
+ * Hindi 100% perpekto ang OCR, lalo na kapag malabo ang scan o lukot ang papel.
+ * Sa function na ito, binibigyan ng kakayahan ang guro na itama ang LRN, pangalan, o mga marka.
+ * Pagkatapos itama, awtomatikong muling tatakbo ang validation rules at
+ * itatala sa `review_logs` ang bawat ginawang pagbabago para sa audit trail.
  */
 export async function saveDocumentCorrections(
   documentId: string,
@@ -207,22 +241,29 @@ export async function saveDocumentCorrections(
       return { error: "Unauthorized: Please log in to correct document fields." };
     }
 
-    const { data: roleRow } = await supabase
+    const { data: roleRow, error: roleError } = await supabase
       .from("user_roles")
       .select("role, account_status, school_id")
       .eq("user_id", user.id)
       .maybeSingle();
 
-    const role = (roleRow?.role || user.user_metadata?.role || "").toLowerCase();
-    const isApproved = roleRow?.account_status === "Approved" || role === "admin" || user.user_metadata?.account_status === "Approved";
+    if (roleError || !roleRow || !roleRow.role) {
+      return { error: "Forbidden: No authoritative role assigned. Please contact an administrator." };
+    }
 
-    if (!isApproved) {
+    const role = roleRow.role.toLowerCase();
+    const supportedRoles = ["admin", "principal", "teacher"];
+    if (!supportedRoles.includes(role)) {
+      return { error: "Forbidden: Unsupported role." };
+    }
+
+    if (roleRow.account_status !== "Approved") {
       return { error: "Forbidden: Account is not approved. Administrator authorization is required." };
     }
 
     const { data: doc, error: fetchError } = await supabase
       .from("documents")
-      .select("id, status, extracted_fields, student_id, school_id, uploaded_by")
+      .select("id, status, extracted_fields, student_id, school_id, uploaded_by, ocr_confidence")
       .eq("id", documentId)
       .single();
 
@@ -254,8 +295,14 @@ export async function saveDocumentCorrections(
       ...updatedFields,
     };
 
-    // Re-evaluate validation report
-    const validationReport = validateFields(mergedFields);
+    // Normalize grades using semester-aware rules to avoid stale status
+    if (Array.isArray(mergedFields.grades)) {
+      mergedFields.grades = normalizeGradeRecords(mergedFields.grades);
+    }
+
+    // Re-evaluate validation report using document's recorded OCR confidence
+    const docConfidence = typeof (doc as any)?.ocr_confidence === "number" ? (doc as any).ocr_confidence : undefined;
+    const validationReport = validateFields(mergedFields, { ocrConfidence: docConfidence });
     const newStatus = doc.status === "approved" || doc.status === "rejected"
       ? doc.status
       : validationReport.status === "valid" ? "validated" : "needs_review";

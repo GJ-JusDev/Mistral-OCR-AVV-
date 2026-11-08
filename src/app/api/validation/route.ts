@@ -12,6 +12,24 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized: Please log in to validate documents.' }, { status: 401 });
+    }
+
+    // Principal accounts are restricted to monitoring only
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (roleRow?.role?.toLowerCase() === "principal") {
+      return NextResponse.json(
+        { error: "Forbidden: Principal role is monitoring-only and cannot trigger document validation." },
+        { status: 403 }
+      );
+    }
 
     // Fetch known schools from DB
     const { data: schoolsData, error: schoolsError } = await supabase
@@ -24,8 +42,27 @@ export async function POST(request: NextRequest) {
 
     const knownSchools = schoolsData.map((s: { name: string }) => s.name);
 
+    // Resolve OCR confidence from request body, extracted fields, or stored document row
+    let ocrConfidence: number | undefined =
+      typeof body.ocrConfidence === 'number'
+        ? body.ocrConfidence
+        : typeof fields.ocr_confidence === 'number'
+        ? fields.ocr_confidence
+        : undefined;
+
+    if (ocrConfidence === undefined) {
+      const { data: docRow } = await supabase
+        .from('documents')
+        .select('ocr_confidence')
+        .eq('id', documentId)
+        .maybeSingle();
+      if (typeof docRow?.ocr_confidence === 'number') {
+        ocrConfidence = docRow.ocr_confidence;
+      }
+    }
+
     // Run validation engine
-    const report = validateFields(fields, { knownSchools });
+    const report = validateFields(fields, { knownSchools, ocrConfidence });
 
     // Delete old validation results for this document
     const { error: deleteError } = await supabase
@@ -41,12 +78,12 @@ export async function POST(request: NextRequest) {
     if (report.results && report.results.length > 0) {
       const resultsToInsert = report.results.map((res) => ({
         document_id: documentId,
-        rule_name: res.ruleName,
-        field_name: res.fieldName,
+        rule_name: res.ruleName || res.rule_name || "rule",
+        field_name: res.fieldName || res.field_name || null,
         passed: res.passed,
-        expected_value: res.expectedValue || null,
-        actual_value: typeof res.actualValue === 'string' ? res.actualValue : JSON.stringify(res.actualValue) || null,
-        message: res.message,
+        expected_value: res.expectedValue || res.expected_value || null,
+        actual_value: typeof res.actualValue === 'string' ? res.actualValue : (res.actual_value || (res.actualValue !== undefined ? JSON.stringify(res.actualValue) : null)),
+        message: res.message || null,
       }));
 
       const { error: insertError } = await supabase

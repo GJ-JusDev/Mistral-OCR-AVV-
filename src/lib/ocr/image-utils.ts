@@ -1,7 +1,6 @@
 /**
  * Client-side image processing utilities.
  *
- * Extracted from the old monolithic TrocrCamera component.
  * Used for upscaling, brightness/contrast adjustment, and sharpening
  * before sending images to the OCR API.
  */
@@ -21,11 +20,48 @@ export type ImageAdjustments = {
   sharpness: number;  // 0–100
 };
 
-export const DEFAULT_ADJUSTMENTS: ImageAdjustments = {
+export const DEFAULT_ADJUSTMENTS: ImageAdjustments = Object.freeze({
   brightness: 200,
   contrast: 100,
   sharpness: 0,
-};
+});
+
+/**
+ * Resolves effective image adjustment values, guaranteeing canonical
+ * DEFAULT_ADJUSTMENTS whenever adjustment controls are hidden/locked or
+ * when any field is missing/non-finite.
+ */
+export function resolveEffectiveAdjustments(
+  adjustments?: Partial<ImageAdjustments> | null,
+  options?: { lockDefaults?: boolean }
+): ImageAdjustments {
+  if (options?.lockDefaults || !adjustments) {
+    return DEFAULT_ADJUSTMENTS;
+  }
+
+  const brightness =
+    typeof adjustments.brightness === "number" && Number.isFinite(adjustments.brightness)
+      ? adjustments.brightness
+      : DEFAULT_ADJUSTMENTS.brightness;
+  const contrast =
+    typeof adjustments.contrast === "number" && Number.isFinite(adjustments.contrast)
+      ? adjustments.contrast
+      : DEFAULT_ADJUSTMENTS.contrast;
+  const sharpness =
+    typeof adjustments.sharpness === "number" && Number.isFinite(adjustments.sharpness)
+      ? adjustments.sharpness
+      : DEFAULT_ADJUSTMENTS.sharpness;
+
+  if (
+    brightness === DEFAULT_ADJUSTMENTS.brightness &&
+    contrast === DEFAULT_ADJUSTMENTS.contrast &&
+    sharpness === DEFAULT_ADJUSTMENTS.sharpness
+  ) {
+    return DEFAULT_ADJUSTMENTS;
+  }
+
+  return { brightness, contrast, sharpness };
+}
 
 /**
  * Compute the standard deviation of grayscale pixel values in an ImageData.
@@ -90,9 +126,9 @@ export function sharpenImageData(
  */
 export function processImage(
   source: HTMLImageElement,
-  adjustments: ImageAdjustments
+  adjustments: ImageAdjustments = DEFAULT_ADJUSTMENTS
 ): string {
-  const { brightness, contrast, sharpness } = adjustments;
+  const { brightness, contrast, sharpness } = resolveEffectiveAdjustments(adjustments);
 
   const scale = Math.max(
     1,
@@ -118,7 +154,7 @@ export function processImage(
     ctx.putImageData(sharpenImageData(imageData, sharpness / 100), 0, 0);
   }
 
-  return canvas.toDataURL("image/png");
+  return canvas.toDataURL("image/jpeg", 0.92);
 }
 
 /**

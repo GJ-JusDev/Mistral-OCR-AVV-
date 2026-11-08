@@ -13,7 +13,8 @@ const testFiles = [
   'tests/test_multi_school_isolation.mjs',
   'tests/test_escalation_probe.mjs',
   'tests/test_migration_reruns_and_idempotency.mjs',
-  'tests/test_backup_restoration_isolated.mjs'
+  'tests/test_backup_restoration_isolated.mjs',
+  'tests/phase4-sshs-phase1-migration.test.mjs'
 ];
 
 console.log('================================================================');

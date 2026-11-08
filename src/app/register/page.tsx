@@ -16,20 +16,6 @@ export default function RegisterPage() {
     },
     null
   );
-  
-  const [lptValue, setLptValue] = useState("");
-  
-  const handleLptChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let val = e.target.value;
-    if (val.length > 7) {
-      val = val.slice(0, 7);
-    }
-    setLptValue(val);
-  };
-
-  const hasLptValue = lptValue.length > 0;
-  const isLptInvalid = hasLptValue && !/^\d{7}$/.test(lptValue);
-  const isSubmitDisabled = isPending || isLptInvalid;
 
   return (
     <div className="flex min-h-screen flex-col items-center bg-[#f8f9fa] py-12 px-4 sm:pt-16">
@@ -62,27 +48,6 @@ export default function RegisterPage() {
               <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Name Extension (Optional)</label>
               <input name="nameExtension" type="text" placeholder="e.g. Jr., Sr., III" className="w-full rounded-sm border border-[#ced4da] px-4 py-3 text-base text-[#212529] focus:border-[#86b7fe] focus:outline-none focus:ring-1 focus:ring-[#86b7fe] transition-colors" />
             </div>
-          </div>
-          <div>
-            <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">LPT Information</label>
-            <input 
-              name="prc" 
-              type="text" 
-              value={lptValue}
-              onChange={handleLptChange}
-              required 
-              maxLength={7}
-              className={`w-full rounded-sm border px-4 py-3 text-base text-[#212529] focus:outline-none focus:ring-1 transition-colors ${
-                isLptInvalid 
-                  ? "border-red-500 focus:border-red-500 focus:ring-red-500" 
-                  : "border-[#ced4da] focus:border-[#86b7fe] focus:ring-[#86b7fe]"
-              }`}
-            />
-            {isLptInvalid ? (
-              <p className="mt-2 text-sm text-red-500">Limit exceeded. Only 7 numbers are allowed.</p>
-            ) : (
-              <p className="mt-2 text-sm text-[#6c757d]">Required for Teacher verification.</p>
-            )}
           </div>
           <div>
             <label className="block text-[0.95rem] font-medium text-[#495057] mb-2">Email address</label>
@@ -136,7 +101,7 @@ export default function RegisterPage() {
             </label>
           </div>
 
-          <Button type="submit" size="lg" className="w-full" disabled={isSubmitDisabled}>
+          <Button type="submit" size="lg" className="w-full" disabled={isPending}>
             {isPending ? "Registering..." : "Create account"}
           </Button>
         </form>

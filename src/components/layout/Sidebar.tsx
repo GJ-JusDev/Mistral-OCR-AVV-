@@ -14,16 +14,35 @@ import {
   GraduationCap,
   Menu,
   X,
-  UserCheck
+  UserCheck,
+  ShieldCheck
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
 
-const baseNavigation = [
+const teacherNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Upload Document", href: "/upload", icon: Upload },
   { name: "Documents", href: "/documents", icon: FileText },
   { name: "Review Queue", href: "/review", icon: CheckSquare },
   { name: "Students", href: "/students", icon: Users },
+  { name: "Settings", href: "/settings", icon: Settings },
+];
+
+const adminNavigation = [
+  { name: "Dashboard", href: "/", icon: LayoutDashboard },
+  { name: "Upload Document", href: "/upload", icon: Upload },
+  { name: "Documents", href: "/documents", icon: FileText },
+  { name: "Review Queue", href: "/review", icon: CheckSquare },
+  { name: "Students", href: "/students", icon: Users },
+  { name: "Users", href: "/admin/users", icon: UserCheck },
+  { name: "Settings", href: "/settings", icon: Settings },
+];
+
+const principalNavigation = [
+  { name: "Dashboard", href: "/", icon: LayoutDashboard },
+  { name: "Student Records", href: "/principal/students", icon: Users },
+  { name: "Document Summary", href: "/principal/documents", icon: FileText },
+  { name: "Academic Overview", href: "/principal/academic", icon: GraduationCap },
   { name: "Reports", href: "/reports", icon: BarChart3 },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
@@ -36,20 +55,23 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
     return null;
   }
 
-  const navigation = [...baseNavigation];
-  if (role === "admin") {
-    if (!navigation.find(n => n.name === "Users")) {
-      navigation.splice(5, 0, { name: "Users", href: "/admin/users", icon: UserCheck });
-    }
-  }
+  const normalizedRole = (role || "teacher").toLowerCase();
+  const isPrincipal = normalizedRole === "principal";
+  const isAdmin = normalizedRole === "admin";
 
-  // We rely on onClick in the Link elements to close the sidebar instead of useEffect
+  let navigation = teacherNavigation;
+  if (isPrincipal) {
+    navigation = principalNavigation;
+  } else if (isAdmin) {
+    navigation = adminNavigation;
+  }
 
   return (
     <>
       <button 
         className="md:hidden fixed top-3 left-4 z-50 p-2 bg-white rounded-md shadow-sm border border-[#dee2e6]"
         onClick={() => setIsOpen(!isOpen)}
+        aria-label="Toggle navigation menu"
       >
         {isOpen ? <X className="h-5 w-5 text-[#212529]" /> : <Menu className="h-5 w-5 text-[#212529]" />}
       </button>
@@ -63,12 +85,23 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
 
       <div className={`fixed inset-y-0 left-0 z-40 w-64 transform flex-col border-r border-[#dee2e6] bg-[#f8f9fa] transition-transform duration-200 ease-in-out md:sticky md:top-0 md:flex md:translate-x-0 h-screen ${isOpen ? "flex translate-x-0" : "-translate-x-full"}`}>
         <div className="flex h-16 shrink-0 items-center gap-3 border-b border-[#dee2e6] px-5 bg-white" title="Automated Visual Validation System (AVV)">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm bg-[#212529] text-white">
+          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-sm text-white ${
+            isPrincipal ? "bg-[#7c3aed]" : "bg-[#212529]"
+          }`}>
             <GraduationCap className="h-5 w-5" />
           </div>
           <div className="flex flex-col min-w-0">
-            <span className="font-bold text-[#212529] text-sm leading-tight tracking-tight">AVV</span>
-            <span className="text-[0.65rem] text-[#6c757d] font-medium leading-tight truncate">Automated Visual Validation System</span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-bold text-[#212529] text-sm leading-tight tracking-tight">AVV</span>
+              {isPrincipal && (
+                <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[0.625rem] font-semibold bg-[#7c3aed]/10 text-[#7c3aed]">
+                  Principal
+                </span>
+              )}
+            </div>
+            <span className="text-[0.65rem] text-[#6c757d] font-medium leading-tight truncate">
+              {isPrincipal ? "TRIS Senior High School" : "Automated Visual Validation System"}
+            </span>
           </div>
         </div>
 
@@ -80,18 +113,38 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
                 key={item.name}
                 href={item.href}
                 onClick={() => setIsOpen(false)}
-                className={`flex items-center gap-3 px-3 py-2 text-[0.875rem] font-medium ${
+                className={`flex items-center gap-3 px-3 py-2 text-[0.875rem] font-medium transition-colors ${
                   isActive
-                    ? "bg-[#e9ecef] text-[#212529] border-l-2 border-[#212529]"
-                    : "text-[#495057] hover:bg-[#e9ecef] border-l-2 border-transparent"
+                    ? isPrincipal
+                      ? "bg-[#7c3aed]/10 text-[#7c3aed] border-l-2 border-[#7c3aed] font-semibold"
+                      : "bg-[#e9ecef] text-[#212529] border-l-2 border-[#212529]"
+                    : isPrincipal
+                      ? "text-[#495057] hover:bg-[#7c3aed]/5 hover:text-[#7c3aed] border-l-2 border-transparent"
+                      : "text-[#495057] hover:bg-[#e9ecef] border-l-2 border-transparent"
                 }`}
               >
-                <item.icon className={`h-4 w-4 ${isActive ? "text-[#212529]" : "text-[#6c757d]"}`} />
+                <item.icon className={`h-4 w-4 ${
+                  isActive
+                    ? isPrincipal ? "text-[#7c3aed]" : "text-[#212529]"
+                    : "text-[#6c757d]"
+                }`} />
                 {item.name}
               </Link>
             );
           })}
         </nav>
+
+        {isPrincipal && (
+          <div className="px-4 py-3 mx-3 mb-2 bg-[#7c3aed]/5 border border-[#7c3aed]/20 rounded-md">
+            <div className="flex items-center gap-2 text-xs font-semibold text-[#7c3aed]">
+              <ShieldCheck className="h-4 w-4" />
+              <span>Monitoring Mode</span>
+            </div>
+            <p className="text-[0.7rem] text-[#6c757d] mt-1 leading-snug">
+              Read-only institutional access for Taysan Resettlement Integrated School.
+            </p>
+          </div>
+        )}
 
         <div className="border-t border-[#dee2e6] p-4 bg-white shrink-0">
           <LogoutButton />

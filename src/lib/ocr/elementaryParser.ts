@@ -1,9 +1,29 @@
-import { ExtractedFields, GradeRecord } from "@/types/documents";
+import type { ExtractedFields, GradeRecord } from "@/types/documents";
 import { parseOcrText } from "./parser";
+import { parseAzureLayoutGrades } from "./tableGradesParser";
 
-export function parseElementaryGradesText(text: string): ExtractedFields {
+export function parseElementaryGradesText(text: string, rawLayout?: any): ExtractedFields {
   // First, use the regular parser in case there's a name at the top
-  const fields = parseOcrText(text); 
+  const fields = parseOcrText(text, rawLayout); 
+
+  // If structured Azure layout tables are present, prioritize table-aware extraction
+  if (rawLayout?.tables && Array.isArray(rawLayout.tables) && rawLayout.tables.length > 0) {
+    const tableResult = parseAzureLayoutGrades(rawLayout.tables);
+    if (tableResult.grades && tableResult.grades.length > 0) {
+      fields.grades = tableResult.grades;
+      if (tableResult.attendance && tableResult.attendance.length > 0) {
+        fields.attendance = tableResult.attendance;
+      }
+      if (tableResult.attendance_months && tableResult.attendance_months.length > 0) {
+        fields.attendance_months = tableResult.attendance_months;
+      }
+      if (tableResult.general_average !== undefined) {
+        fields.general_average = tableResult.general_average;
+      }
+      return fields;
+    }
+  }
+
   const lines = text.split(/\r?\n/).map((l) => l.trim());
   const grades: GradeRecord[] = [];
   const attendance: { label: string; values: string[] }[] = [];

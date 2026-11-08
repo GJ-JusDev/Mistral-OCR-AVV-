@@ -15,16 +15,44 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+/**
+ * DOCUMENT UPLOAD API ROUTE
+ *
+ * Dito dumadaan ang lahat ng uploaded scanned documents (SF9, SF10, PSA Birth Certificate).
+ *
+ * Bakit may mga security at storage checks dito:
+ * 1. Authentication Check - Sinisigurong naka-log in ang nag-a-upload.
+ * 2. Role-Based Access Control (RBAC) - Ang Teachers lamang ang may upload privilege.
+ *    Ang Principal account ay "monitoring-only" para sa executive review at hindi pwedeng mag-upload.
+ * 3. File Validation - Limitado sa safe images/PDF at maximum 10MB para maiwasan ang server overload.
+ * 4. Private Storage & Signed URLs - Sine-save ang complete original file sa private Supabase Storage
+ *    para protektado ang privacy ng estudyante, at nagbibigay ng pansamantalang signed URL para matingnan.
+ */
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
 
-    // Verify session
+    // 1. Verify user session: anonymous requests are strictly rejected
     if (!user) {
       return NextResponse.json(
         { error: "Unauthorized: Please log in to upload documents." },
         { status: 401 }
+      );
+    }
+
+    // 2. RBAC check: School Head / Principal accounts are restricted to monitoring only
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    // Hindi pinapayagang mag-upload ang Principal para maiwasan ang conflict of interest sa pag-apruba
+    if (roleRow?.role?.toLowerCase() === "principal") {
+      return NextResponse.json(
+        { error: "Forbidden: Principal role is monitoring-only and cannot upload documents." },
+        { status: 403 }
       );
     }
 
@@ -34,6 +62,7 @@ export async function POST(request: Request) {
     let originalName: string;
     let documentType: string = "sf9";
 
+    // 3. Tanggapin ang file galing sa standard FormData (drag-and-drop o camera upload)
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
       const file = formData.get("file") as File | null;
@@ -51,7 +80,7 @@ export async function POST(request: Request) {
       const arrayBuffer = await file.arrayBuffer();
       fileBuffer = Buffer.from(arrayBuffer);
     } else {
-      // JSON with base64 dataUrl
+      // O kaya'y base64 JSON payload mula sa client-side canvas capture
       const body = await request.json();
       const { dataUrl, filename, docType } = body;
 
@@ -76,7 +105,7 @@ export async function POST(request: Request) {
       fileBuffer = Buffer.from(match[2], "base64");
     }
 
-    // Validate MIME type
+    // 4. Validate MIME type: tanging valid images at PDF lang ang tinatanggap
     if (!ALLOWED_MIME_TYPES.has(mimeType.toLowerCase())) {
       return NextResponse.json(
         {
@@ -86,7 +115,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Validate size limit
+    // 5. Validate file size: maximum 10MB para maprotektahan ang server memory
     if (fileBuffer.length > MAX_FILE_SIZE) {
       return NextResponse.json(
         {
@@ -96,12 +125,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // Generate safe, collision-resistant storage path: {userId}/{docType}/{timestamp}_{uuid}_{filename}
+    // 6. Collision-Resistant Storage Path
+    // Format: {userId}/{docType}/{timestamp}_{uuid}_{filename}
+    // Bakit ganito: Kahit mag-upload ang dalawang guro ng file na may parehong pangalan (hal. "scan.jpg"),
+    // hindi kailanman mag-o-overwrite ang mga file dahil unique ang bawat path.
     const safeName = sanitizeFilename(originalName);
     const docFolder = documentType.toLowerCase().replace(/[^a-z0-9]/g, "");
     const storagePath = `${user.id}/${docFolder}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeName}`;
 
-    // Upload to Supabase Storage bucket 'documents'
+    // 7. I-upload ang kumpletong original file sa private Supabase Storage bucket 'documents'
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from("documents")
       .upload(storagePath, fileBuffer, {
@@ -120,7 +152,9 @@ export async function POST(request: Request) {
       );
     }
 
-    // Generate accessible URL for display (signed URL for private bucket, public URL as fallback)
+    // 8. Generate accessible Signed URL para sa preview
+    // Dahil private ang bucket para sa data privacy ng estudyante,
+    // gumagawa tayo ng pansamantalang 24-hour signed URL para ma-display ito sa review screen.
     let displayUrl = "";
     try {
       const { data: signedData } = await supabase.storage
@@ -130,7 +164,7 @@ export async function POST(request: Request) {
         displayUrl = signedData.signedUrl;
       }
     } catch {
-      // Fallback if signing is not supported
+      // Fallback kung sakaling hindi available ang URL signing
     }
 
     if (!displayUrl) {

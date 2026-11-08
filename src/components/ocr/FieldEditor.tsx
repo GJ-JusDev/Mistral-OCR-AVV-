@@ -9,6 +9,7 @@ export interface FieldEditorProps {
   onChange: (val: string) => void;
   originalValue?: string;
   error?: string;
+  badge?: React.ReactNode;
 }
 
 export default function FieldEditor({
@@ -17,6 +18,7 @@ export default function FieldEditor({
   onChange,
   originalValue,
   error,
+  badge,
 }: FieldEditorProps) {
   const isModified = originalValue !== undefined && value !== originalValue;
 
@@ -26,11 +28,14 @@ export default function FieldEditor({
         <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
           {label}
         </label>
-        {isModified && (
-          <span className="text-xs text-amber-700 dark:text-amber-500 font-medium">
-            Modified
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {badge}
+          {isModified && (
+            <span className="text-xs text-amber-700 dark:text-amber-500 font-medium">
+              Modified
+            </span>
+          )}
+        </div>
       </div>
       <Input
         value={value}

@@ -17,6 +17,9 @@ export interface Database {
           division: string | null
           region: string | null
           is_active: boolean | null
+          sshs_pilot_status: "unverified" | "pilot_verified" | "non_pilot_verified"
+          sshs_pilot_reference: string | null
+          school_calendar_type: "three_term" | "semester" | null
           created_at: string | null
         }
         Insert: {
@@ -26,6 +29,9 @@ export interface Database {
           division?: string | null
           region?: string | null
           is_active?: boolean | null
+          sshs_pilot_status?: "unverified" | "pilot_verified" | "non_pilot_verified"
+          sshs_pilot_reference?: string | null
+          school_calendar_type?: "three_term" | "semester" | null
           created_at?: string | null
         }
         Update: {
@@ -35,6 +41,9 @@ export interface Database {
           division?: string | null
           region?: string | null
           is_active?: boolean | null
+          sshs_pilot_status?: "unverified" | "pilot_verified" | "non_pilot_verified"
+          sshs_pilot_reference?: string | null
+          school_calendar_type?: "three_term" | "semester" | null
           created_at?: string | null
         }
         Relationships: any[]
@@ -104,6 +113,18 @@ export interface Database {
           ocr_confidence: number | null
           status: string
           uploaded_by: string | null
+          school_year: string | null
+          grade_level: string | null
+          semester: string | null
+          shs_track: string | null
+          curriculum_id: string | null
+          source_form_version: string | null
+          grading_policy_version: string | null
+          grading_period_scheme: "quarterly_semestral" | "three_term" | "quarterly" | null
+          general_average_printed: number | null
+          general_average_action_taken: string | null
+          shs_general_average_printed: number | null
+          storage_path: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -120,6 +141,18 @@ export interface Database {
           ocr_confidence?: number | null
           status?: string
           uploaded_by?: string | null
+          school_year?: string | null
+          grade_level?: string | null
+          semester?: string | null
+          shs_track?: string | null
+          curriculum_id?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
+          grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
+          general_average_printed?: number | null
+          general_average_action_taken?: string | null
+          shs_general_average_printed?: number | null
+          storage_path?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -136,6 +169,18 @@ export interface Database {
           ocr_confidence?: number | null
           status?: string
           uploaded_by?: string | null
+          school_year?: string | null
+          grade_level?: string | null
+          semester?: string | null
+          shs_track?: string | null
+          curriculum_id?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
+          grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
+          general_average_printed?: number | null
+          general_average_action_taken?: string | null
+          shs_general_average_printed?: number | null
+          storage_path?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -220,14 +265,37 @@ export interface Database {
           student_id: string | null
           document_id: string | null
           school_year: string | null
+          grade_level: string | null
+          semester: string | null
+          source_section: string | null
+          subject_track: string | null
+          subject_category: string | null
+          subject_code: string | null
+          grading_period_scheme: "quarterly_semestral" | "three_term" | "quarterly" | null
           subject: string
           q1: number | null
           q2: number | null
           q3: number | null
           q4: number | null
+          t1: number | null
+          t2: number | null
+          t3: number | null
+          sem1_final_grade: number | null
+          sem2_final_grade: number | null
+          units: number | null
+          failed_final_grade: number | null
+          remedial_class_mark: number | null
+          recomputed_final_grade: number | null
+          remedial_sem1_recomputed: number | null
+          remedial_sem2_recomputed: number | null
           final_grade: number | null
+          action_taken: string | null
+          remark: string | null
           status: string | null
           needs_verification: boolean | null
+          curriculum_id: string | null
+          source_form_version: string | null
+          grading_policy_version: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -236,14 +304,37 @@ export interface Database {
           student_id?: string | null
           document_id?: string | null
           school_year?: string | null
+          grade_level?: string | null
+          semester?: string | null
+          source_section?: string | null
+          subject_track?: string | null
+          subject_category?: string | null
+          subject_code?: string | null
+          grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
           subject: string
           q1?: number | null
           q2?: number | null
           q3?: number | null
           q4?: number | null
+          t1?: number | null
+          t2?: number | null
+          t3?: number | null
+          sem1_final_grade?: number | null
+          sem2_final_grade?: number | null
+          units?: number | null
+          failed_final_grade?: number | null
+          remedial_class_mark?: number | null
+          recomputed_final_grade?: number | null
+          remedial_sem1_recomputed?: number | null
+          remedial_sem2_recomputed?: number | null
           final_grade?: number | null
+          action_taken?: string | null
+          remark?: string | null
           status?: string | null
           needs_verification?: boolean | null
+          curriculum_id?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -252,14 +343,37 @@ export interface Database {
           student_id?: string | null
           document_id?: string | null
           school_year?: string | null
+          grade_level?: string | null
+          semester?: string | null
+          source_section?: string | null
+          subject_track?: string | null
+          subject_category?: string | null
+          subject_code?: string | null
+          grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
           subject?: string | null
           q1?: number | null
           q2?: number | null
           q3?: number | null
           q4?: number | null
+          t1?: number | null
+          t2?: number | null
+          t3?: number | null
+          sem1_final_grade?: number | null
+          sem2_final_grade?: number | null
+          units?: number | null
+          failed_final_grade?: number | null
+          remedial_class_mark?: number | null
+          recomputed_final_grade?: number | null
+          remedial_sem1_recomputed?: number | null
+          remedial_sem2_recomputed?: number | null
           final_grade?: number | null
+          action_taken?: string | null
+          remark?: string | null
           status?: string | null
           needs_verification?: boolean | null
+          curriculum_id?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -322,6 +436,9 @@ export interface Database {
           school_year: string | null
           grade_level: string | null
           curriculum: string | null
+          source_form_version: string | null
+          grading_policy_version: string | null
+          general_average_printed: number | null
           previous_status: string | null
           new_status: string
           decision_source: string
@@ -336,6 +453,9 @@ export interface Database {
           school_year?: string | null
           grade_level?: string | null
           curriculum?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
+          general_average_printed?: number | null
           previous_status?: string | null
           new_status: string
           decision_source: string
@@ -350,11 +470,98 @@ export interface Database {
           school_year?: string | null
           grade_level?: string | null
           curriculum?: string | null
+          source_form_version?: string | null
+          grading_policy_version?: string | null
+          general_average_printed?: number | null
           previous_status?: string | null
           new_status?: string
           decision_source?: string
           confirmed_by?: string | null
           confirmation_notes?: string | null
+          created_at?: string | null
+        }
+        Relationships: any[]
+      }
+      eligibility_approvals: {
+        Row: {
+          id: string
+          student_id: string
+          school_id: string | null
+          grade_level: "Grade 11" | "Grade 12"
+          school_year: string
+          eligibility_type: "Grade 11 Progression" | "Grade 12 Graduation"
+          status: "Eligible" | "Not Eligible" | "Needs Review"
+          decision: "Approved" | "Not Approved" | "Pending"
+          approved_by: string | null
+          approved_at: string | null
+          remarks: string | null
+          created_at: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          id?: string
+          student_id: string
+          school_id?: string | null
+          grade_level: "Grade 11" | "Grade 12"
+          school_year: string
+          eligibility_type: "Grade 11 Progression" | "Grade 12 Graduation"
+          status: "Eligible" | "Not Eligible" | "Needs Review"
+          decision: "Approved" | "Not Approved" | "Pending"
+          approved_by?: string | null
+          approved_at?: string | null
+          remarks?: string | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          id?: string
+          student_id?: string
+          school_id?: string | null
+          grade_level?: "Grade 11" | "Grade 12"
+          school_year?: string
+          eligibility_type?: "Grade 11 Progression" | "Grade 12 Graduation"
+          status?: "Eligible" | "Not Eligible" | "Needs Review"
+          decision?: "Approved" | "Not Approved" | "Pending"
+          approved_by?: string | null
+          approved_at?: string | null
+          remarks?: string | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Relationships: any[]
+      }
+      eligibility_audit_logs: {
+        Row: {
+          id: string
+          approval_id: string | null
+          student_id: string
+          action: string
+          previous_decision: string | null
+          new_decision: string | null
+          performed_by: string | null
+          remarks: string | null
+          created_at: string | null
+        }
+        Insert: {
+          id?: string
+          approval_id?: string | null
+          student_id: string
+          action: string
+          previous_decision?: string | null
+          new_decision?: string | null
+          performed_by?: string | null
+          remarks?: string | null
+          created_at?: string | null
+        }
+        Update: {
+          id?: string
+          approval_id?: string | null
+          student_id?: string
+          action?: string
+          previous_decision?: string | null
+          new_decision?: string | null
+          performed_by?: string | null
+          remarks?: string | null
           created_at?: string | null
         }
         Relationships: any[]

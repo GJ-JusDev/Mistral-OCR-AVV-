@@ -9,8 +9,14 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     redirect("/login");
   }
 
-  const role = user?.user_metadata?.role?.toLowerCase();
-  if (role !== "admin") {
+  // Authoritative server-side role check from database (never trust client-mutable user_metadata)
+  const { data: roleRow, error: roleError } = await supabase
+    .from("user_roles")
+    .select("role, account_status")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (roleError || !roleRow || roleRow.role?.toLowerCase() !== "admin" || roleRow.account_status !== "Approved") {
     redirect("/");
   }
 

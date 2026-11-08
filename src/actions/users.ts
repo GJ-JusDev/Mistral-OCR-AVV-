@@ -82,18 +82,17 @@ export async function getUsers() {
 
   const safeUsers = usersData.users.map(u => {
     const roleInfo = roleMap.get(u.id);
-    const { prc, ...restMeta } = u.user_metadata || {};
+    const meta = u.user_metadata || {};
     return {
       ...u,
-      db_role: roleInfo?.role || u.user_metadata?.role || "Teacher",
-      db_account_status: roleInfo?.account_status || u.user_metadata?.account_status || "Pending",
-      school_id: roleInfo?.school_id || u.user_metadata?.school_id || null,
+      db_role: roleInfo?.role || meta.role || "Teacher",
+      db_account_status: roleInfo?.account_status || meta.account_status || "Pending",
+      school_id: roleInfo?.school_id || meta.school_id || null,
       school_name: (roleInfo?.schools as any)?.name || null,
       user_metadata: {
-        ...restMeta,
-        role: roleInfo?.role || u.user_metadata?.role || "Teacher",
-        account_status: roleInfo?.account_status || u.user_metadata?.account_status || "Pending",
-        has_prc: !!prc
+        ...meta,
+        role: roleInfo?.role || meta.role || "Teacher",
+        account_status: roleInfo?.account_status || meta.account_status || "Pending"
       }
     };
   });
@@ -295,19 +294,158 @@ export async function verifyAdminPassword(adminPassword: string) {
   return { success: true };
 }
 
-export async function deleteUserAction(targetUserId: string, adminPassword: string) {
-  const verifyRes = await verifyAdminPassword(adminPassword);
-  if (verifyRes.error) return verifyRes;
+/**
+ * PAGBUBURA NG DECLINED TEACHER ACCOUNT (ADMIN ACTION)
+ *
+ * Bakit ito kailangan para sa User Management:
+ * Pinapayagan ang Administrator na linisin ang mga tinanggihang registration request ng mga guro.
+ *
+ * Mahigpit na Security Invariants:
+ * 1. Administrator Lamang: Naka-verify ang caller bilang "admin" at "Approved".
+ * 2. Self-Deletion Prevention: Bawal burahin ng Admin ang sarili niyang account.
+ * 3. Scope Restriction: Tanging Teacher na may "Declined" status lamang ang pwedeng tanggalin.
+ * 4. Protected Accounts: Mahigpit na ipinagbabawal ang pagbura sa Pending, Approved, Principal, o Admin.
+ * 5. Server-Side Supabase Admin API: Hindi kailanman inilalabas sa browser ang service role key.
+ */
+export async function deleteDeclinedUser(targetUserId: string) {
+  if (!targetUserId || typeof targetUserId !== "string") {
+    return { error: "Invalid user ID provided." };
+  }
+
+  // 1. Require an authenticated administrator
+  const serverClient = await createServerClient();
+  const { data: { user } } = await serverClient.auth.getUser();
+
+  if (!user) {
+    return { error: "Unauthorized" };
+  }
+
+  // 2. Check the caller's actual role and approval status in Supabase
+  const { data: callerRoleRow, error: callerRoleErr } = await serverClient
+    .from("user_roles")
+    .select("role, account_status")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (callerRoleErr || callerRoleRow?.role !== "admin" || callerRoleRow?.account_status !== "Approved") {
+    return { error: "Forbidden: Only an approved administrator can delete accounts." };
+  }
+
+  // 5. Prevent administrators from deleting their own accounts
+  if (targetUserId === user.id) {
+    return { error: "Forbidden: Administrators cannot delete their own accounts." };
+  }
 
   const adminClient = getAdminClient();
-  const { error } = await adminClient.auth.admin.deleteUser(targetUserId);
 
-  if (error) {
-    return { error: error.message };
+  // 6 & 7. Recheck authoritative target user role & status immediately before deletion
+  const { data: targetRoleRow, error: targetRoleErr } = await adminClient
+    .from("user_roles")
+    .select("user_id, role, account_status")
+    .eq("user_id", targetUserId)
+    .maybeSingle();
+
+  if (targetRoleErr || !targetRoleRow) {
+    return { error: "Target user not found or has no role assignment in the system." };
+  }
+
+  const { data: targetAuthUser, error: authUserErr } = await adminClient.auth.admin.getUserById(targetUserId);
+  if (authUserErr || !targetAuthUser?.user) {
+    return { error: "User not found in authentication system." };
+  }
+
+  const targetRole = (targetRoleRow.role || "").toLowerCase();
+  const targetStatus = targetRoleRow.account_status;
+
+  // 3 & 4. Allow deletion ONLY when Role = Teacher and Status = Declined
+  if (targetRole !== "teacher") {
+    return { error: `Forbidden: Only teacher accounts can be deleted. Cannot delete account with role '${targetRoleRow.role}'.` };
+  }
+
+  if (targetStatus !== "Declined") {
+    return { error: `Forbidden: Only Declined accounts can be deleted. Cannot delete account with status '${targetStatus}'.` };
+  }
+
+  // Phase 4: Database relationship and audit safety checks
+  // Check documents
+  const { count: docCount, error: docErr } = await adminClient
+    .from("documents")
+    .select("id", { count: "exact", head: true })
+    .eq("uploaded_by", targetUserId);
+
+  if (docErr) {
+    console.error("Error checking document dependencies:", docErr.message);
+    return { error: "Database error verifying user document dependencies." };
+  }
+
+  if (docCount && docCount > 0) {
+    return { 
+      error: "Cannot delete account: User has associated academic document records. Permanent deletion is blocked to preserve school records. Deactivate the account instead." 
+    };
+  }
+
+  // Check review logs
+  const { count: reviewCount, error: reviewErr } = await adminClient
+    .from("review_logs")
+    .select("id", { count: "exact", head: true })
+    .eq("reviewed_by", targetUserId);
+
+  if (reviewErr) {
+    console.error("Error checking review log dependencies:", reviewErr.message);
+    return { error: "Database error verifying user review log dependencies." };
+  }
+
+  if (reviewCount && reviewCount > 0) {
+    return { 
+      error: "Cannot delete account: User has associated document review audit records. Permanent deletion is blocked to preserve audit history. Deactivate the account instead." 
+    };
+  }
+
+  // Check academic standing history
+  const { count: standingCount, error: standingErr } = await adminClient
+    .from("academic_standing_history")
+    .select("id", { count: "exact", head: true })
+    .eq("confirmed_by", targetUserId);
+
+  if (standingErr) {
+    console.error("Error checking academic standing dependencies:", standingErr.message);
+    return { error: "Database error verifying academic standing dependencies." };
+  }
+
+  if (standingCount && standingCount > 0) {
+    return { 
+      error: "Cannot delete account: User has associated academic standing audit records. Permanent deletion is blocked to preserve student academic records. Deactivate the account instead." 
+    };
+  }
+
+  // 8. Use Supabase Admin API only on the server to safely remove user
+  const { error: deleteAuthErr } = await adminClient.auth.admin.deleteUser(targetUserId);
+  if (deleteAuthErr) {
+    console.error("Error deleting user from auth:", deleteAuthErr.message);
+    return { error: `Authentication deletion failed: ${deleteAuthErr.message}` };
+  }
+
+  // Ensure public.user_roles row is cleaned up (in case cascade did not trigger)
+  const { error: deleteRoleErr } = await adminClient
+    .from("user_roles")
+    .delete()
+    .eq("user_id", targetUserId);
+
+  if (deleteRoleErr) {
+    console.warn("Notice: user_roles cleanup error or already removed by cascade:", deleteRoleErr.message);
   }
 
   revalidatePath("/admin/users");
   return { success: true };
+}
+
+export async function deleteUserAction(targetUserId: string, adminPassword?: string) {
+  if (adminPassword) {
+    const verifyRes = await verifyAdminPassword(adminPassword);
+    if (verifyRes.error) return verifyRes;
+  }
+
+  return deleteDeclinedUser(targetUserId);
 }
 
 /**

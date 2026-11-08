@@ -11,6 +11,9 @@ export const LRN_LOOSE_PATTERN = /^\d[\d\s\-]{10,14}\d$/;
 /** Name must contain at least 2 alphabetic characters. */
 export const NAME_PATTERN = /[a-zA-ZÀ-ÿñÑ]{2,}/;
 
+/** Senior High School grade level pattern (Grade 11, Grade 12, XI, XII). */
+export const SHS_GRADE_PATTERN = /^(?:Grade\s*)?(?:11|12|XI|XII)$/i;
+
 /** Grade level patterns (Grade 1–12, Kinder, K–12 variants). */
 export const GRADE_PATTERN = /^(?:Grade\s*)?(?:1[0-2]|[1-9]|K(?:inder(?:garten)?)?|I{1,3}|IV|V|VI{0,3}|IX|X|XI{0,2})$/i;
 

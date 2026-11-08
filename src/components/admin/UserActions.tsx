@@ -1,26 +1,37 @@
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
-import { approveUser, declineUser, deleteUserAction, updateUser, verifyAdminPassword } from "@/actions/users";
+import { approveUser, declineUser, deleteDeclinedUser, updateUser, verifyAdminPassword } from "@/actions/users";
+import { useToast } from "@/components/ui/Toast";
 import { Pencil, Trash2, CheckCircle2 } from "lucide-react";
 
 export function UserActions({ 
   user, 
   schools = [], 
-  fetchUsers 
+  fetchUsers,
+  onSuccess,
+  onError
 }: { 
   user: any; 
   schools?: any[]; 
-  fetchUsers: () => void; 
+  fetchUsers: () => void;
+  onSuccess?: (msg: string) => void;
+  onError?: (err: string) => void;
 }) {
+  const { toast } = useToast();
   const [isTransitioning, startTransition] = useTransition();
   const meta = user.user_metadata || {};
-  const isPending = user.db_account_status === "Pending" || meta.account_status === "Pending";
-  const isApproved = user.db_account_status === "Approved" || meta.account_status === "Approved" || (!user.db_account_status && !meta.account_status);
-  const isAdmin = (user.db_role || meta.role)?.toLowerCase() === "admin";
+  const status = user.db_account_status || meta.account_status || "Pending";
+  const role = (user.db_role || meta.role || "Teacher").toLowerCase();
+
+  const isPending = status === "Pending";
+  const isDeclined = status === "Declined";
+  const isApproved = status === "Approved" || (!user.db_account_status && !meta.account_status);
+  const isTeacher = role === "teacher";
+  const isAdmin = role === "admin";
 
   const [activeAction, setActiveAction] = useState<
-    "none" | "approve_form" | "edit_confirm" | "edit_password" | "edit_form" | "delete_confirm" | "delete_password"
+    "none" | "approve_form" | "edit_confirm" | "edit_password" | "edit_form" | "delete_declined_confirm"
   >("none");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -91,7 +102,35 @@ export function UserActions({
   };
 
   const onEditConfirm = () => setActiveAction("edit_password");
-  const onDeleteConfirm = () => setActiveAction("delete_password");
+
+  const handleDeleteDeclinedSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setIsSubmitting(true);
+    setError("");
+
+    const res = await deleteDeclinedUser(user.id);
+    setIsSubmitting(false);
+
+    if (res.error) {
+      setError(res.error);
+      if (onError) onError(res.error);
+      toast({
+        title: "Deletion Failed",
+        description: res.error,
+        variant: "error",
+      });
+    } else {
+      const successMsg = "Declined teacher account has been successfully deleted.";
+      if (onSuccess) onSuccess(successMsg);
+      toast({
+        title: "Account Deleted",
+        description: successMsg,
+        variant: "success",
+      });
+      closeAction();
+      fetchUsers();
+    }
+  };
 
   const onEditPasswordSubmitKeepPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,20 +139,6 @@ export function UserActions({
       setError(res.error as string);
     } else {
       setActiveAction("edit_form");
-    }
-  };
-
-  const onDeletePasswordSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setError("");
-    const res = await deleteUserAction(user.id, password);
-    setIsSubmitting(false);
-    if ("error" in res && res.error) {
-      setError(res.error as string);
-    } else {
-      closeAction();
-      fetchUsers();
     }
   };
 
@@ -134,6 +159,7 @@ export function UserActions({
 
   return (
     <>
+      {/* 1. Pending accounts: Show Approve and Decline */}
       {isPending && (
         <div className="flex gap-2">
           <Button size="sm" onClick={onOpenApproveModal} disabled={isTransitioning} className="bg-emerald-600 hover:bg-emerald-700 text-white">
@@ -145,13 +171,29 @@ export function UserActions({
         </div>
       )}
 
+      {/* 2. Declined teacher accounts: Show a red Delete button with a trash icon */}
+      {isDeclined && isTeacher && (
+        <div className="flex gap-2">
+          <Button 
+            size="sm" 
+            variant="outline" 
+            onClick={() => {
+              setError("");
+              setActiveAction("delete_declined_confirm");
+            }} 
+            disabled={isTransitioning || isSubmitting}
+            className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200 px-2"
+          >
+            <Trash2 className="h-4 w-4 mr-1 text-red-600" /> Delete
+          </Button>
+        </div>
+      )}
+
+      {/* 3. Approved accounts: Show Edit only. Do NOT show Delete. Admin accounts: Never show Delete */}
       {isApproved && !isAdmin && (
         <div className="flex gap-2">
           <Button size="sm" variant="outline" onClick={() => setActiveAction("edit_confirm")} className="text-blue-600 hover:text-blue-700 hover:bg-blue-50 px-2">
             <Pencil className="h-4 w-4 mr-1" /> Edit
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => setActiveAction("delete_confirm")} className="text-red-600 hover:text-red-700 hover:bg-red-50 px-2">
-            <Trash2 className="h-4 w-4 mr-1" /> Delete
           </Button>
         </div>
       )}
@@ -205,6 +247,45 @@ export function UserActions({
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Delete Declined Account Confirmation Modal */}
+      <Modal 
+        isOpen={activeAction === "delete_declined_confirm"} 
+        onClose={closeAction} 
+        title="Delete Declined Account?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Are you sure you want to delete this declined account? This action cannot be undone.
+          </p>
+
+          {error && (
+            <div className="rounded-sm bg-red-50 p-3 text-sm text-red-600 border border-red-200">
+              {error}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button 
+              type="button" 
+              variant="outline" 
+              onClick={closeAction}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button 
+              type="button" 
+              variant="danger" 
+              onClick={handleDeleteDeclinedSubmit}
+              disabled={isSubmitting}
+              isLoading={isSubmitting}
+            >
+              {isSubmitting ? "Deleting..." : "Delete Account"}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       {/* Edit Confirmation Modal */}
@@ -298,37 +379,6 @@ export function UserActions({
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={closeAction}>Cancel</Button>
             <Button type="submit" disabled={isSubmitting}>{isSubmitting ? "Saving..." : "Save Changes"}</Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* Delete Modals */}
-      <Modal isOpen={activeAction === "delete_confirm"} onClose={closeAction} title="Confirm Deletion">
-        <p className="mb-6 text-sm text-slate-600">Do you want to delete this user?</p>
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={closeAction}>Cancel</Button>
-          <Button variant="danger" onClick={onDeleteConfirm}>Confirm</Button>
-        </div>
-      </Modal>
-
-      <Modal isOpen={activeAction === "delete_password"} onClose={closeAction} title="Admin Verification">
-        <form onSubmit={onDeletePasswordSubmit} className="space-y-4">
-          <p className="text-sm text-slate-600">Please enter your admin password to confirm deletion.</p>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
-            <input 
-              type="password" 
-              required 
-              value={password} 
-              onChange={e => setPassword(e.target.value)} 
-              className="w-full rounded-sm border border-slate-300 px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" 
-              placeholder="Enter admin password" 
-            />
-          </div>
-          {error && <p className="text-sm text-red-600">{error}</p>}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={closeAction}>Cancel</Button>
-            <Button type="submit" variant="danger" disabled={isSubmitting}>{isSubmitting ? "Deleting..." : "Delete User"}</Button>
           </div>
         </form>
       </Modal>
