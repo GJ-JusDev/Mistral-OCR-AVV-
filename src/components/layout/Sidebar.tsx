@@ -105,7 +105,7 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
       >
         {/* Institutional Branding Header */}
         <div className="flex h-20 shrink-0 items-center gap-3 border-b border-white/10 px-5 bg-[#0B1F33]">
-          <div className="relative h-11 w-11 shrink-0 rounded-full bg-white/10 p-0.5 border border-white/20">
+          <div className="relative h-11 w-11 shrink-0">
             <Image
               src="/images/tris-logo.png"
               alt="Taysan Resettlement Integrated School Official Seal"

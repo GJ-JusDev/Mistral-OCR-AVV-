@@ -67,7 +67,7 @@ export default function LoginPage() {
         {/* Branding Body */}
         <div className="relative z-10 my-8 lg:my-auto flex flex-col items-start max-w-lg">
           <div className="flex items-center gap-4 mb-6">
-            <div className="relative h-16 w-16 sm:h-20 sm:w-20 shrink-0 rounded-2xl bg-white/10 p-1.5 border border-white/20 shadow-xl">
+            <div className="relative h-16 w-16 sm:h-20 sm:w-20 shrink-0">
               <Image
                 src="/images/tris-logo.png"
                 alt="Taysan Resettlement Integrated School Official Seal"

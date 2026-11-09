@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark-mode-disabled));
+@custom-variant landing-fit (@media (min-width: 1024px) and (orientation: landscape));
 
 :root {
   --background: #F4F7FB; /* Institutional TRIS Light Background */
@@ -79,4 +80,54 @@ dialog::backdrop {
   overscroll-behavior: contain;
   background-color: rgba(11, 31, 51, 0.5);
   backdrop-filter: blur(4px);
+}
+
+/*
+ * Landing page only: hides the scrollbar while keeping wheel, touch and keyboard scrolling.
+ * html scrolls for signed-out visitors; main scrolls for signed-in users on /?view=landing.
+ */
+html:has([data-landing-page]),
+main:has([data-landing-page]) {
+  scrollbar-width: none;
+}
+
+html:has([data-landing-page])::-webkit-scrollbar,
+main:has([data-landing-page])::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * Landing first screen: on landscape screens from 1024px wide, the hero and the
+ * four-column strip together fill the browser window exactly.
+ * The hero photo is one composition 46.3% as tall as it is wide.
+ */
+@media (min-width: 1024px) and (orientation: landscape) {
+  [data-landing-page] {
+    --landing-stat-h: 176px;
+    --landing-hero-h: max(450px, calc(100svh - var(--landing-stat-h)));
+    /* A tall window needs a wider photo so it still reaches the bottom of the hero. */
+    --landing-photo-w: max(100vw, calc(var(--landing-hero-h) * 2.16));
+    /* A short window has less room than the photo needs: trim sky and tighten the wave. */
+    --landing-photo-excess: max(0px, calc(var(--landing-photo-w) * 0.463 - var(--landing-hero-h)));
+    --landing-photo-top: calc(var(--landing-photo-excess) * -0.5);
+    --landing-wave-top: calc(var(--landing-photo-w) * -0.1 - var(--landing-photo-excess) * 0.85);
+  }
+}
+
+@media (min-width: 1180px) and (orientation: landscape) {
+  [data-landing-page] {
+    --landing-stat-h: 160px;
+  }
+}
+
+@media (min-width: 1536px) and (orientation: landscape) {
+  [data-landing-page] {
+    --landing-stat-h: 176px;
+  }
+}
+
+@media (min-width: 2200px) and (orientation: landscape) {
+  [data-landing-page] {
+    --landing-stat-h: 190px;
+  }
 }
