@@ -1,10 +1,12 @@
 import LandingNavbar from "./LandingNavbar";
 import HeroSection from "./HeroSection";
+import StatStrip from "./StatStrip";
 import FeaturesSection from "./FeaturesSection";
 import HowItWorksSection from "./HowItWorksSection";
 import AboutSection from "./AboutSection";
 import CtaSection from "./CtaSection";
 import Footer from "./Footer";
+import { landingBodyFont, landingHeadingFont } from "./fonts";
 
 interface LandingPageProps {
   user?: any;
@@ -12,29 +14,21 @@ interface LandingPageProps {
 
 export default function LandingPage({ user }: LandingPageProps) {
   return (
-    <div className="min-h-screen w-full bg-[#0B1F33] text-white selection:bg-[#F4C542] selection:text-[#0B1F33] flex flex-col">
-      {/* Sticky Responsive Navigation Bar */}
+    <div
+      data-landing-page
+      className={`${landingHeadingFont.variable} ${landingBodyFont.variable} flex min-h-screen w-full flex-col bg-[#F9FAFC] text-[#2B3440] [font-family:var(--font-landing-body)] selection:bg-[#5FDC4B] selection:text-[#06240F]`}
+    >
       <LandingNavbar user={user} />
 
-      {/* Main Content Area */}
       <div className="flex-1">
-        {/* Hero Section with Mayon Volcano & Educational Setting */}
         <HeroSection />
-
-        {/* 4 Feature Highlights */}
+        <StatStrip />
         <FeaturesSection />
-
-        {/* 4-Step How It Works Workflow */}
         <HowItWorksSection />
-
-        {/* About System with Official TRIS Seal */}
         <AboutSection />
-
-        {/* Final Call to Action */}
         <CtaSection />
       </div>
 
-      {/* Institutional Footer */}
       <Footer />
     </div>
   );

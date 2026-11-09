@@ -51,7 +51,7 @@ export default function RegisterPage() {
       <div className="max-w-2xl mx-auto bg-white rounded-2xl border border-slate-200/80 p-6 sm:p-10 shadow-xl shadow-slate-200/60">
         {/* Institutional Branding Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 pb-6 border-b border-slate-100">
-          <div className="relative h-14 w-14 sm:h-16 sm:w-16 shrink-0 rounded-2xl bg-[#0B1F33] p-1 border border-slate-200 shadow-md">
+          <div className="relative h-14 w-14 sm:h-16 sm:w-16 shrink-0">
             <Image
               src="/images/tris-logo.png"
               alt="Taysan Resettlement Integrated School Official Seal"

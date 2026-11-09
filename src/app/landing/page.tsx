@@ -2,8 +2,8 @@ import LandingPage from "@/components/landing/LandingPage";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata = {
-  title: "Automated Visual Validation System (AVV) — Taysan Resettlement Integrated School",
-  description: "An AI-assisted platform for extracting, reviewing, and validating Senior High School records with accuracy, transparency, and human verification.",
+  title: "SchoolFormVerify — An Automated Visual Validation for School Forms",
+  description: "Digitize and validate school forms with an intelligent system built for the schools of Taysan, Legazpi City.",
 };
 
 export default async function PublicLandingPageRoute() {

@@ -1,49 +1,37 @@
+import Image from "next/image";
 import Link from "next/link";
-import { ArrowRight, LogIn, Sparkles } from "lucide-react";
+import { ArrowRight } from "lucide-react";
+import { landingStyles } from "./content";
 
 export default function CtaSection() {
   return (
-    <section className="py-20 sm:py-24 bg-gradient-to-b from-[#102A43] via-[#0B1F33] to-[#0B1F33] text-white relative overflow-hidden border-t border-white/10">
-      {/* Decorative radial gradients */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[350px] bg-[#174EA6]/20 rounded-full blur-[100px] pointer-events-none" />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300px] h-[200px] bg-[#F4C542]/10 rounded-full blur-[80px] pointer-events-none" />
-
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center relative z-10">
-        <div className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-semibold uppercase tracking-wider bg-[#F4C542]/15 text-[#F4C542] border border-[#F4C542]/30 mb-6 shadow-sm">
-          <Sparkles className="h-3.5 w-3.5" />
-          <span>Taysan Resettlement Integrated School</span>
+    <section aria-labelledby="landing-cta-title" className="bg-[#EEF5F0] pt-4 sm:pt-8">
+      {/* Below lg the background shows at full width under the text; its top-edge colors extend it upward. */}
+      <div className="relative isolate overflow-hidden rounded-t-[28px] bg-[linear-gradient(90deg,#0C5E43,#014134_25%,#003E33_50%,#034A3B_75%,#014235)] lg:aspect-[3.6/1]">
+        <div className="absolute inset-x-0 bottom-0 -z-10 aspect-[3/1] [mask-image:linear-gradient(180deg,transparent,#000_20%)] lg:inset-0 lg:aspect-auto lg:[mask-image:none]">
+          <Image src="/images/ready2streamline.png" alt="" fill sizes="100vw" className="object-cover object-bottom" />
         </div>
+        <div className="absolute inset-x-0 bottom-0 h-7 rounded-t-[28px] bg-[#002021]" />
 
-        <h2 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight text-white leading-tight">
-          Simplify School Form Validation
-        </h2>
-
-        <p className="mt-5 text-base sm:text-xl text-[#CBD5E1] max-w-2xl mx-auto leading-relaxed">
-          Make document verification more organized, transparent, and efficient with AVV System.
-        </p>
-
-        {/* Buttons linking to existing application routes */}
-        <div className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
-          <Link
-            href="/register"
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-4 text-base font-semibold text-white bg-[#174EA6] hover:bg-[#123e85] active:scale-[0.98] rounded-full shadow-xl shadow-[#174EA6]/30 border border-white/15 hover:border-white/30 transition-all duration-200 group"
+        <div className="mx-auto flex max-w-[640px] flex-col items-center px-5 pb-[38vw] pt-10 text-center sm:px-8 sm:pb-[30vw] sm:pt-14 lg:absolute lg:inset-x-0 lg:top-0 lg:h-[84%] lg:max-w-[min(50vw,1280px)] lg:justify-center lg:p-0">
+          <h2
+            id="landing-cta-title"
+            className={`${landingStyles.heading} text-[clamp(1.625rem,3.4vw,2.5rem)] font-bold leading-tight tracking-[-0.02em] text-white [text-wrap:balance] lg:text-[clamp(1.875rem,2.9vw,4.25rem)]`}
           >
-            <span>Get Started</span>
-            <ArrowRight className="h-4 w-4 group-hover:translate-x-1 transition-transform duration-200" />
-          </Link>
-
-          <Link
-            href="/login"
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-4 text-base font-medium text-white bg-white/10 hover:bg-white/15 active:scale-[0.98] rounded-full backdrop-blur-md border border-white/20 hover:border-white/30 transition-all duration-200"
-          >
-            <LogIn className="h-4 w-4 text-[#F4C542]" />
-            <span>Login to Portal</span>
+            Ready to Streamline Your <span className="lg:block">School Form Validation?</span>
+          </h2>
+          <p className="mt-2 max-w-[36rem] text-base leading-snug text-white/95 lg:max-w-[min(44vw,56rem)] lg:text-[clamp(1rem,1.4vw,1.625rem)]">
+            Try SchoolFormVerify today and experience a faster, more accurate, and organized validation process for
+            your school.
+          </p>
+          <Link href="/register" className={`${landingStyles.primaryButton} group mt-4 px-8 py-3 text-base`}>
+            Get Started
+            <ArrowRight
+              className="h-5 w-5 transition-transform duration-200 group-hover:translate-x-1"
+              aria-hidden="true"
+            />
           </Link>
         </div>
-
-        <p className="mt-8 text-xs text-[#CBD5E1]/70">
-          Authorized access strictly for TRIS faculty, staff, and institutional administrators.
-        </p>
       </div>
     </section>
   );
