@@ -42,6 +42,7 @@ export default function DocumentsPage() {
 
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
+      if (doc.status === "archived") return false;
       const q = searchQuery.toLowerCase().trim();
       const name = ((doc.extracted_fields as any)?.name || "").toLowerCase();
       const type = (doc.document_type || "").toLowerCase();

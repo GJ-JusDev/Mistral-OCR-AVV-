@@ -25,7 +25,7 @@ export default function ReviewQueuePage() {
       if (!res.ok) throw new Error("Failed to fetch review queue");
       const data = await res.json();
       const docs = Array.isArray(data) ? data : (data.documents || []);
-      setDocuments(docs);
+      setDocuments(docs.filter((d: any) => d.status === "needs_review"));
     } catch (err: any) {
       setError(err.message);
     } finally {

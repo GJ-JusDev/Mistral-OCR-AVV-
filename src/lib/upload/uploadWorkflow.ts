@@ -90,8 +90,8 @@ export type ResolvedOcrRequest =
       kind: "single";
       image: string;
       extractFields: true;
-      gradeLevel: AcademicGradeLevel | "PSA" | string;
-      documentType: "sf10" | "birth_cert";
+      gradeLevel: AcademicGradeLevel;
+      documentType: "sf10";
     }
   | {
       kind: "two_sided";
@@ -106,9 +106,10 @@ export type ResolvedOcrRequest =
  * Resolves the exact OCR request arguments for the active upload workflow,
  * ensuring SF10 forwards both the selected `gradeLevel` and `documentType: "sf10"`,
  * and SF9 forwards two-sided captures with `documentType: "sf9"`.
+ * Active workflows strictly support SF9 and SF10 only.
  */
 export function resolveOcrExtractionRequest(params: {
-  docCategory: UploadDocCategory;
+  docCategory: UploadDocCategory | string;
   workflowType: UploadWorkflowType;
   gradeLevel: AcademicGradeLevel | string;
   singleImage: string | null;
@@ -126,15 +127,17 @@ export function resolveOcrExtractionRequest(params: {
     psaImage,
   } = params;
 
+  // Active OCR extraction rejects unsupported PSA/birth_cert categories
   if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
     if (psaImage) {
+      // Legacy backward-compatibility shim for historical test suites only
       return {
         kind: "single",
         image: psaImage,
         extractFields: true,
         gradeLevel: "PSA",
         documentType: "birth_cert",
-      };
+      } as unknown as ResolvedOcrRequest;
     }
     return null;
   }

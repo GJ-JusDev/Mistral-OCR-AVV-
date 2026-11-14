@@ -143,6 +143,7 @@ export async function getPrincipalDashboardData() {
         storage_path,
         image_url
       `)
+      .neq("status", "archived")
       .order("created_at", { ascending: false });
 
     if (docErr) {
@@ -445,6 +446,7 @@ export async function getPrincipalStudentRecords(filters?: {
         image_url,
         created_at
       `)
+      .neq("status", "archived")
       .order("created_at", { ascending: false });
 
     // 3. Fetch subject grades
@@ -776,6 +778,7 @@ export async function getPrincipalStudentDetails(identifier: string) {
         .from("documents")
         .select("id, document_type, status, grade_level, school_year, created_at, extracted_fields, storage_path, image_url")
         .eq("student_id", student.id)
+        .neq("status", "archived")
         .order("created_at", { ascending: false });
 
       // Fetch subject grades
@@ -1237,6 +1240,7 @@ export async function getPrincipalDocumentSummary(filters?: {
         storage_path,
         image_url
       `)
+      .neq("status", "archived")
       .order("created_at", { ascending: false });
 
     if (docErr) {

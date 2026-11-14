@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { normalizeLrn, isValidLrn } from '@/lib/validation/patterns';
 import { compareScannedGradesWithExisting } from '@/lib/validation/gradeComparator';
+import { verifyStudentCollision } from '@/lib/validation/studentMatcher';
 import {
   normalizeGradeRecords,
   recalculateSubjectGradeStatus,
@@ -67,6 +68,17 @@ export async function GET(
           ef[key] = await refreshSignedUrl(ef[key]);
         }
       }
+      const scanLists = [ef.scan_history, ef.scan_evidence_history];
+      for (const list of scanLists) {
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            if (item && typeof item === "object") {
+              if (item.image_url) item.image_url = await refreshSignedUrl(item.image_url);
+              if (item.back_image_url) item.back_image_url = await refreshSignedUrl(item.back_image_url);
+            }
+          }
+        }
+      }
       if (Array.isArray(ef.grades) && ef.grades.length > 0) {
         ef.grades = normalizeGradeRecords(ef.grades, ef.semester || data.semester);
         Object.assign(ef, updateExtractedFieldsAverages(ef));
@@ -83,16 +95,31 @@ export async function GET(
     const efData = (data?.extracted_fields || {}) as any;
     const rawLrn = efData.lrn || efData.learner_reference_number;
     const cleanLrn = normalizeLrn(rawLrn ? String(rawLrn) : "");
+    const hasUnresolvedConflict =
+      (efData.identity_conflict === true || efData.manual_lrn_verification_required === true) &&
+      efData.lrn_conflict_verified !== true;
 
-    if (!targetStudentId && isValidLrn(cleanLrn)) {
+    const extractedLastName =
+      efData.last_name ||
+      efData.student?.last_name ||
+      (typeof efData.name === "string" && efData.name.includes(",")
+        ? efData.name.split(",")[0].trim()
+        : null);
+
+    if (!targetStudentId && isValidLrn(cleanLrn) && !hasUnresolvedConflict) {
       const { data: stRow } = await supabase
         .from('students')
         .select('*')
         .eq('lrn', cleanLrn)
         .maybeSingle();
       if (stRow?.id) {
-        targetStudentId = stRow.id;
-        matchedStudent = stRow;
+        const collisionCheck = extractedLastName
+          ? verifyStudentCollision(extractedLastName, stRow)
+          : { hasConflict: false };
+        if (!collisionCheck.hasConflict) {
+          targetStudentId = stRow.id;
+          matchedStudent = stRow;
+        }
       }
     } else if (targetStudentId) {
       const { data: stRow } = await supabase
@@ -101,7 +128,15 @@ export async function GET(
         .eq('id', targetStudentId)
         .maybeSingle();
       if (stRow) {
-        matchedStudent = stRow;
+        const collisionCheck =
+          !efData.lrn_conflict_verified && extractedLastName
+            ? verifyStudentCollision(extractedLastName, stRow)
+            : { hasConflict: false };
+        if (!collisionCheck.hasConflict && !hasUnresolvedConflict) {
+          matchedStudent = stRow;
+        } else {
+          targetStudentId = null;
+        }
       }
     }
 
@@ -209,6 +244,117 @@ export async function PATCH(
     }
 
     const { id } = await props.params;
+
+    const { data: existingDoc } = await supabase
+      .from('documents')
+      .select('id, school_id, student_id, document_type, school_year, grade_level, status, extracted_fields')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (existingDoc) {
+      const prevEf = (existingDoc.extracted_fields || {}) as Record<string, any>;
+      const nextEf = (body.extracted_fields
+        ? { ...prevEf, ...(body.extracted_fields as Record<string, any>) }
+        : prevEf) as Record<string, any>;
+
+      const nextStatus = (body.status ?? existingDoc.status ?? "").toLowerCase();
+      const nextDocType = (body.document_type ?? existingDoc.document_type ?? "").toLowerCase();
+      const nextSy = String(
+        (body as any).school_year ?? nextEf.school_year ?? existingDoc.school_year ?? ""
+      ).trim();
+      const nextGl = String(
+        (body as any).grade_level ?? nextEf.grade_level ?? nextEf.selected_grade_level ?? existingDoc.grade_level ?? ""
+      ).trim();
+      const nextStudentId =
+        body.student_id !== undefined ? body.student_id : existingDoc.student_id;
+
+      // 1. Enforce manual LRN verification for identity collision documents (e.g., Kenneth Latonero collision)
+      const hasConflictFlag =
+        nextEf.identity_conflict === true ||
+        nextEf.manual_lrn_verification_required === true;
+      const isConflictVerified = nextEf.lrn_conflict_verified === true;
+
+      if (hasConflictFlag && !isConflictVerified && (nextStatus === "approved" || body.student_id)) {
+        return NextResponse.json(
+          {
+            error:
+              "Conflict: Manual LRN verification (lrn_conflict_verified = true) is required before approving or linking a document with an LRN identity collision.",
+            code: "MANUAL_LRN_VERIFICATION_REQUIRED",
+          },
+          { status: 409 }
+        );
+      }
+
+      // Verify against live student registry if approving or linking a student_id
+      const candidateLrn = normalizeLrn(
+        String(nextEf.lrn || nextEf.student?.lrn || nextEf.learner_reference_number || "")
+      );
+      const extractedLastName =
+        nextEf.last_name ||
+        nextEf.student?.last_name ||
+        (typeof nextEf.name === "string" && nextEf.name.includes(",")
+          ? nextEf.name.split(",")[0].trim()
+          : null);
+
+      if ((nextStatus === "approved" || nextStudentId) && isValidLrn(candidateLrn) && extractedLastName) {
+        const { data: lrnStudent } = await supabase
+          .from("students")
+          .select("id, first_name, last_name, lrn")
+          .eq("lrn", candidateLrn)
+          .maybeSingle();
+
+        if (lrnStudent) {
+          const coll = verifyStudentCollision(extractedLastName, lrnStudent);
+          if (coll.hasConflict && !isConflictVerified) {
+            return NextResponse.json(
+              {
+                error: `Conflict: LRN ${candidateLrn} is registered to ${lrnStudent.last_name}, ${lrnStudent.first_name}, which conflicts with extracted name '${extractedLastName}'. Manual LRN verification is required before approval or student assignment.`,
+                code: "IDENTITY_COLLISION_BLOCKED",
+              },
+              { status: 409 }
+            );
+          }
+        }
+      }
+
+      // 2. Enforce non-null canonical identity fields before activating or approving a record
+      if (nextStatus === "approved" || (nextStudentId && !["archived", "rejected"].includes(nextStatus))) {
+        if (!existingDoc.school_id || !["sf9", "sf10"].includes(nextDocType)) {
+          return NextResponse.json(
+            {
+              error:
+                "Validation Error: Canonical school_id and document_type ('sf9' or 'sf10') must be valid before activating or approving an academic record.",
+            },
+            { status: 400 }
+          );
+        }
+        if (nextDocType === "sf9" && (!nextSy || !nextGl)) {
+          return NextResponse.json(
+            {
+              error:
+                "Validation Error: Canonical school_year and grade_level must be non-null before activating or approving an SF9 academic record.",
+            },
+            { status: 400 }
+          );
+        }
+        if (nextStatus === "approved" && !nextStudentId && !isValidLrn(candidateLrn)) {
+          return NextResponse.json(
+            {
+              error:
+                "Validation Error: A verified student_id and valid 12-digit LRN are required before approving an academic record.",
+            },
+            { status: 400 }
+          );
+        }
+      }
+
+      if (nextSy && !(body as any).school_year) {
+        (body as any).school_year = nextSy;
+      }
+      if (nextGl && !(body as any).grade_level) {
+        (body as any).grade_level = nextGl;
+      }
+    }
 
     const { data, error } = await supabase
       .from('documents')
