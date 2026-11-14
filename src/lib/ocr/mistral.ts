@@ -425,23 +425,34 @@ export async function handleOcrRoute(
               ? Math.round((confidences.reduce((a, b) => a + b, 0) / confidences.length) * 10000) / 10000
               : undefined;
 
+          const { evaluateTwoSidedSf9Identity } = await import("../teacher/sectionScanner");
+          const crossSideCheck = evaluateTwoSidedSf9Identity({
+            frontFields: frontFields || {},
+            backFields: backFields || {},
+            frontRawText: frontResult.text,
+            backRawText: backResult.text,
+            frontConfidence: frontResult.confidence,
+            backConfidence: backResult.confidence,
+          });
+
           const unifiedFields: any = {
             ...frontFields,
+            ...crossSideCheck.mergedFields,
             grades:
-              backFields.grades && backFields.grades.length > 0
+              backFields?.grades && backFields.grades.length > 0
                 ? backFields.grades
-                : frontFields.grades || [],
+                : crossSideCheck.mergedFields.grades || frontFields?.grades || [],
             attendance:
-              backFields.attendance && backFields.attendance.length > 0
+              backFields?.attendance && backFields.attendance.length > 0
                 ? backFields.attendance
-                : frontFields.attendance || [],
-            attendance_months: backFields.attendance_months || frontFields.attendance_months,
-            attendance_totals: backFields.attendance_totals || frontFields.attendance_totals,
-            attendance_percentage: backFields.attendance_percentage ?? frontFields.attendance_percentage,
-            absence_percentage: backFields.absence_percentage ?? frontFields.absence_percentage,
-            attendance_risk_status: backFields.attendance_risk_status || frontFields.attendance_risk_status,
-            attendance_discrepancy_details: backFields.attendance_discrepancy_details || frontFields.attendance_discrepancy_details,
-            general_average: backFields.general_average ?? frontFields.general_average,
+                : frontFields?.attendance || [],
+            attendance_months: backFields?.attendance_months || frontFields?.attendance_months,
+            attendance_totals: backFields?.attendance_totals || frontFields?.attendance_totals,
+            attendance_percentage: backFields?.attendance_percentage ?? frontFields?.attendance_percentage,
+            absence_percentage: backFields?.absence_percentage ?? frontFields?.absence_percentage,
+            attendance_risk_status: backFields?.attendance_risk_status || frontFields?.attendance_risk_status,
+            attendance_discrepancy_details: backFields?.attendance_discrepancy_details || frontFields?.attendance_discrepancy_details,
+            general_average: backFields?.general_average ?? frontFields?.general_average,
             ocr_provider: frontResult.provider || "azure",
             ocr_model: `${frontResult.model}+${backResult.model.replace(/^azure\//, "")}`,
           };
@@ -544,9 +555,18 @@ export async function handleOcrRoute(
           backFields = fieldParser(mBack.text, gradeLevel, undefined, effectiveDocType);
         }
         const combinedText = `=== FRONT (IDENTITY) ===\n${mFront.text}\n\n=== BACK (GRADES) ===\n${mBack.text}`;
+        const { evaluateTwoSidedSf9Identity } = await import("../teacher/sectionScanner");
+        const crossSideCheck = evaluateTwoSidedSf9Identity({
+          frontFields: frontFields || {},
+          backFields: backFields || {},
+          frontRawText: mFront.text,
+          backRawText: mBack.text,
+        });
+
         const unifiedFields: any = {
           ...frontFields,
-          grades: backFields?.grades?.length ? backFields.grades : frontFields?.grades || [],
+          ...crossSideCheck.mergedFields,
+          grades: backFields?.grades?.length ? backFields.grades : crossSideCheck.mergedFields.grades || frontFields?.grades || [],
           attendance: backFields?.attendance?.length ? backFields.attendance : frontFields?.attendance || [],
           attendance_months: backFields?.attendance_months || frontFields?.attendance_months,
           attendance_totals: backFields?.attendance_totals || frontFields?.attendance_totals,

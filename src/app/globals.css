@@ -131,3 +131,14 @@ main:has([data-landing-page])::-webkit-scrollbar {
     --landing-stat-h: 190px;
   }
 }
+
+/* Prevent underlying page scrolling behind open native modal <dialog> */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+dialog::backdrop {
+  background: rgba(11, 31, 51, 0.55);
+  backdrop-filter: blur(2px);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}

@@ -1,5 +1,13 @@
 -- ==============================================================================
 -- Migration 018 Rollback Recovery: Revert Review Queue Direct Deletion
+-- WARNING (DESTRUCTIVE):
+--   1. Drops columns public.documents.archived_by and public.documents.archived_at.
+--   2. Reverts any rows with status = 'archived' back to status = 'needs_review'
+--      so that re-adding the pre-018 documents_status_check constraint does not
+--      fail with SQLSTATE 23514 (check_violation).
+--   3. Must ONLY be executed AFTER rolling back Migration 021 (021_rollback_recovery.sql),
+--      otherwise un-archiving duplicate documents will violate Migration 021's
+--      partial unique indexes (SQLSTATE 23505).
 -- ==============================================================================
 
 BEGIN;
@@ -10,6 +18,12 @@ DROP FUNCTION IF EXISTS public.archive_review_document(UUID, TEXT, UUID);
 
 DROP INDEX IF EXISTS public.idx_documents_archived_by;
 DROP INDEX IF EXISTS public.idx_documents_archived_at;
+
+-- Transition any archived documents back to 'needs_review' before tightening status constraint
+UPDATE public.documents
+SET status = 'needs_review',
+    updated_at = now()
+WHERE status = 'archived';
 
 ALTER TABLE public.documents DROP COLUMN IF EXISTS archived_by;
 ALTER TABLE public.documents DROP COLUMN IF EXISTS archived_at;

@@ -38,6 +38,7 @@ const adminNavigation = [
   { name: "Students", href: "/students", icon: Users },
   { name: "User Management", href: "/admin/users", icon: UserCheck },
   { name: "Teacher Registry", href: "/admin/teacher-registry", icon: GraduationCap },
+  { name: "Teacher Assignments", href: "/admin/teacher-assignments", icon: CheckSquare },
   { name: "Audit Logs", href: "/admin/audit-logs", icon: ShieldCheck },
   { name: "Settings", href: "/settings", icon: Settings },
 ];

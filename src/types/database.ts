@@ -10,6 +10,12 @@ export type SubjectGrade = Tables['subject_grades']['Row']
 export type UserRoleRow = Tables['user_roles']['Row']
 export type TeacherRegistryRow = Tables['school_teacher_registry']['Row']
 export type ReviewDeletionRequest = Tables['review_deletion_requests']['Row']
+export type TeacherAssignmentRow = Tables['teacher_assignments']['Row']
+export type TeacherModulePolicyRow = Tables['teacher_module_policies']['Row']
+export type StudentEnrollmentRow = Tables['student_enrollments']['Row']
+export type StudentIdentityConflictRow = Tables['student_identity_conflicts']['Row']
+export type TeacherAssignmentType = 'class_adviser' | 'subject_teacher'
+export type TeacherAssignmentStatus = 'active' | 'inactive'
 
 export type DocumentStatus = 'submitted' | 'extracted' | 'validated' | 'needs_review' | 'corrected' | 'approved' | 'rejected' | 'archived'
 export type DeletionRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'COMPLETED' | 'FAILED'

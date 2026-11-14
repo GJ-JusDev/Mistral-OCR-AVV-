@@ -15,6 +15,8 @@ import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import type { ExtractedFields } from "@/types/validation";
 import PrincipalDashboard from "@/components/principal/PrincipalDashboard";
 import { getPrincipalDashboardData } from "@/actions/principal";
+import TeacherAssignmentOverview from "@/components/teacher/TeacherAssignmentOverview";
+import { getMyTeacherDashboardData } from "@/actions/assignments";
 import LandingPage from "@/components/landing/LandingPage";
 import { LogoutButton } from "@/components/auth/LogoutButton";
 import { Button } from "@/components/ui/Button";
@@ -101,6 +103,8 @@ export default async function DashboardPage({
   const teacherName = [user?.user_metadata?.first_name, user?.user_metadata?.last_name]
     .filter(Boolean)
     .join(" ") || "Teacher";
+
+  const teacherModuleData = role === "teacher" ? await getMyTeacherDashboardData() : null;
 
   const VALIDATION_STATUSES = ["validated", "needs_review", "corrected", "approved", "rejected"];
 
@@ -212,6 +216,18 @@ export default async function DashboardPage({
       />
       
       <div className="mt-6 flex flex-col gap-6">
+        {role === "teacher" && teacherModuleData && (
+          <TeacherAssignmentOverview
+            advisoryClasses={teacherModuleData.summary.advisoryClasses}
+            subjectAssignments={teacherModuleData.summary.subjectAssignments}
+            assignedSections={teacherModuleData.summary.assignedSections}
+            roster={teacherModuleData.roster}
+            pendingDocuments={teacherModuleData.pendingDocuments}
+            policy={teacherModuleData.policy}
+            canScanAny={teacherModuleData.summary.canScanAny}
+          />
+        )}
+
         {/* KPI Stats Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard

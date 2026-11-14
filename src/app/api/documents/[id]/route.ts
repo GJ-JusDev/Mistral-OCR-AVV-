@@ -219,18 +219,21 @@ export async function PATCH(
       return NextResponse.json({ error: "Unauthorized: Please log in to update documents." }, { status: 401 });
     }
 
-    if (body.status === "approved" || body.status === "rejected") {
-      const { data: roleData } = await supabase
-        .from("user_roles")
-        .select("role, account_status")
-        .eq("user_id", user.id)
-        .maybeSingle();
+    const { data: roleData } = await supabase
+      .from("user_roles")
+      .select("role, account_status")
+      .eq("user_id", user.id)
+      .maybeSingle();
 
-      if (
-        !roleData ||
-        roleData.account_status !== "Approved" ||
-        (roleData.role !== "admin" && roleData.role !== "principal")
-      ) {
+    if (!roleData || roleData.account_status !== "Approved") {
+      return NextResponse.json(
+        { error: "Forbidden: Account is pending administrator approval." },
+        { status: 403 }
+      );
+    }
+
+    if (body.status === "approved" || body.status === "rejected") {
+      if (roleData.role !== "admin" && roleData.role !== "principal") {
         return NextResponse.json(
           { error: "Forbidden: Only an approved Principal or Admin can approve or reject documents." },
           { status: 403 }
@@ -247,9 +250,26 @@ export async function PATCH(
 
     const { data: existingDoc } = await supabase
       .from('documents')
-      .select('id, school_id, student_id, document_type, school_year, grade_level, status, extracted_fields')
+      .select('id, school_id, student_id, document_type, school_year, grade_level, section, teacher_assignment_id, uploaded_by, status, extracted_fields')
       .eq('id', id)
       .maybeSingle();
+
+    if (existingDoc && String(roleData.role || "").toLowerCase() === "teacher") {
+      const { authorizeTeacherDocumentEdit } = await import("@/lib/teacher/serverAuth");
+      const editAuth = await authorizeTeacherDocumentEdit({
+        supabase,
+        userId: user.id,
+        doc: existingDoc as any,
+        nextExtractedFields: (body.extracted_fields as any) || null,
+        nextBody: body as any,
+      });
+      if (!editAuth.allowed) {
+        return NextResponse.json(
+          { error: editAuth.error || "Forbidden: You are not authorized to edit this document." },
+          { status: 403 }
+        );
+      }
+    }
 
     if (existingDoc) {
       const prevEf = (existingDoc.extracted_fields || {}) as Record<string, any>;

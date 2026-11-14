@@ -20,6 +20,15 @@ export type OcrErrorDetails = {
   retryAfter?: number;
 };
 
+export type OcrAssignmentContext = {
+  teacherAssignmentId?: string | null;
+  assignmentConfirmed?: boolean;
+  selectedSchoolYear?: string | null;
+  selectedGradeLevel?: string | null;
+  selectedSection?: string | null;
+  selectedStrand?: string | null;
+};
+
 export type OcrResponse = {
   text?: string;
   fields?: ExtractedFields;
@@ -45,6 +54,7 @@ export function useOcr() {
     extractFields: boolean;
     gradeLevel: string;
     documentType?: string;
+    assignmentContext?: OcrAssignmentContext;
   } | null>(null);
 
   // Clean up any countdown timer on unmount
@@ -72,7 +82,8 @@ export function useOcr() {
       image: string,
       extractFields: boolean = false,
       gradeLevel: string = "Senior High School",
-      documentType?: string
+      documentType?: string,
+      assignmentContext?: OcrAssignmentContext
     ): Promise<OcrResponse> => {
       // Guard against concurrent duplicate requests
       if (inFlightRef.current) {
@@ -93,7 +104,7 @@ export function useOcr() {
         countdownTimerRef.current = null;
       }
 
-      lastRequestRef.current = { image, extractFields, gradeLevel, documentType };
+      lastRequestRef.current = { image, extractFields, gradeLevel, documentType, assignmentContext };
       inFlightRef.current = true;
       setIsExtracting(true);
       setError(null);
@@ -105,7 +116,13 @@ export function useOcr() {
         const response = await fetch("/api/ocr", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image, extractFields, gradeLevel, documentType }),
+          body: JSON.stringify({
+            image,
+            extractFields,
+            gradeLevel,
+            documentType,
+            ...(assignmentContext || {}),
+          }),
         });
 
         let result: OcrResponse;
@@ -217,7 +234,8 @@ export function useOcr() {
       lastRequestRef.current.image,
       lastRequestRef.current.extractFields,
       lastRequestRef.current.gradeLevel,
-      lastRequestRef.current.documentType
+      lastRequestRef.current.documentType,
+      lastRequestRef.current.assignmentContext
     );
   }, [extract]);
 
@@ -226,7 +244,8 @@ export function useOcr() {
       frontImage: string,
       backImage: string,
       extractFields: boolean = true,
-      gradeLevel: string = "Senior High School"
+      gradeLevel: string = "Senior High School",
+      assignmentContext?: OcrAssignmentContext
     ): Promise<OcrResponse> => {
       if (inFlightRef.current) {
         console.warn("[useOcr] Extraction already in progress; ignoring duplicate trigger.");
@@ -257,6 +276,7 @@ export function useOcr() {
             extractFields,
             gradeLevel,
             documentType: "sf9",
+            ...(assignmentContext || {}),
           }),
         });
 

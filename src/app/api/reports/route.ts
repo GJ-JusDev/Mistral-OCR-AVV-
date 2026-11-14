@@ -27,7 +27,7 @@ export async function GET() {
       { count: approved },
       { count: validated }
     ] = await Promise.all([
-      supabase.from("documents").select("*", { count: "exact", head: true }),
+      supabase.from("documents").select("*", { count: "exact", head: true }).neq("status", "archived"),
       supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "needs_review"),
       supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "rejected"),
       supabase.from("documents").select("*", { count: "exact", head: true }).eq("status", "approved"),
@@ -46,6 +46,7 @@ export async function GET() {
     const { data: recentActivity } = await supabase
       .from("documents")
       .select("created_at")
+      .neq("status", "archived")
       .gte("created_at", startDate)
       .lte("created_at", endDate);
 

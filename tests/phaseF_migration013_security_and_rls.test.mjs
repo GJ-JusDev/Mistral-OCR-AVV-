@@ -79,7 +79,7 @@ test("Phase F: Migration 013 SQL Security & Invariant Audit", async (t) => {
 });
 
 test("Phase F: Non-Destructive Recovery Plan Audit", async (t) => {
-  const recoveryPath = path.join(rootDir, "supabase/migrations/013_rollback_recovery.sql");
+  const recoveryPath = path.join(rootDir, "supabase/rollbacks/013_rollback_recovery.sql");
   assert.ok(fs.existsSync(recoveryPath), "Rollback recovery file must exist");
   const recoverySql = fs.readFileSync(recoveryPath, "utf-8");
 

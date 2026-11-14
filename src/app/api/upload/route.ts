@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import {
+  evaluateTeacherScanAuthorization,
+  type TeacherAssignmentRecord,
+} from "@/lib/teacher/assignments";
 
 const ALLOWED_MIME_TYPES = new Set([
   "image/jpeg",
@@ -44,7 +48,7 @@ export async function POST(request: Request) {
     // 2. RBAC check: School Head / Principal accounts are restricted to monitoring only
     const { data: roleRow } = await supabase
       .from("user_roles")
-      .select("role, account_status")
+      .select("role, account_status, school_id")
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -70,6 +74,8 @@ export async function POST(request: Request) {
     let documentType: string = "sf9";
     let documentId: string | null = null;
     let side: string = "primary";
+    let assignmentId: string | null = null;
+    let assignmentConfirmed: boolean = false;
 
     // 3. Tanggapin ang file galing sa standard FormData (drag-and-drop o camera upload)
     if (contentType.includes("multipart/form-data")) {
@@ -78,6 +84,12 @@ export async function POST(request: Request) {
       documentType = (formData.get("documentType") as string) || "sf9";
       documentId = (formData.get("documentId") as string) || (formData.get("document_id") as string) || null;
       side = (formData.get("side") as string) || "primary";
+      assignmentId =
+        (formData.get("assignmentId") as string) ||
+        (formData.get("teacher_assignment_id") as string) ||
+        null;
+      const confirmedRaw = formData.get("assignmentConfirmed") ?? formData.get("assignment_confirmed");
+      assignmentConfirmed = confirmedRaw === "true" || confirmedRaw === "1";
 
       if (!file) {
         return NextResponse.json(
@@ -93,9 +105,26 @@ export async function POST(request: Request) {
     } else {
       // O kaya'y base64 JSON payload mula sa client-side canvas capture
       const body = await request.json();
-      const { dataUrl, filename, docType, documentId: bodyDocId, document_id: bodyDocIdAlt, side: bodySide } = body;
+      const {
+        dataUrl,
+        filename,
+        docType,
+        documentId: bodyDocId,
+        document_id: bodyDocIdAlt,
+        side: bodySide,
+        assignmentId: bodyAssignmentId,
+        teacher_assignment_id: bodyAssignmentIdAlt,
+        assignmentConfirmed: bodyAssignmentConfirmed,
+        assignment_confirmed: bodyAssignmentConfirmedAlt,
+      } = body;
       documentId = bodyDocId || bodyDocIdAlt || null;
       side = bodySide || "primary";
+      assignmentId = bodyAssignmentId || bodyAssignmentIdAlt || null;
+      assignmentConfirmed =
+        bodyAssignmentConfirmed === true ||
+        bodyAssignmentConfirmed === "true" ||
+        bodyAssignmentConfirmedAlt === true ||
+        bodyAssignmentConfirmedAlt === "true";
 
       if (!dataUrl || typeof dataUrl !== "string") {
         return NextResponse.json(
@@ -116,6 +145,37 @@ export async function POST(request: Request) {
       originalName = filename || "document.jpg";
       if (docType) documentType = docType;
       fileBuffer = Buffer.from(match[2], "base64");
+    }
+
+    // 3a. Server-side strict Class Adviser assignment ownership & active status check
+    if (roleRow?.role?.toLowerCase() === "teacher") {
+      const sb = supabase as any;
+      let assignmentRow: TeacherAssignmentRecord | null = null;
+      if (assignmentId) {
+        const { data: aData } = await sb
+          .from("teacher_assignments")
+          .select("*")
+          .eq("id", assignmentId)
+          .maybeSingle();
+        assignmentRow = aData || null;
+      }
+
+      const authCheck = evaluateTeacherScanAuthorization({
+        userRole: roleRow.role,
+        userId: user.id,
+        accountStatus: roleRow.account_status,
+        userSchoolId: roleRow.school_id,
+        assignment: assignmentRow,
+        policy: { allow_subject_teacher_scanning: false },
+        assignmentConfirmed,
+      });
+
+      if (!authCheck.allowed) {
+        return NextResponse.json(
+          { error: authCheck.error, code: authCheck.code },
+          { status: authCheck.statusCode }
+        );
+      }
     }
 
     // Reject unsupported document categories: strictly SF9 and SF10 only

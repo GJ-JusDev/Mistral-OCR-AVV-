@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
@@ -18,6 +18,9 @@ import ImagePreview from "@/components/image/ImagePreview";
 
 import ExtractButton from "@/components/ocr/ExtractButton";
 import OcrResultCard from "@/components/ocr/OcrResultCard";
+import PreScanAssignmentGate, {
+  type PreScanAssignmentState,
+} from "@/components/upload/PreScanAssignmentGate";
 import { ExtractedFields } from "@/types/documents";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
 
@@ -86,12 +89,97 @@ export default function UploadPage() {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [uploadProgressStatus, setUploadProgressStatus] = useState<string>("");
   const [currentPipelineStage, setCurrentPipelineStage] = useState<UploadPipelineStage>("idle");
+  const [assignmentGate, setAssignmentGate] = useState<PreScanAssignmentState>({
+    loaded: false,
+    userRole: null,
+    assignments: [],
+    policy: null,
+    selectedAssignment: null,
+    confirmed: false,
+  });
+  const [openConfirmSignal, setOpenConfirmSignal] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const paramDocType = new URLSearchParams(window.location.search).get("docType")?.toLowerCase();
+    if (paramDocType === "sf10") {
+      setDocCategory("sf10");
+      setWorkflowType("single");
+    } else if (paramDocType === "sf9") {
+      setDocCategory("sf9");
+      setWorkflowType("two_sided");
+    }
+  }, []);
 
   const resetSubmissionId = useCallback(() => {
     submissionIdRef.current = null;
     storageCacheRef.current = null;
     ocrResultRef.current = null;
   }, []);
+
+  const ensureTeacherAssignmentConfirmed = (): boolean => {
+    const role = String(assignmentGate.userRole || "").toLowerCase();
+    if (role && role !== "teacher") {
+      return true;
+    }
+    if (!assignmentGate.loaded) {
+      alert("Still verifying your authorized teaching assignments. Please wait a moment.");
+      return false;
+    }
+    if (!assignmentGate.selectedAssignment) {
+      alert(
+        "Only active Class Advisers may scan SF9/SF10 documents. You do not have an active Class Adviser assignment."
+      );
+      return false;
+    }
+    if (assignmentGate.selectedAssignment.assignment_type !== "class_adviser") {
+      alert(
+        "Only an officially assigned and active Class Adviser may scan SF9/SF10 documents or perform OCR extraction."
+      );
+      return false;
+    }
+    if (!assignmentGate.confirmed) {
+      setOpenConfirmSignal((n) => n + 1);
+      return false;
+    }
+    return true;
+  };
+
+  const uploadScanImageToStorage = async (params: {
+    dataUrl: string;
+    filename: string;
+    docType: string;
+    documentId: string;
+    side: "front" | "back" | "single";
+  }) => {
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...params,
+        assignmentId: assignmentGate.selectedAssignment?.id || null,
+        assignmentConfirmed: assignmentGate.confirmed,
+      }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `Upload authorization failed (${res.status}).`);
+    }
+    return res.json();
+  };
+
+  const buildServerAssignmentPayload = () => {
+    const a = assignmentGate.selectedAssignment;
+    if (!a) return {};
+    return {
+      teacher_assignment_id: a.id,
+      assignment_confirmed: assignmentGate.confirmed,
+      selected_school_year: a.school_year,
+      selected_grade_level: a.grade_level,
+      selected_section: a.section,
+      selected_strand: a.strand_or_track || undefined,
+    };
+  };
 
   const {
     videoRef,
@@ -135,6 +223,7 @@ export default function UploadPage() {
   const handleCategoryChange = (nextCategory: UploadDocCategory) => {
     if (isSubmittingRef.current) return;
     resetSubmissionId();
+    setAssignmentGate((prev) => ({ ...prev, confirmed: false }));
 
     const transition = transitionUploadCategory(
       {
@@ -222,6 +311,9 @@ export default function UploadPage() {
     if (isExtracting || (retryAfter !== null && retryAfter > 0)) {
       return;
     }
+    if (!ensureTeacherAssignmentConfirmed()) {
+      return;
+    }
 
     try {
       const effectiveFront = (currentStep === 1 ? (processedImage || rawImage) : null) || frontImage;
@@ -256,12 +348,24 @@ export default function UploadPage() {
         return res;
       };
 
+      const ocrAssignmentContext = assignmentGate.selectedAssignment
+        ? {
+            teacherAssignmentId: assignmentGate.selectedAssignment.id,
+            assignmentConfirmed: assignmentGate.confirmed,
+            selectedSchoolYear: assignmentGate.selectedAssignment.school_year,
+            selectedGradeLevel: assignmentGate.selectedAssignment.grade_level,
+            selectedSection: assignmentGate.selectedAssignment.section,
+            selectedStrand: assignmentGate.selectedAssignment.strand_or_track,
+          }
+        : undefined;
+
       if (resolvedReq.kind === "two_sided") {
         const result = await extractTwoSided(
           resolvedReq.frontImage,
           resolvedReq.backImage,
           resolvedReq.extractFields,
-          resolvedReq.gradeLevel
+          resolvedReq.gradeLevel,
+          ocrAssignmentContext
         );
         setOcrResult(normalizeOcrResult(result));
       } else {
@@ -269,7 +373,8 @@ export default function UploadPage() {
           resolvedReq.image,
           resolvedReq.extractFields,
           resolvedReq.gradeLevel,
-          resolvedReq.documentType
+          resolvedReq.documentType,
+          ocrAssignmentContext
         );
         setOcrResult(normalizeOcrResult(result));
       }
@@ -302,6 +407,9 @@ export default function UploadPage() {
     // 1. Synchronous Submission Guard: immediately drop duplicate clicks
     if (isSubmittingRef.current) {
       console.warn("[upload] Submission already in progress; dropping duplicate trigger.");
+      return;
+    }
+    if (!ensureTeacherAssignmentConfirmed()) {
       return;
     }
 
@@ -360,74 +468,41 @@ export default function UploadPage() {
 
         // 1. Upload Front Image if not already uploaded in this attempt
         if (!frontStorageUrl && frontToUpload && frontToUpload.startsWith("data:")) {
-          try {
-            const frontRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: frontToUpload,
-                filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'front',
-              }),
-            });
-            if (frontRes.ok) {
-              const frontData = await frontRes.json();
-              frontStorageUrl = frontData.url;
-              originalFilename = frontData.originalFilename || originalFilename;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Front storage upload error:", storageErr);
-          }
+          const frontData = await uploadScanImageToStorage({
+            dataUrl: frontToUpload,
+            filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "front",
+          });
+          frontStorageUrl = frontData.url;
+          originalFilename = frontData.originalFilename || originalFilename;
         }
 
         // 2. Upload Back Image if not already uploaded in this attempt
         if (!backStorageUrl && backToUpload && backToUpload.startsWith("data:")) {
-          try {
-            const backRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: backToUpload,
-                filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'back',
-              }),
-            });
-            if (backRes.ok) {
-              const backData = await backRes.json();
-              backStorageUrl = backData.url;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Back storage upload error:", storageErr);
-          }
+          const backData = await uploadScanImageToStorage({
+            dataUrl: backToUpload,
+            filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "back",
+          });
+          backStorageUrl = backData.url;
         }
       } else {
         const imageToUpload = singleImage || processedImage || rawImage;
         if (!frontStorageUrl && imageToUpload && imageToUpload.startsWith("data:")) {
           const ext = imageToUpload.startsWith("data:application/pdf") ? "pdf" : "jpg";
-          try {
-            const storageRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: imageToUpload,
-                filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'single',
-              }),
-            });
-            if (storageRes.ok) {
-              const storageData = await storageRes.json();
-              frontStorageUrl = storageData.url;
-              originalFilename = storageData.originalFilename || originalFilename;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Storage API fallback:", storageErr);
-          }
+          const storageData = await uploadScanImageToStorage({
+            dataUrl: imageToUpload,
+            filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "single",
+          });
+          frontStorageUrl = storageData.url;
+          originalFilename = storageData.originalFilename || originalFilename;
         }
       }
 
@@ -500,6 +575,7 @@ export default function UploadPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...requestBody,
+          ...buildServerAssignmentPayload(),
           document_id: currentSubmissionId,
           status: 'needs_review',
         }),
@@ -540,6 +616,9 @@ export default function UploadPage() {
       console.warn("[upload] Submission already in progress; dropping duplicate trigger.");
       return;
     }
+    if (!ensureTeacherAssignmentConfirmed()) {
+      return;
+    }
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
@@ -573,49 +652,27 @@ export default function UploadPage() {
 
         // 1. Upload Front Image
         if (!frontStorageUrl && frontToUpload && frontToUpload.startsWith("data:image/")) {
-          try {
-            const frontRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: frontToUpload,
-                filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'front',
-              }),
-            });
-            if (frontRes.ok) {
-              const frontData = await frontRes.json();
-              frontStorageUrl = frontData.url;
-              originalFilename = frontData.originalFilename || originalFilename;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Front storage upload error:", storageErr);
-          }
+          const frontData = await uploadScanImageToStorage({
+            dataUrl: frontToUpload,
+            filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "front",
+          });
+          frontStorageUrl = frontData.url;
+          originalFilename = frontData.originalFilename || originalFilename;
         }
 
         // 2. Upload Back Image
         if (!backStorageUrl && backToUpload && backToUpload.startsWith("data:image/")) {
-          try {
-            const backRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: backToUpload,
-                filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'back',
-              }),
-            });
-            if (backRes.ok) {
-              const backData = await backRes.json();
-              backStorageUrl = backData.url;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Back storage upload error:", storageErr);
-          }
+          const backData = await uploadScanImageToStorage({
+            dataUrl: backToUpload,
+            filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "back",
+          });
+          backStorageUrl = backData.url;
         }
       } else {
         const imageToUpload = processedImage || rawImage;
@@ -626,26 +683,15 @@ export default function UploadPage() {
             imageToUpload.startsWith("data:application/pdf"))
         ) {
           const ext = imageToUpload.startsWith("data:application/pdf") ? "pdf" : "jpg";
-          try {
-            const storageRes = await fetch('/api/upload', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                dataUrl: imageToUpload,
-                filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
-                docType: docType,
-                documentId: currentSubmissionId,
-                side: 'single',
-              }),
-            });
-            if (storageRes.ok) {
-              const storageData = await storageRes.json();
-              frontStorageUrl = storageData.url;
-              originalFilename = storageData.originalFilename || originalFilename;
-            }
-          } catch (storageErr) {
-            console.warn("[upload] Storage API fallback:", storageErr);
-          }
+          const storageData = await uploadScanImageToStorage({
+            dataUrl: imageToUpload,
+            filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
+            docType,
+            documentId: currentSubmissionId,
+            side: "single",
+          });
+          frontStorageUrl = storageData.url;
+          originalFilename = storageData.originalFilename || originalFilename;
         }
       }
 
@@ -676,6 +722,7 @@ export default function UploadPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...requestBody,
+          ...buildServerAssignmentPayload(),
           document_id: currentSubmissionId,
           status: 'needs_review',
         }),
@@ -737,6 +784,19 @@ export default function UploadPage() {
             Compare Documents
           </Link>
         }
+      />
+
+      {/* Pre-Scan Assignment Selection & Mandatory Confirmation */}
+      <PreScanAssignmentGate
+        docCategory={docCategory}
+        state={assignmentGate}
+        onStateChange={setAssignmentGate}
+        onAssignmentGradeSync={(gl) => {
+          if (gl === "Grade 11" || gl === "Grade 12") {
+            setGradeLevel(gl);
+          }
+        }}
+        openModalSignal={openConfirmSignal}
       />
 
       {/* Document Category Selector */}

@@ -16,7 +16,7 @@ test("AVV Teacher Registry & Secure Approval Workflow Suite", async (suite) => {
     "utf8"
   );
   const rollback016 = fs.readFileSync(
-    path.join(rootDir, "supabase/migrations/016_rollback_recovery.sql"),
+    path.join(rootDir, "supabase/rollbacks/016_rollback_recovery.sql"),
     "utf8"
   );
   const nameMatcherSource = fs.readFileSync(

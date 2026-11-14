@@ -499,7 +499,7 @@ export async function saveDocumentCorrections(
 
     const { data: doc, error: fetchError } = await supabase
       .from("documents")
-      .select("id, status, extracted_fields, student_id, school_id, uploaded_by, ocr_confidence, document_type")
+      .select("id, status, extracted_fields, student_id, school_id, uploaded_by, ocr_confidence, document_type, teacher_assignment_id, school_year, grade_level, section")
       .eq("id", documentId)
       .single();
 
@@ -508,13 +508,17 @@ export async function saveDocumentCorrections(
     }
 
     // Role-based authorization guard:
-    // Teachers can only edit corrections on their own non-finalized uploads
+    // Advisers can review/edit assigned class docs; Subject Teachers are restricted to authorized subjects
     if (role === "teacher") {
-      if (doc.uploaded_by && doc.uploaded_by !== user.id) {
-        return { error: "Forbidden: Teachers can only edit corrections on their own uploaded documents." };
-      }
-      if (doc.status === "approved" || doc.status === "rejected") {
-        return { error: "Forbidden: Cannot edit corrections on already finalized documents." };
+      const { authorizeTeacherDocumentEdit } = await import("@/lib/teacher/serverAuth");
+      const editAuth = await authorizeTeacherDocumentEdit({
+        supabase,
+        userId: user.id,
+        doc: doc as any,
+        nextExtractedFields: updatedFields,
+      });
+      if (!editAuth.allowed) {
+        return { error: editAuth.error || "Forbidden: You are not authorized to edit this document." };
       }
     } else if (role === "principal") {
       if (doc.school_id && roleRow?.school_id && doc.school_id !== roleRow.school_id) {

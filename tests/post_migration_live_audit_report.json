@@ -1,7 +1,7 @@
 {
   "academic_standing_history": {
     "status": "PASS",
-    "rowCount": 0
+    "rowCount": 1
   },
   "confirm_student_academic_standing": {
     "status": "PASS",
@@ -104,37 +104,136 @@
   },
   "liveRoster": [
     {
-      "id": "058ba391-b5b7-41f9-8c03-01f3d570233e",
-      "email": "di***@gmail.com",
+      "id": "68e8242f-470d-444e-97db-3503a9da351d",
+      "email": "te***@testschool.edu.ph",
       "dbRole": "teacher",
       "dbStatus": "Pending",
       "dbSchoolId": null,
       "dbSchoolName": "UNASSIGNED",
-      "createdAt": "2026-09-19T14:12:58.903889Z"
+      "createdAt": "2026-11-14T17:04:37.305392Z"
+    },
+    {
+      "id": "967427c6-8162-4844-87c3-9fa90d69e9cd",
+      "email": "te***@testschool.edu.ph",
+      "dbRole": "teacher",
+      "dbStatus": "Pending",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-11-14T17:03:08.223637Z"
+    },
+    {
+      "id": "5130124c-1b9e-4f91-836c-b00653d4b537",
+      "email": "bl***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:45:43.155226Z"
+    },
+    {
+      "id": "792b4c9a-6081-40d8-9f70-6bc83bab3279",
+      "email": "ma***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:44:39.466929Z"
+    },
+    {
+      "id": "f8625911-16d7-4058-b926-aa2c8d6d39fe",
+      "email": "ch***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:44:00.399124Z"
+    },
+    {
+      "id": "71fd3401-fa2b-4bfb-b0dc-91f541409305",
+      "email": "de***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:42:04.864326Z"
+    },
+    {
+      "id": "caccba3c-e390-4c06-b5c6-ef448bf40aa1",
+      "email": "wi***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:40:54.376574Z"
+    },
+    {
+      "id": "a551707b-0768-4dc7-8659-81068ef18df5",
+      "email": "ra***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:40:00.299371Z"
+    },
+    {
+      "id": "0a4ce159-bd89-46f0-99c7-44f806b96cdc",
+      "email": "es***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:38:58.924862Z"
+    },
+    {
+      "id": "411cde47-5c18-4549-8d55-467d0fe61522",
+      "email": "ar***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-14T13:37:43.198526Z"
+    },
+    {
+      "id": "d2687e2c-3371-407c-9bf9-54df7071f205",
+      "email": "me***@gmail.com",
+      "dbRole": "teacher",
+      "dbStatus": "Pending",
+      "dbSchoolId": null,
+      "dbSchoolName": "UNASSIGNED",
+      "createdAt": "2026-11-08T11:12:46.377569Z"
+    },
+    {
+      "id": "29b49178-5d1c-4df6-bca7-419e04a86861",
+      "email": "pr***@example.com",
+      "dbRole": "principal",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-11-06T02:52:04.132063Z"
     },
     {
       "id": "6cfe54aa-64dc-403e-9552-a9d0dc4db473",
       "email": "go***@gmail.com",
-      "dbRole": "teacher",
-      "dbStatus": "Pending",
-      "dbSchoolId": null,
-      "dbSchoolName": "UNASSIGNED",
+      "dbRole": "principal",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
       "createdAt": "2026-09-17T11:10:49.380187Z"
+    },
+    {
+      "id": "9412725c-7faa-4efa-a654-be78cc40a14f",
+      "email": "te***@example.com",
+      "dbRole": "teacher",
+      "dbStatus": "Approved",
+      "dbSchoolId": "a0000000-0000-0000-0000-000000000001",
+      "dbSchoolName": "Taysan Resettlement Integrated School",
+      "createdAt": "2026-09-07T02:50:53.611935Z"
     },
     {
       "id": "135baa53-7e1e-4c1f-b76a-f32a915b5f21",
       "email": "ad***@example.com",
       "dbRole": "admin",
       "dbStatus": "Approved",
-      "dbSchoolId": null,
-      "dbSchoolName": "UNASSIGNED",
-      "createdAt": "2026-09-07T02:50:53.611935Z"
-    },
-    {
-      "id": "9412725c-7faa-4efa-a654-be78cc40a14f",
-      "email": "te***@example.com",
-      "dbRole": "teacher",
-      "dbStatus": "Pending",
       "dbSchoolId": null,
       "dbSchoolName": "UNASSIGNED",
       "createdAt": "2026-09-07T02:50:53.611935Z"

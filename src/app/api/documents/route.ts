@@ -12,6 +12,16 @@ import { mergeAcademicGrades } from '@/lib/validation/gradeMerger';
 import { normalizeLrn } from '@/lib/validation/patterns';
 import { matchSchool } from '@/lib/validation/schoolMatcher';
 import { logAuditEvent } from '@/lib/audit/auditLogger';
+import {
+  evaluateTeacherScanAuthorization,
+  normalizeGradeLevelKey,
+  normalizeSchoolYearKey,
+  normalizeSectionKey,
+  normalizeStrandKey,
+  type TeacherAssignmentRecord,
+  type TeacherModulePolicy,
+} from '@/lib/teacher/assignments';
+import { compareDocumentContextWithAssignment } from '@/lib/teacher/sectionScanner';
 
 export async function GET(request: NextRequest) {
   try {
@@ -98,6 +108,126 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
+    if (String(roleRow.role || "").toLowerCase() === "principal") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Principal role is monitoring-only and cannot create or scan academic documents.",
+          code: "PRINCIPAL_READ_ONLY",
+        },
+        { status: 403 }
+      );
+    }
+
+    // 2a. Server-side strict Class Adviser assignment ownership & active status validation
+    const requestedAssignmentId: string | null =
+      body.teacher_assignment_id || body.assignment_id || null;
+    const assignmentConfirmed: boolean =
+      body.assignment_confirmed === true || body.assignment_confirmed === "true";
+
+    let serverAssignment: TeacherAssignmentRecord | null = null;
+    const schoolScanPolicy: TeacherModulePolicy = {
+      school_id: roleRow.school_id || "",
+      allow_subject_teacher_scanning: false,
+    };
+
+    if (requestedAssignmentId) {
+      const { data: aRow } = await (supabase as any)
+        .from("teacher_assignments")
+        .select("*")
+        .eq("id", requestedAssignmentId)
+        .maybeSingle();
+      serverAssignment = aRow || null;
+    }
+
+    if (String(roleRow.role || "").toLowerCase() === "teacher") {
+      const authCheck = evaluateTeacherScanAuthorization({
+        userRole: roleRow.role,
+        userId: user.id,
+        accountStatus: roleRow.account_status,
+        userSchoolId: roleRow.school_id,
+        assignment: serverAssignment,
+        policy: schoolScanPolicy,
+        assignmentConfirmed,
+      });
+
+      if (!authCheck.allowed) {
+        await logAuditEvent({
+          category: "SECURITY",
+          action: "UNAUTHORIZED_ACCESS_DENIED",
+          outcome: "DENIED",
+          actorUserId: user.id,
+          actorEmail: user.email,
+          actorRole: roleRow.role,
+          actorSchoolId: roleRow.school_id,
+          targetType: "teacher_assignment",
+          targetId: requestedAssignmentId,
+          reason: authCheck.error,
+          details: { code: authCheck.code, document_type: documentType },
+        });
+        return NextResponse.json(
+          { error: authCheck.error, code: authCheck.code },
+          { status: authCheck.statusCode }
+        );
+      }
+
+      // Reject frontend-tampered assignment parameters that contradict the authoritative DB record
+      if (serverAssignment) {
+        if (
+          body.selected_school_year &&
+          normalizeSchoolYearKey(body.selected_school_year) !==
+            normalizeSchoolYearKey(serverAssignment.school_year)
+        ) {
+          return NextResponse.json(
+            {
+              error: "Forbidden: Submitted school year does not match your authorized server assignment.",
+              code: "ASSIGNMENT_PARAMETER_MISMATCH",
+            },
+            { status: 403 }
+          );
+        }
+        if (
+          body.selected_grade_level &&
+          normalizeGradeLevelKey(body.selected_grade_level) !==
+            normalizeGradeLevelKey(serverAssignment.grade_level)
+        ) {
+          return NextResponse.json(
+            {
+              error: "Forbidden: Submitted grade level does not match your authorized server assignment.",
+              code: "ASSIGNMENT_PARAMETER_MISMATCH",
+            },
+            { status: 403 }
+          );
+        }
+        if (
+          body.selected_section &&
+          normalizeSectionKey(body.selected_section) !==
+            normalizeSectionKey(serverAssignment.section)
+        ) {
+          return NextResponse.json(
+            {
+              error: "Forbidden: Submitted section does not match your authorized server assignment.",
+              code: "ASSIGNMENT_PARAMETER_MISMATCH",
+            },
+            { status: 403 }
+          );
+        }
+        if (
+          body.selected_strand &&
+          serverAssignment.strand_or_track &&
+          normalizeStrandKey(body.selected_strand) !==
+            normalizeStrandKey(serverAssignment.strand_or_track)
+        ) {
+          return NextResponse.json(
+            {
+              error: "Forbidden: Submitted strand/track does not match your authorized server assignment.",
+              code: "ASSIGNMENT_PARAMETER_MISMATCH",
+            },
+            { status: 403 }
+          );
+        }
+      }
+    }
+
     // 3. Normalize status to valid enum. Disallow unverified documents from being uploaded directly as 'approved'.
     let status = String(body.status || "submitted").toLowerCase().trim();
     const validStatuses = ['submitted', 'extracted', 'validated', 'needs_review', 'corrected'];
@@ -150,88 +280,7 @@ export async function POST(request: NextRequest) {
       extractedFields.grading_period_scheme = "quarterly_semestral";
     }
 
-    // 4a. Evaluate student identity & full name + LRN matching matrix
-    const identityEval = evaluateStudentIdentity(extractedFields);
-    let identityMatchResult: any = null;
-
-    if (identityEval.isValidLrn && identityEval.normalizedLrn) {
-      // Find existing student by valid 12-digit LRN within authorized scope
-      const { data: existingStudent } = await supabase
-        .from('students')
-        .select('id, lrn, first_name, middle_name, last_name, suffix, school_id')
-        .eq('lrn', identityEval.normalizedLrn)
-        .maybeSingle();
-
-      // Check if another student has the exact same name with a different LRN
-      let studentByNameDiffLrn: any = null;
-      if (!existingStudent && identityEval.isValidName && identityEval.lastName && identityEval.firstName) {
-        const { data: foundByName } = await supabase
-          .from('students')
-          .select('id, lrn, first_name, last_name')
-          .ilike('last_name', identityEval.lastName.trim())
-          .ilike('first_name', identityEval.firstName.trim())
-          .limit(1)
-          .maybeSingle();
-        if (foundByName && foundByName.lrn !== identityEval.normalizedLrn) {
-          studentByNameDiffLrn = foundByName;
-        }
-      }
-
-      identityMatchResult = matchStudentIdentityMatrix({
-        extracted: identityEval,
-        existingStudentByLrn: existingStudent,
-        existingStudentByNameDiffLrn: studentByNameDiffLrn,
-      });
-
-      if (identityMatchResult.canAutoLink && identityMatchResult.studentId) {
-        studentId = identityMatchResult.studentId;
-        extractedFields.existing_student_id = identityMatchResult.studentId;
-        if (existingStudent) {
-          extractedFields.existing_student_name = `${existingStudent.last_name}, ${existingStudent.first_name}`;
-        }
-      } else if (identityMatchResult.matchType === "SAME_LRN_CONFLICT_NAME") {
-        // Hard collision: block linking to protect original student!
-        studentId = null;
-        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
-        status = 'needs_review';
-      } else if (identityMatchResult.matchType === "SAME_LRN_MINOR_DIFF") {
-        studentId = identityMatchResult.studentId;
-        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
-        status = 'needs_review';
-      } else if (identityMatchResult.matchType === "DIFF_LRN_SAME_NAME") {
-        studentId = null;
-        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
-        status = 'needs_review';
-      } else if (identityMatchResult.matchType === "NEW_LRN_NEW_NAME") {
-        // Stage candidate info for student registry
-        extractedFields.candidate_student = {
-          lrn: identityEval.normalizedLrn,
-          first_name: identityEval.firstName || null,
-          middle_name: identityEval.middleName || null,
-          last_name: identityEval.lastName || null,
-          suffix: identityEval.suffix || null,
-          grade_level: extractedFields.grade_level || null,
-          sex: extractedFields.sex === 'M' || extractedFields.sex === 'F' ? extractedFields.sex : null,
-          staged_at: new Date().toISOString(),
-        };
-        status = 'needs_review';
-      }
-    } else {
-      // Missing, unreadable, or invalid LRN: Flag for human review.
-      extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
-      if (!identityEval.normalizedLrn) {
-        if (!extractedFields.flags.includes("missing_lrn")) {
-          extractedFields.flags.push("missing_lrn");
-        }
-      } else {
-        if (!extractedFields.flags.includes("invalid_lrn")) {
-          extractedFields.flags.push("invalid_lrn");
-        }
-      }
-      status = 'needs_review';
-    }
-
-    // 5. Server-enforced institutional identity resolution (TRIS)
+    // 4. Server-enforced institutional identity resolution (TRIS)
     let trustedSchoolUuid: string | null = roleRow?.school_id || null;
 
     let { data: authoritativeSchool } = await supabase
@@ -275,6 +324,167 @@ export async function POST(request: NextRequest) {
 
     const userSchoolId = trustedSchoolUuid;
 
+    // 4a. Evaluate student identity & full name + LRN matching matrix (school-scoped via RPC + fallback)
+    const identityEval = evaluateStudentIdentity(extractedFields);
+    const extractedDisplayName =
+      [identityEval.firstName, identityEval.middleName, identityEval.lastName, identityEval.suffix]
+        .filter(Boolean)
+        .join(" ")
+        .trim() ||
+      (extractedFields.name ? String(extractedFields.name).trim() : null);
+    let identityMatchResult: any = null;
+    const quarantineConflictsToInsert: Array<{
+      conflict_type: string;
+      extracted_lrn: string | null;
+      extracted_name: string | null;
+      existing_student_id: string | null;
+      expected_context: Record<string, any>;
+      extracted_context: Record<string, any>;
+    }> = [];
+
+    if (identityEval.isValidLrn && identityEval.normalizedLrn) {
+      let existingStudent: any = null;
+      let studentByNameDiffLrn: any = null;
+
+      try {
+        const { data: rpcMatch } = await (supabase as any).rpc(
+          "lookup_or_quarantine_student_identity",
+          {
+            p_school_id: userSchoolId,
+            p_lrn: identityEval.normalizedLrn,
+            p_first_name: identityEval.firstName || null,
+            p_last_name: identityEval.lastName || null,
+          }
+        );
+
+        if (rpcMatch && typeof rpcMatch === "object") {
+          if (rpcMatch.outcome === "MATCHED_LRN_AND_NAME" || rpcMatch.outcome === "SAME_LRN_CONFLICT_NAME") {
+            existingStudent = {
+              id: rpcMatch.student_id,
+              lrn: rpcMatch.matched_lrn,
+              first_name: rpcMatch.first_name || "",
+              last_name: rpcMatch.last_name || "",
+              school_id: userSchoolId,
+            };
+          } else if (rpcMatch.outcome === "DIFF_LRN_SAME_NAME") {
+            studentByNameDiffLrn = {
+              id: rpcMatch.student_id,
+              lrn: rpcMatch.matched_lrn,
+              first_name: rpcMatch.first_name || "",
+              last_name: rpcMatch.last_name || "",
+            };
+          }
+          if (rpcMatch.current_enrollment) {
+            extractedFields.previous_enrollment = rpcMatch.current_enrollment;
+          }
+        }
+      } catch {
+        // Fallback to direct queries if Migration 022 RPC is unavailable
+      }
+
+      if (!existingStudent && !studentByNameDiffLrn) {
+        const { data: directByLrn } = await supabase
+          .from('students')
+          .select('id, lrn, first_name, middle_name, last_name, suffix, school_id')
+          .eq('school_id', userSchoolId)
+          .eq('lrn', identityEval.normalizedLrn)
+          .maybeSingle();
+        existingStudent = directByLrn || null;
+
+        if (!existingStudent && identityEval.isValidName && identityEval.lastName && identityEval.firstName) {
+          const { data: foundByName } = await supabase
+            .from('students')
+            .select('id, lrn, first_name, last_name')
+            .eq('school_id', userSchoolId)
+            .ilike('last_name', identityEval.lastName.trim())
+            .ilike('first_name', identityEval.firstName.trim())
+            .limit(1)
+            .maybeSingle();
+          if (foundByName && foundByName.lrn !== identityEval.normalizedLrn) {
+            studentByNameDiffLrn = foundByName;
+          }
+        }
+      }
+
+      identityMatchResult = matchStudentIdentityMatrix({
+        extracted: identityEval,
+        existingStudentByLrn: existingStudent,
+        existingStudentByNameDiffLrn: studentByNameDiffLrn,
+      });
+
+      if (identityMatchResult.canAutoLink && identityMatchResult.studentId) {
+        studentId = identityMatchResult.studentId;
+        extractedFields.existing_student_id = identityMatchResult.studentId;
+        if (existingStudent) {
+          extractedFields.existing_student_name = `${existingStudent.last_name}, ${existingStudent.first_name}`;
+        }
+      } else if (identityMatchResult.matchType === "SAME_LRN_CONFLICT_NAME") {
+        studentId = null;
+        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
+        status = 'needs_review';
+        quarantineConflictsToInsert.push({
+          conflict_type: "SAME_LRN_CONFLICT_NAME",
+          extracted_lrn: identityEval.normalizedLrn,
+          extracted_name: extractedDisplayName,
+          existing_student_id: existingStudent?.id || null,
+          expected_context: existingStudent
+            ? { lrn: existingStudent.lrn, name: `${existingStudent.last_name}, ${existingStudent.first_name}` }
+            : {},
+          extracted_context: {
+            lrn: identityEval.normalizedLrn,
+            name: extractedDisplayName,
+            section: extractedFields.section || null,
+          },
+        });
+      } else if (identityMatchResult.matchType === "SAME_LRN_MINOR_DIFF") {
+        studentId = identityMatchResult.studentId;
+        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
+        status = 'needs_review';
+      } else if (identityMatchResult.matchType === "DIFF_LRN_SAME_NAME") {
+        studentId = null;
+        extractedFields.flags = [...(extractedFields.flags || []), identityMatchResult.reason];
+        status = 'needs_review';
+        quarantineConflictsToInsert.push({
+          conflict_type: "DIFF_LRN_SAME_NAME",
+          extracted_lrn: identityEval.normalizedLrn,
+          extracted_name: extractedDisplayName,
+          existing_student_id: studentByNameDiffLrn?.id || null,
+          expected_context: studentByNameDiffLrn
+            ? { lrn: studentByNameDiffLrn.lrn, name: `${studentByNameDiffLrn.last_name}, ${studentByNameDiffLrn.first_name}` }
+            : {},
+          extracted_context: {
+            lrn: identityEval.normalizedLrn,
+            name: extractedDisplayName,
+            section: extractedFields.section || null,
+          },
+        });
+      } else if (identityMatchResult.matchType === "NEW_LRN_NEW_NAME") {
+        extractedFields.candidate_student = {
+          lrn: identityEval.normalizedLrn,
+          first_name: identityEval.firstName || null,
+          middle_name: identityEval.middleName || null,
+          last_name: identityEval.lastName || null,
+          suffix: identityEval.suffix || null,
+          grade_level: extractedFields.grade_level || null,
+          sex: extractedFields.sex === 'M' || extractedFields.sex === 'F' ? extractedFields.sex : null,
+          staged_at: new Date().toISOString(),
+        };
+        status = 'needs_review';
+      }
+    } else {
+      extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
+      if (!identityEval.normalizedLrn) {
+        if (!extractedFields.flags.includes("missing_lrn")) {
+          extractedFields.flags.push("missing_lrn");
+        }
+      } else {
+        if (!extractedFields.flags.includes("invalid_lrn")) {
+          extractedFields.flags.push("invalid_lrn");
+        }
+      }
+      status = 'needs_review';
+    }
+
     // 5d. Store institutional configuration in extracted_fields
     if (authoritativeSchool) {
       const isMatchingAuthoritative =
@@ -317,7 +527,9 @@ export async function POST(request: NextRequest) {
       Object.assign(extractedFields, updateExtractedFieldsAverages(extractedFields));
     }
 
-    const rawSy = String(extractedFields.school_year || body.school_year || "").trim();
+    const rawSy = String(
+      extractedFields.school_year || body.school_year || serverAssignment?.school_year || ""
+    ).trim();
     const sy = rawSy.length > 0 ? rawSy : null;
     if (!sy && documentType === "sf9") {
       extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
@@ -327,7 +539,13 @@ export async function POST(request: NextRequest) {
       status = "needs_review";
     }
 
-    const rawGl = String(extractedFields.grade_level || body.grade_level || extractedFields.selected_grade_level || "").trim();
+    const rawGl = String(
+      extractedFields.grade_level ||
+      body.grade_level ||
+      extractedFields.selected_grade_level ||
+      serverAssignment?.grade_level ||
+      ""
+    ).trim();
     const gl = rawGl.length > 0 ? rawGl : null;
     if (!gl && documentType === "sf9") {
       extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
@@ -337,6 +555,76 @@ export async function POST(request: NextRequest) {
       status = "needs_review";
     }
 
+    // 5e. Assignment context comparison & mixed-student front/back quarantine check
+    const effectiveSection =
+      serverAssignment?.section ||
+      (extractedFields.section ? String(extractedFields.section).trim() : null) ||
+      (body.section ? String(body.section).trim() : null);
+    const effectiveStrand =
+      serverAssignment?.strand_or_track ||
+      (extractedFields.strand || extractedFields.track_strand || extractedFields.shs_track || null);
+
+    let hasContextMismatch = false;
+    if (serverAssignment) {
+      const ctxComparison = compareDocumentContextWithAssignment({
+        assignment: serverAssignment,
+        documentType: documentType as "sf9" | "sf10",
+        extractedFields,
+      });
+
+      if (!ctxComparison.matchesAssignment) {
+        hasContextMismatch = true;
+        status = "needs_review";
+        extractedFields.flags = Array.from(
+          new Set([...(extractedFields.flags || []), ...ctxComparison.flags])
+        );
+        extractedFields.assignment_context_mismatches = ctxComparison.mismatches;
+        for (const cType of ctxComparison.conflictTypes) {
+          quarantineConflictsToInsert.push({
+            conflict_type: cType,
+            extracted_lrn: identityEval.normalizedLrn || null,
+            extracted_name: extractedDisplayName,
+            existing_student_id: studentId,
+            expected_context: {
+              school_year: serverAssignment.school_year,
+              grade_level: serverAssignment.grade_level,
+              section: serverAssignment.section,
+              strand_or_track: serverAssignment.strand_or_track,
+            },
+            extracted_context: {
+              school_year: extractedFields.school_year || null,
+              grade_level: extractedFields.grade_level || null,
+              section: extractedFields.section || null,
+              strand_or_track: extractedFields.track_strand || extractedFields.shs_track || null,
+            },
+          });
+        }
+      }
+    }
+
+    const hasMixedFrontBack = Boolean(extractedFields.mixed_student_front_back);
+    if (hasMixedFrontBack) {
+      status = "needs_review";
+      extractedFields.identity_conflict = true;
+      studentId = null;
+      quarantineConflictsToInsert.push({
+        conflict_type: "MIXED_FRONT_BACK_IDENTITY",
+        extracted_lrn: identityEval.normalizedLrn || null,
+        extracted_name: extractedDisplayName,
+        existing_student_id: null,
+        expected_context: serverAssignment
+          ? {
+              section: serverAssignment.section,
+              strand_or_track: serverAssignment.strand_or_track,
+              grade_level: serverAssignment.grade_level,
+            }
+          : {},
+        extracted_context: {
+          details: extractedFields.identity_conflict_details || "Front and back scans show conflicting learner identities.",
+        },
+      });
+    }
+
     const hasRequiredCanonicalPeriod = documentType === "sf10" || Boolean(sy && gl);
     const incomingFileHash = body.file_hash || (body.image_url ? crypto.createHash("sha256").update(body.image_url).digest("hex") : null);
     if (incomingFileHash) {
@@ -344,6 +632,7 @@ export async function POST(request: NextRequest) {
     }
 
     const hasIdentityConflict =
+      hasMixedFrontBack ||
       identityMatchResult?.matchType === "SAME_LRN_CONFLICT_NAME" ||
       identityMatchResult?.matchType === "DIFF_LRN_SAME_NAME";
 
@@ -362,8 +651,7 @@ export async function POST(request: NextRequest) {
       extractedFields.canonical_lrn = canonicalLrn;
     }
 
-    // Enforce non-null canonical identity fields before linking or creating an active student_id:
-    // For SF9, school_year and grade_level MUST be non-null for the record to be an active canonical record.
+    // Race-safe student linking / creation (never duplicates a student on section/strand changes)
     if (!hasRequiredCanonicalPeriod) {
       if (studentId) {
         extractedFields.staged_student_id = studentId;
@@ -378,35 +666,88 @@ export async function POST(request: NextRequest) {
       identityEval.lastName &&
       !studentId
     ) {
-      const { data: existingStu } = await supabase
+      const insertStudentRes = await supabase
         .from("students")
+        .insert({
+          school_id: userSchoolId,
+          lrn: identityEval.normalizedLrn,
+          first_name: identityEval.firstName,
+          last_name: identityEval.lastName,
+          middle_name: identityEval.middleName || null,
+          suffix: identityEval.suffix || null,
+          grade_level: gl,
+          sex: extractedFields.sex === "M" || extractedFields.sex === "F" ? extractedFields.sex : null,
+          status: "active",
+        })
         .select("id")
-        .eq("lrn", identityEval.normalizedLrn)
         .maybeSingle();
 
-      if (existingStu?.id) {
-        studentId = existingStu.id;
-        extractedFields.existing_student_id = existingStu.id;
+      if (insertStudentRes.data?.id) {
+        studentId = insertStudentRes.data.id;
+        extractedFields.existing_student_id = insertStudentRes.data.id;
       } else {
-        const { data: newStu } = await supabase
-          .from("students")
-          .insert({
-            school_id: userSchoolId,
-            lrn: identityEval.normalizedLrn,
-            first_name: identityEval.firstName,
-            last_name: identityEval.lastName,
-            middle_name: identityEval.middleName || null,
-            suffix: identityEval.suffix || null,
-            grade_level: gl,
-            sex: extractedFields.sex === "M" || extractedFields.sex === "F" ? extractedFields.sex : null,
-            status: "active",
-          })
-          .select("id")
-          .maybeSingle();
-        if (newStu?.id) {
-          studentId = newStu.id;
-          extractedFields.existing_student_id = newStu.id;
+        // Race fallback: another concurrent request created this LRN inside the school
+        try {
+          const { data: raceMatch } = await (supabase as any).rpc(
+            "lookup_or_quarantine_student_identity",
+            {
+              p_school_id: userSchoolId,
+              p_lrn: identityEval.normalizedLrn,
+              p_first_name: identityEval.firstName || null,
+              p_last_name: identityEval.lastName || null,
+            }
+          );
+          if (raceMatch?.student_id && raceMatch.outcome === "MATCHED_LRN_AND_NAME") {
+            studentId = raceMatch.student_id;
+            extractedFields.existing_student_id = raceMatch.student_id;
+          }
+        } catch {
+          const { data: existingStu } = await supabase
+            .from("students")
+            .select("id")
+            .eq("school_id", userSchoolId)
+            .eq("lrn", identityEval.normalizedLrn)
+            .maybeSingle();
+          if (existingStu?.id) {
+            studentId = existingStu.id;
+            extractedFields.existing_student_id = existingStu.id;
+          }
         }
+      }
+    }
+
+    // Track section/strand enrollment history without duplicating student identity
+    if (studentId && sy && gl && effectiveSection && !hasIdentityConflict && !hasContextMismatch) {
+      try {
+        const { data: enrollRes } = await (supabase as any).rpc(
+          "upsert_student_enrollment_history",
+          {
+            p_student_id: studentId,
+            p_school_id: userSchoolId,
+            p_school_year: sy,
+            p_grade_level: gl,
+            p_section: effectiveSection,
+            p_strand_or_track: effectiveStrand || null,
+            p_adviser_user_id:
+              serverAssignment?.assignment_type === "class_adviser"
+                ? serverAssignment.teacher_user_id
+                : null,
+            p_source_document_id: null,
+          }
+        );
+        if (enrollRes?.transferred) {
+          extractedFields.flags = Array.from(
+            new Set([...(extractedFields.flags || []), "section_transfer_recorded"])
+          );
+          extractedFields.enrollment_transfer = {
+            previous_section: enrollRes.previous_section || null,
+            previous_strand: enrollRes.previous_strand || null,
+            new_section: effectiveSection,
+            new_strand: effectiveStrand || null,
+          };
+        }
+      } catch {
+        // Optional before Migration 022 is applied
       }
     }
 
@@ -557,6 +898,47 @@ export async function POST(request: NextRequest) {
       }
 
       return null;
+    };
+
+    // Quarantine helper for identity collisions, mixed front/back scans, and context mismatches
+    const persistQuarantinedConflicts = async (docId: string) => {
+      if (!quarantineConflictsToInsert.length) return;
+      for (const c of quarantineConflictsToInsert) {
+        try {
+          await (supabase as any).from("student_identity_conflicts").insert({
+            school_id: userSchoolId,
+            document_id: docId,
+            assignment_id: serverAssignment?.id || null,
+            conflict_type: c.conflict_type,
+            extracted_lrn: c.extracted_lrn,
+            extracted_name: c.extracted_name,
+            existing_student_id: c.existing_student_id,
+            expected_context: c.expected_context,
+            extracted_context: c.extracted_context,
+            status: "pending",
+            created_by: user.id,
+          });
+          await logAuditEvent({
+            category: "REVIEW",
+            action: "IDENTITY_CONFLICT_QUARANTINED",
+            outcome: "WARNING",
+            actorUserId: user.id,
+            actorEmail: user.email,
+            actorRole: roleRow?.role || "teacher",
+            actorSchoolId: userSchoolId,
+            targetType: "document",
+            targetId: docId,
+            reason: `Quarantined ${c.conflict_type}`,
+            details: {
+              conflict_type: c.conflict_type,
+              extracted_lrn: c.extracted_lrn,
+              extracted_name: c.extracted_name,
+            },
+          });
+        } catch {
+          // Optional table / duplicate open conflict ignored
+        }
+      }
     };
 
     // ── 6. CANONICAL ACADEMIC DOCUMENT RESOLUTION & INCREMENTAL UPDATE ────────
@@ -712,6 +1094,15 @@ export async function POST(request: NextRequest) {
         school_year: sy || canonicalDoc.school_year,
         grade_level: gl || canonicalDoc.grade_level,
         semester: extractedFields.semester || canonicalDoc.semester || "1st Semester",
+        ...(serverAssignment?.id ? { teacher_assignment_id: serverAssignment.id } : {}),
+        ...(effectiveSection ? { section: effectiveSection } : {}),
+        ...(effectiveStrand ? { strand_or_track: effectiveStrand } : {}),
+        ...(assignmentConfirmed && serverAssignment?.id
+          ? {
+              assignment_confirmed_at: new Date().toISOString(),
+              assignment_confirmed_by: user.id,
+            }
+          : {}),
       };
       if (studentId || canonicalDoc.student_id) {
         updatePayload.student_id = studentId || canonicalDoc.student_id;
@@ -727,6 +1118,8 @@ export async function POST(request: NextRequest) {
       if (updateErr) {
         return NextResponse.json({ error: updateErr.message }, { status: 400 });
       }
+
+      await persistQuarantinedConflicts(canonicalDoc.id);
 
       // Record in document_scans table if it exists
       try {
@@ -822,6 +1215,11 @@ export async function POST(request: NextRequest) {
       school_year: sy,
       grade_level: gl,
       semester: extractedFields.semester || null,
+      teacher_assignment_id: serverAssignment?.id || null,
+      section: effectiveSection || null,
+      strand_or_track: effectiveStrand || null,
+      assignment_confirmed_at: assignmentConfirmed && serverAssignment?.id ? new Date().toISOString() : null,
+      assignment_confirmed_by: assignmentConfirmed && serverAssignment?.id ? user.id : null,
     };
 
     let docData: any;
@@ -959,6 +1357,8 @@ export async function POST(request: NextRequest) {
     if (docError) {
       return NextResponse.json({ error: docError.message }, { status: 400 });
     }
+
+    await persistQuarantinedConflicts(docData.id);
 
     // Record initial scan version in document_scans table
     try {

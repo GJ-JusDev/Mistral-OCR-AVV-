@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 const files = [
   'supabase/migrations/009_step1_add_principal_enum.sql',
   'supabase/migrations/009_step2_consolidated_schema_and_security.sql',
-  'supabase/migrations/009_rollback_recovery.sql'
+  'supabase/rollbacks/009_rollback_recovery.sql'
 ];
 
 console.log('=== EXACT DEPLOYMENT FILE INTEGRITY AUDIT ===');

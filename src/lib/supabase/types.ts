@@ -130,6 +130,14 @@ export interface Database {
           archived_at: string | null
           archived_by: string | null
           deletion_request_id: string | null
+          file_hash: string | null
+          identity_conflict: boolean | null
+          lrn_conflict_verified: boolean | null
+          teacher_assignment_id: string | null
+          section: string | null
+          strand_or_track: string | null
+          assignment_confirmed_at: string | null
+          assignment_confirmed_by: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -163,6 +171,14 @@ export interface Database {
           archived_at?: string | null
           archived_by?: string | null
           deletion_request_id?: string | null
+          file_hash?: string | null
+          identity_conflict?: boolean | null
+          lrn_conflict_verified?: boolean | null
+          teacher_assignment_id?: string | null
+          section?: string | null
+          strand_or_track?: string | null
+          assignment_confirmed_at?: string | null
+          assignment_confirmed_by?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -196,6 +212,14 @@ export interface Database {
           archived_at?: string | null
           archived_by?: string | null
           deletion_request_id?: string | null
+          file_hash?: string | null
+          identity_conflict?: boolean | null
+          lrn_conflict_verified?: boolean | null
+          teacher_assignment_id?: string | null
+          section?: string | null
+          strand_or_track?: string | null
+          assignment_confirmed_at?: string | null
+          assignment_confirmed_by?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -812,11 +836,242 @@ export interface Database {
         }
         Relationships: any[]
       }
+      teacher_assignments: {
+        Row: {
+          id: string
+          teacher_user_id: string
+          school_id: string
+          school_year: string
+          grade_level: string
+          section: string
+          strand_or_track: string | null
+          subject_taught: string | null
+          semester: string | null
+          assignment_type: "class_adviser" | "subject_teacher"
+          assignment_status: "active" | "inactive"
+          created_by: string | null
+          updated_by: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          teacher_user_id: string
+          school_id: string
+          school_year: string
+          grade_level: string
+          section: string
+          strand_or_track?: string | null
+          subject_taught?: string | null
+          semester?: string | null
+          assignment_type: "class_adviser" | "subject_teacher"
+          assignment_status?: "active" | "inactive"
+          created_by?: string | null
+          updated_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          teacher_user_id?: string
+          school_id?: string
+          school_year?: string
+          grade_level?: string
+          section?: string
+          strand_or_track?: string | null
+          subject_taught?: string | null
+          semester?: string | null
+          assignment_type?: "class_adviser" | "subject_teacher"
+          assignment_status?: "active" | "inactive"
+          created_by?: string | null
+          updated_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      teacher_module_policies: {
+        Row: {
+          school_id: string
+          allow_subject_teacher_scanning: boolean
+          updated_by: string | null
+          updated_at: string
+        }
+        Insert: {
+          school_id: string
+          allow_subject_teacher_scanning?: boolean
+          updated_by?: string | null
+          updated_at?: string
+        }
+        Update: {
+          school_id?: string
+          allow_subject_teacher_scanning?: boolean
+          updated_by?: string | null
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      student_enrollments: {
+        Row: {
+          id: string
+          student_id: string
+          school_id: string
+          school_year: string
+          grade_level: string
+          section: string
+          strand_or_track: string | null
+          adviser_user_id: string | null
+          source_document_id: string | null
+          enrollment_status: "active" | "transferred" | "completed"
+          is_current: boolean
+          effective_from: string
+          effective_to: string | null
+          created_by: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          student_id: string
+          school_id: string
+          school_year: string
+          grade_level: string
+          section: string
+          strand_or_track?: string | null
+          adviser_user_id?: string | null
+          source_document_id?: string | null
+          enrollment_status?: "active" | "transferred" | "completed"
+          is_current?: boolean
+          effective_from?: string
+          effective_to?: string | null
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          student_id?: string
+          school_id?: string
+          school_year?: string
+          grade_level?: string
+          section?: string
+          strand_or_track?: string | null
+          adviser_user_id?: string | null
+          source_document_id?: string | null
+          enrollment_status?: "active" | "transferred" | "completed"
+          is_current?: boolean
+          effective_from?: string
+          effective_to?: string | null
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      student_identity_conflicts: {
+        Row: {
+          id: string
+          school_id: string
+          document_id: string | null
+          assignment_id: string | null
+          conflict_type: string
+          extracted_lrn: string | null
+          extracted_name: string | null
+          existing_student_id: string | null
+          expected_context: Json
+          extracted_context: Json
+          status: "pending" | "resolved" | "dismissed"
+          resolution_notes: string | null
+          resolved_by: string | null
+          resolved_at: string | null
+          created_by: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          school_id: string
+          document_id?: string | null
+          assignment_id?: string | null
+          conflict_type: string
+          extracted_lrn?: string | null
+          extracted_name?: string | null
+          existing_student_id?: string | null
+          expected_context?: Json
+          extracted_context?: Json
+          status?: "pending" | "resolved" | "dismissed"
+          resolution_notes?: string | null
+          resolved_by?: string | null
+          resolved_at?: string | null
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          school_id?: string
+          document_id?: string | null
+          assignment_id?: string | null
+          conflict_type?: string
+          extracted_lrn?: string | null
+          extracted_name?: string | null
+          existing_student_id?: string | null
+          expected_context?: Json
+          extracted_context?: Json
+          status?: "pending" | "resolved" | "dismissed"
+          resolution_notes?: string | null
+          resolved_by?: string | null
+          resolved_at?: string | null
+          created_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
+      has_active_teacher_assignment: {
+        Args: { p_assignment_id: string }
+        Returns: boolean
+      }
+      can_teacher_scan_with_assignment: {
+        Args: { p_assignment_id: string }
+        Returns: boolean
+      }
+      lookup_or_quarantine_student_identity: {
+        Args: {
+          p_school_id: string
+          p_lrn: string | null
+          p_first_name: string | null
+          p_last_name: string | null
+        }
+        Returns: Json
+      }
+      upsert_student_enrollment_history: {
+        Args: {
+          p_student_id: string
+          p_school_id: string
+          p_school_year: string
+          p_grade_level: string
+          p_section: string
+          p_strand_or_track?: string | null
+          p_adviser_user_id?: string | null
+          p_source_document_id?: string | null
+        }
+        Returns: Json
+      }
+      resolve_section_or_identity_conflict: {
+        Args: {
+          p_conflict_id: string
+          p_resolution_status: string
+          p_resolution_notes: string
+          p_link_student_id?: string | null
+        }
+        Returns: boolean
+      }
       confirm_student_academic_standing: {
         Args: {
           p_student_id: string

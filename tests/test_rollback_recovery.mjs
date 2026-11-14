@@ -181,7 +181,7 @@ test('Migration 009 Two-Step Application and Rollback Recovery Verification', as
 
   await t.test('5. Execute 009_rollback_recovery.sql', async () => {
     await setAuthContext(db, null, 'service_role');
-    const rollbackSql = fs.readFileSync(path.join(rootDir, 'supabase/migrations/009_rollback_recovery.sql'), 'utf8');
+    const rollbackSql = fs.readFileSync(path.join(rootDir, 'supabase/rollbacks/009_rollback_recovery.sql'), 'utf8');
     await db.exec(rollbackSql);
   });
 

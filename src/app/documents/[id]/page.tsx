@@ -211,6 +211,47 @@ export default function DocumentDetailPage() {
         </div>
       )}
 
+      {/* Assignment Context, Context Mismatch, and Quarantine Warnings */}
+      {(document.section ||
+        document.strand_or_track ||
+        document.extracted_fields?.mixed_student_front_back ||
+        (Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
+          document.extracted_fields.assignment_context_mismatches.length > 0) ||
+        document.extracted_fields?.identity_conflict_details) && (
+        <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 rounded-lg text-sm space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-blue-900 dark:text-blue-200">
+            <strong className="font-semibold">Assigned Scan Context:</strong>
+            <span>{document.grade_level || document.extracted_fields?.grade_level || "Unassigned Grade"}</span>
+            {document.section && <span>• Section {document.section}</span>}
+            {document.strand_or_track && <span>• {document.strand_or_track}</span>}
+            {document.school_year && <span>• SY {document.school_year}</span>}
+          </div>
+          {document.extracted_fields?.mixed_student_front_back && (
+            <p className="text-red-700 dark:text-red-300 font-medium">
+              Quarantined: Front and back pages appear to belong to different students and require administrator/adviser manual review.
+            </p>
+          )}
+          {Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
+            document.extracted_fields.assignment_context_mismatches.length > 0 && (
+              <ul className="list-disc list-inside text-amber-800 dark:text-amber-300 space-y-0.5">
+                {document.extracted_fields.assignment_context_mismatches.map((mismatch: string, idx: number) => (
+                  <li key={idx}>{mismatch}</li>
+                ))}
+              </ul>
+            )}
+          {(typeof document.extracted_fields?.identity_conflict_details === "string"
+            ? document.extracted_fields.identity_conflict_details
+            : document.extracted_fields?.identity_conflict_details?.reason) && (
+            <p className="text-amber-800 dark:text-amber-300">
+              Identity Review Note:{" "}
+              {typeof document.extracted_fields.identity_conflict_details === "string"
+                ? document.extracted_fields.identity_conflict_details
+                : document.extracted_fields.identity_conflict_details.reason}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Flags / Warnings */}
       {document.extracted_fields?.flags && document.extracted_fields.flags.length > 0 && (
         <div className="mt-4 p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-lg text-amber-800 dark:text-amber-200 text-sm">

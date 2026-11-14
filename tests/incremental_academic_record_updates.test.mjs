@@ -187,12 +187,17 @@ test("AVV Incremental Academic Record Updates & Duplicate Prevention Suite (Isol
       ('${adminId}', 'admin', '${schoolId}', 'Approved');
   `);
 
-  // Apply Migration 021 onto the isolated PostgreSQL instance
-  const mig021Sql = fs.readFileSync(
-    path.resolve(process.cwd(), "supabase/migrations/021_canonical_academic_records_and_scan_versions.sql"),
+  // Apply Migration 021 Phase 021-A (schema/triggers/functions) and Phase 021-C (unique indexes on empty fixture)
+  const mig021ASql = fs.readFileSync(
+    path.resolve(process.cwd(), "supabase/migrations/021a_schema_triggers_backfill_and_functions.sql"),
     "utf8"
   );
-  await db.exec(mig021Sql);
+  const mig021CSql = fs.readFileSync(
+    path.resolve(process.cwd(), "supabase/migrations/021c_enforce_canonical_document_unique_indexes.sql"),
+    "utf8"
+  );
+  await db.exec(mig021ASql);
+  await db.exec(mig021CSql);
 
   // ── TEST 1: First upload of SF9 Q1 by Teacher A ───────────────────────────
   await t.test("1. First upload of SF9 Q1 creates 1 canonical student & 1 canonical record in needs_review", async () => {

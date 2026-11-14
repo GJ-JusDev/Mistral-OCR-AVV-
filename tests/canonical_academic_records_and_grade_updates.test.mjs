@@ -718,8 +718,20 @@ test("AVV System — Canonical Academic Records & Incremental Grade Update Suite
   await t.test("Scenario 25: Migration 021 SQL Enforcement — Preflight Block, Historical Reconciliation of 6 Live Records, and Database-Level Unique Index Enforcement", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
-    const migSql = fs.readFileSync(
-      path.resolve(process.cwd(), "supabase/migrations/021_canonical_academic_records_and_scan_versions.sql"),
+    const origMigSql = fs.readFileSync(
+      path.resolve(process.cwd(), "supabase/archive/021_canonical_academic_records_and_scan_versions.original.sql"),
+      "utf8"
+    );
+    const phaseASql = fs.readFileSync(
+      path.resolve(process.cwd(), "supabase/migrations/021a_schema_triggers_backfill_and_functions.sql"),
+      "utf8"
+    );
+    const phaseBSql = fs.readFileSync(
+      path.resolve(process.cwd(), "supabase/migrations/021b_reconcile_historical_duplicate_documents.sql"),
+      "utf8"
+    );
+    const phaseCSql = fs.readFileSync(
+      path.resolve(process.cwd(), "supabase/migrations/021c_enforce_canonical_document_unique_indexes.sql"),
       "utf8"
     );
 
@@ -880,18 +892,65 @@ test("AVV System — Canonical Academic Records & Incremental Grade Update Suite
         '{"lrn":"111304581972","name":"GOMEZ, JUSTIN LOQUILLANO","last_name":"GOMEZ","first_name":"JUSTIN","school_year":"2019-2020","grade_level":"11"}'::jsonb
       );
 
-      -- Insert 18 subject_grades linked to canonical 840dc1c4-a272-444e-9ff4-2faba4b94c0b
-      INSERT INTO public.subject_grades (student_id, document_id, school_year, grade_level, semester, subject, q1, q2, final_grade, status)
-      SELECT '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Subject ' || g, 88, 88, 88, 'Passed'
-      FROM generate_series(1, 18) AS g;
+      -- Insert exact 18 production subject_grades rows linked to canonical 840dc1c4-a272-444e-9ff4-2faba4b94c0b
+      INSERT INTO public.subject_grades (id, student_id, document_id, school_year, grade_level, semester, subject, q1, q2, q3, q4, final_grade, status) VALUES
+        ('45e076e4-29e4-460a-be36-61e314c11044', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Oral Communication', 88, 88, NULL, NULL, 88, 'Passed'),
+        ('9d1a3114-e333-4494-a158-d0e0841a2585', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino', 98, 98, NULL, NULL, 98, 'Passed'),
+        ('bd83dec9-3e0e-4c98-b1b0-56d31c79c1d7', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Introduction to the Philosophy of the Human Person /Pambungad sa Pilosopiya ng Tao', 78, 78, NULL, NULL, 78, 'Passed'),
+        ('7f5a20b6-a37e-4c00-b4eb-e857578698f3', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Physical Education and Health 1', 75, 74, NULL, NULL, 74.5, 'Failed'),
+        ('ae963b24-0f56-45c0-a9e4-fc762d8e336f', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'General Mathematics', 76, 94, NULL, NULL, 85, 'Passed'),
+        ('65188746-d680-48cd-9df5-60b231233ca2', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Earth Science', 89, 83, NULL, NULL, 91, 'Passed'),
+        ('d57c89f6-c71e-49dd-8e54-7cbfa4041432', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Empowerment Technologies', 91, 92, NULL, NULL, 91.5, 'Passed'),
+        ('f05befa6-4eab-4aad-8606-baf12f540e1b', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'Pre-Calculus', 96, 79, NULL, NULL, 87.5, 'Passed'),
+        ('8a830422-9e9e-4534-846f-1b3aa2881ef7', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '1st Semester', 'General Chemistry 1', 90, 80, NULL, NULL, 85, 'Passed'),
+        ('a6cf52ab-4e4a-4140-971b-b645069359cf', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Reading and Writing', NULL, NULL, 70, 98, 84, 'Passed'),
+        ('11167aa9-e702-43d0-b17f-b17fea2e62f5', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Pagbasa at Pagsusuri ng Iba''t-Ibang Teksto Tungo sa Pananaliksik', NULL, NULL, 80, 80, 80, 'Passed'),
+        ('b2972599-a1a8-4f76-a682-e48069a3657f', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Personal Development/ Pansariling Kaunlaran', NULL, NULL, 90, 90, 90, 'Passed'),
+        ('0a96940f-3858-4837-8114-3690267db93b', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Physical Education and Health 2', NULL, NULL, 95, 75, 85, 'Passed'),
+        ('303b6c74-14bf-4bc0-804f-3f4c4c531773', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Statistics and Probability', NULL, NULL, 86, 87, 86.5, 'Passed'),
+        ('e9404e26-50c6-4124-9ee0-add286691eb6', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Disaster Readiness and Risk Reduction', NULL, NULL, 97, 93, 97, 'Passed'),
+        ('ad71fada-6471-4539-bc48-c41906462490', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Practical Research 1', NULL, NULL, 84, 87, 85.5, 'Passed'),
+        ('2ef3d1c7-c9e5-4d8c-827f-e97bf1b19272', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'Basic Calculus', NULL, NULL, 88, 98, 93, 'Passed'),
+        ('271398a7-fa68-40e8-a851-01bf9c94e8e0', '6722d559-440f-4cdc-bd14-e12fad11d836', '840dc1c4-a272-444e-9ff4-2faba4b94c0b', '2019-2020', '11', '2nd Semester', 'General Chemistry 2', NULL, NULL, 78, 81, 79.5, 'Passed');
     `);
 
-    // 1. Execute the full Migration 021 atomically on the 6 production records
-    await migDb.exec(migSql);
+    // Compute deterministic pre-migration snapshot and SHA-256 hash of all 18 approved subject_grades rows
+    const preGradesRes = await migDb.query(`
+      SELECT id, student_id, document_id, school_year, grade_level, semester, subject,
+             q1::text, q2::text, q3::text, q4::text, final_grade::text, status
+      FROM public.subject_grades
+      WHERE document_id = '840dc1c4-a272-444e-9ff4-2faba4b94c0b'
+      ORDER BY id ASC
+    `);
+    const preGradesHash = crypto.createHash("sha256").update(JSON.stringify(preGradesRes.rows)).digest("hex");
 
-    // 2. Verify reconciliation results: 18 subject_grades on 840dc1c4 are 100% untouched, 4 scans in document_scans, 3 archived duplicates
-    const sgCount = await migDb.query(`SELECT COUNT(*) FROM public.subject_grades WHERE document_id = '840dc1c4-a272-444e-9ff4-2faba4b94c0b'`);
-    assert.strictEqual(parseInt(sgCount.rows[0].count, 10), 18, "All 18 verified subject_grades must remain intact");
+    // 1. Verify that running original monolithic Migration 021 before manual reconciliation blocks loudly on un-reconciled duplicates
+    await assert.rejects(
+      async () => {
+        await migDb.exec(origMigSql);
+      },
+      /Migration 021 Pre-flight Blocked/i,
+      "Original Migration 021 must block index creation until Phase 021-B manual reconciliation is executed"
+    );
+    await migDb.exec("ROLLBACK;");
+
+    // 2. Execute refactored Migration 021 phases sequentially: Phase 021-A -> Phase 021-B -> Phase 021-C
+    await migDb.exec(phaseASql);
+    await migDb.exec(phaseBSql);
+    await migDb.exec(phaseCSql);
+
+    // 3. Verify reconciliation results: all 18 subject_grades on 840dc1c4 are 100% bit-for-bit identical (by row and SHA-256 hash), 4 scans in document_scans, 3 archived duplicates
+    const postGradesRes = await migDb.query(`
+      SELECT id, student_id, document_id, school_year, grade_level, semester, subject,
+             q1::text, q2::text, q3::text, q4::text, final_grade::text, status
+      FROM public.subject_grades
+      WHERE document_id = '840dc1c4-a272-444e-9ff4-2faba4b94c0b'
+      ORDER BY id ASC
+    `);
+    const postGradesHash = crypto.createHash("sha256").update(JSON.stringify(postGradesRes.rows)).digest("hex");
+    assert.strictEqual(postGradesRes.rows.length, 18, "All 18 verified subject_grades must remain intact");
+    assert.deepStrictEqual(postGradesRes.rows, preGradesRes.rows, "Every single column of all 18 approved subject_grades rows must remain unchanged");
+    assert.strictEqual(postGradesHash, preGradesHash, "Pre-migration and post-migration 18-row subject_grades SHA-256 digest must match identically");
 
     const scanCount = await migDb.query(`SELECT COUNT(*) FROM public.document_scans WHERE document_id = '840dc1c4-a272-444e-9ff4-2faba4b94c0b'`);
     assert.strictEqual(parseInt(scanCount.rows[0].count, 10), 4, "All 4 Justin Gomez scans must be preserved in document_scans");
@@ -907,14 +966,15 @@ test("AVV System — Canonical Academic Records & Incremental Grade Update Suite
       assert.ok(d.archived_at);
     }
 
-    // 3. Verify Kenneth Latonero records have student_id = NULL, identity_conflict = true, and preserved status ('needs_review' and 'rejected')
+    // 4. Verify Kenneth Latonero records have student_id = NULL, canonical_lrn = NULL, identity_conflict = true, and preserved status ('needs_review' and 'rejected')
     const latoneroDocs = await migDb.query(`
-      SELECT id, status, student_id, extracted_fields->>'identity_conflict' AS conflict, extracted_fields->>'manual_lrn_verification_required' AS manual_verif
+      SELECT id, status, student_id, canonical_lrn, extracted_fields->>'identity_conflict' AS conflict, extracted_fields->>'manual_lrn_verification_required' AS manual_verif
       FROM public.documents
       WHERE id IN ('cc8b4c08-14bb-4c92-9958-d670f878ac29', 'edda579a-6e1d-4acb-81d8-25d078798ff7')
     `);
     for (const row of latoneroDocs.rows) {
       assert.strictEqual(row.student_id, null, `Kenneth Latonero doc ${row.id} must have student_id = null`);
+      assert.strictEqual(row.canonical_lrn, null, `Kenneth Latonero doc ${row.id} must have canonical_lrn = null`);
       assert.strictEqual(row.conflict, "true", `Kenneth Latonero doc ${row.id} must be flagged with identity_conflict = true`);
       assert.strictEqual(row.manual_verif, "true", `Kenneth Latonero doc ${row.id} must require manual LRN verification`);
     }
@@ -928,20 +988,71 @@ test("AVV System — Canonical Academic Records & Incremental Grade Update Suite
       "Kenneth Latonero collision document must be blocked from approval until manual LRN verification is completed!"
     );
 
-    // 4. Verify all 3 partial unique indexes exist in pg_indexes and match the documented academic identity
+    // 4b. Verify that direct SQL UPDATE or INSERT attempting to forge lrn_conflict_verified = true is rejected with 42501
+    await assert.rejects(
+      async () => {
+        await migDb.query(`
+          UPDATE public.documents
+          SET extracted_fields = jsonb_set(extracted_fields, '{lrn_conflict_verified}', 'true'::jsonb)
+          WHERE id = 'cc8b4c08-14bb-4c92-9958-d670f878ac29'
+        `);
+      },
+      (err) => err.code === "42501" && /Security Violation: lrn_conflict_verified can only be set through the authorized, audited public\.resolve_document_identity_conflict\(\) RPC/i.test(err.message),
+      "Direct SQL UPDATE forging lrn_conflict_verified = true must be blocked with 42501!"
+    );
+
+    await assert.rejects(
+      async () => {
+        await migDb.query(`
+          INSERT INTO public.documents (school_id, document_type, status, image_url, extracted_fields)
+          VALUES (
+            'a0000000-0000-0000-0000-000000000001',
+            'sf9',
+            'needs_review',
+            'https://storage/forged_insert.jpg',
+            '{"lrn":"999888777666","name":"LATONERO, KENNETH","lrn_conflict_verified":true}'::jsonb
+          )
+        `);
+      },
+      (err) => err.code === "42501" && /Security Violation: lrn_conflict_verified cannot be set on initial document insert/i.test(err.message),
+      "Direct SQL INSERT forging lrn_conflict_verified = true must be blocked with 42501!"
+    );
+
+    // Verify that resolve_document_identity_conflict() requires an authenticated, approved Teacher/Admin in the same school
+    await assert.rejects(
+      async () => {
+        await migDb.query(`
+          SELECT public.resolve_document_identity_conflict(
+            'cc8b4c08-14bb-4c92-9958-d670f878ac29',
+            '111304999888',
+            'Kenneth',
+            'Latonero',
+            'Abad',
+            'Verified physical SF9 card LRN against school registrar masterlist'
+          );
+        `);
+      },
+      (err) => err.code === "42501",
+      "Unauthenticated call to resolve_document_identity_conflict must be rejected with 42501!"
+    );
+
+    // 5. Verify all 4 partial unique indexes exist in pg_indexes and match the documented academic identity
     const idxRes = await migDb.query(`
       SELECT indexname, indexdef FROM pg_indexes
       WHERE schemaname = 'public' AND tablename = 'documents'
         AND indexname IN (
           'idx_documents_canonical_sf9_active',
+          'idx_documents_canonical_sf9_student_active',
           'idx_documents_canonical_sf10_active',
-          'idx_documents_staging_file_hash_active'
+          'idx_documents_unresolved_file_hash_active'
         )
       ORDER BY indexname
     `);
-    assert.strictEqual(idxRes.rows.length, 3, "All 3 partial unique indexes must be created and active in pg_indexes");
-    const sf9Idx = idxRes.rows.find(r => r.indexname === "idx_documents_canonical_sf9_active");
-    assert.match(sf9Idx.indexdef, /\(school_id, student_id, document_type, school_year, grade_level\)/i);
+    assert.strictEqual(idxRes.rows.length, 4, "All 4 partial unique indexes must be created and active in pg_indexes");
+    const sf9LrnIdx = idxRes.rows.find(r => r.indexname === "idx_documents_canonical_sf9_active");
+    assert.match(sf9LrnIdx.indexdef, /\(school_id, canonical_lrn, document_type, school_year, grade_level\)/i);
+    const sf9StuIdx = idxRes.rows.find(r => r.indexname === "idx_documents_canonical_sf9_student_active");
+    assert.match(sf9StuIdx.indexdef, /\(school_id, student_id, document_type, school_year, grade_level\)/i);
 
     // 5. Verify database-level rejection (23505) on raw SQL insert for same student + SY + Grade 11
     await assert.rejects(

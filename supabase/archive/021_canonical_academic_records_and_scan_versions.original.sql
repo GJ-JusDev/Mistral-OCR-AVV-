@@ -47,6 +47,7 @@ BEGIN;
 -- 0. Ensure Prerequisite Columns & Status Check Compatibility (Migrations 016–020)
 -- ------------------------------------------------------------------------------
 ALTER TABLE public.documents
+    ADD COLUMN IF NOT EXISTS canonical_lrn TEXT,
     ADD COLUMN IF NOT EXISTS file_hash TEXT,
     ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS archived_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
@@ -146,47 +147,7 @@ END;
 $$;
 
 -- ------------------------------------------------------------------------------
--- 3. Backfill Top-Level school_year, grade_level, semester, and file_hash
---    on Existing Documents (Non-Destructive)
--- ------------------------------------------------------------------------------
-UPDATE public.documents d
-SET
-    school_year = COALESCE(
-        NULLIF(TRIM(d.school_year), ''),
-        NULLIF(TRIM(d.extracted_fields->>'school_year'), ''),
-        NULLIF(TRIM(d.extracted_fields->'student'->>'school_year'), '')
-    ),
-    grade_level = public.normalize_shs_grade_level(
-        COALESCE(
-            NULLIF(TRIM(d.grade_level), ''),
-            NULLIF(TRIM(d.extracted_fields->>'grade_level'), ''),
-            NULLIF(TRIM(d.extracted_fields->>'selected_grade_level'), ''),
-            NULLIF(TRIM(d.extracted_fields->'student'->>'grade_level'), ''),
-            (SELECT s.grade_level FROM public.students s WHERE s.id = d.student_id)
-        )
-    ),
-    semester = COALESCE(
-        NULLIF(TRIM(d.semester), ''),
-        NULLIF(TRIM(d.extracted_fields->>'semester'), ''),
-        NULLIF(TRIM(d.extracted_fields->>'term'), '')
-    ),
-    file_hash = COALESCE(
-        NULLIF(TRIM(d.file_hash), ''),
-        NULLIF(TRIM(d.extracted_fields->>'file_hash'), ''),
-        NULLIF(TRIM(d.extracted_fields->'scan_history'->0->>'file_hash'), ''),
-        CASE
-            WHEN d.image_url IS NOT NULL AND TRIM(d.image_url) <> ''
-            THEN md5(d.image_url || '::' || d.id::text)
-            ELSE md5(d.id::text)
-        END
-    )
-WHERE d.school_year IS NULL
-   OR d.grade_level IS NULL
-   OR d.grade_level IN ('11', '12')
-   OR d.file_hash IS NULL;
-
--- ------------------------------------------------------------------------------
--- 4. Harden link_document_student_before() Trigger Function
+-- 3. Harden link_document_student_before() Trigger Function (Installed BEFORE Backfill)
 -- ------------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.link_document_student_before()
 RETURNS trigger AS $$
@@ -253,12 +214,27 @@ BEGIN
         is_conflict_verified := COALESCE((NEW.extracted_fields->>'lrn_conflict_verified') = 'true', false);
     END IF;
 
+    -- Security Guard: lrn_conflict_verified = 'true' can ONLY be set through the authorized, audited
+    -- public.resolve_document_identity_conflict() RPC (which sets transaction-local GUC avv.conflict_resolution_authorized).
+    IF is_conflict_verified THEN
+        IF TG_OP = 'INSERT' THEN
+            RAISE EXCEPTION 'Security Violation: lrn_conflict_verified cannot be set on initial document insert. Must use public.resolve_document_identity_conflict().'
+                USING ERRCODE = '42501';
+        ELSIF TG_OP = 'UPDATE' AND COALESCE(OLD.extracted_fields->>'lrn_conflict_verified', '') <> 'true' THEN
+            IF COALESCE(current_setting('avv.conflict_resolution_authorized', true), '') <> NEW.id::text THEN
+                RAISE EXCEPTION 'Security Violation: lrn_conflict_verified can only be set through the authorized, audited public.resolve_document_identity_conflict() RPC.'
+                    USING ERRCODE = '42501';
+            END IF;
+        END IF;
+    END IF;
+
     IF has_existing_conflict_flag AND NOT is_conflict_verified THEN
         IF LOWER(NEW.status) = 'approved' THEN
             RAISE EXCEPTION 'Identity Collision Blocked: Manual LRN verification (lrn_conflict_verified = true) is required before approving this document.'
                 USING ERRCODE = '23514';
         END IF;
         NEW.student_id := NULL;
+        NEW.canonical_lrn := NULL;
         RETURN NEW;
     END IF;
 
@@ -356,8 +332,9 @@ BEGIN
                         clean_lrn, matched_student_last_name, doc_extracted_last_name
                         USING ERRCODE = '23514';
                 END IF;
-                -- Hard name conflict (Case C): do NOT link to the existing student!
+                -- Hard name conflict (Case C): do NOT link to the existing student and do NOT assign canonical_lrn!
                 NEW.student_id := NULL;
+                NEW.canonical_lrn := NULL;
                 NEW.extracted_fields := jsonb_set(
                     jsonb_set(
                         COALESCE(NEW.extracted_fields, '{}'::jsonb),
@@ -374,6 +351,7 @@ BEGIN
                         clean_lrn, matched_student_last_name, doc_extracted_last_name))
                 );
             ELSIF matched_student_school_id = doc_school_id THEN
+                NEW.canonical_lrn := clean_lrn;
                 -- Only link student_id on active records if all canonical identity fields are non-null
                 IF has_required_canonical_fields OR LOWER(NEW.status) IN ('archived', 'rejected') THEN
                     NEW.student_id := matched_student_id;
@@ -387,11 +365,13 @@ BEGIN
                         USING ERRCODE = '23505';
                 ELSE
                     NEW.student_id := NULL;
+                    NEW.canonical_lrn := NULL;
                 END IF;
             END IF;
 
         ELSE
-            -- No existing student in public.students yet
+            -- No existing student in public.students yet: still set canonical_lrn to the validated 12-digit LRN
+            NEW.canonical_lrn := clean_lrn;
             IF LOWER(NEW.status) = 'approved' THEN
                 IF doc_extracted_first_name IS NULL OR doc_extracted_last_name IS NULL
                    OR UPPER(doc_extracted_first_name) = 'UNKNOWN' OR UPPER(doc_extracted_last_name) = 'UNKNOWN' THEN
@@ -441,6 +421,7 @@ BEGIN
             END IF;
         END IF;
     ELSE
+        NEW.canonical_lrn := NULL;
         IF LOWER(NEW.status) = 'approved' AND NEW.student_id IS NULL THEN
             RAISE EXCEPTION 'Student Identity Validation Failed: A valid 12-digit LRN and verified student_id are required before approval.'
                 USING ERRCODE = '23514';
@@ -461,6 +442,47 @@ CREATE TRIGGER trg_link_document_student_before
     BEFORE INSERT OR UPDATE ON public.documents
     FOR EACH ROW
     EXECUTE FUNCTION public.link_document_student_before();
+
+-- ------------------------------------------------------------------------------
+-- 4. Backfill Top-Level school_year, grade_level, semester, file_hash & canonical_lrn
+--    on Existing Documents (Non-Destructive, Runs Under Hardened Trigger)
+-- ------------------------------------------------------------------------------
+UPDATE public.documents d
+SET
+    school_year = COALESCE(
+        NULLIF(TRIM(d.school_year), ''),
+        NULLIF(TRIM(d.extracted_fields->>'school_year'), ''),
+        NULLIF(TRIM(d.extracted_fields->'student'->>'school_year'), '')
+    ),
+    grade_level = public.normalize_shs_grade_level(
+        COALESCE(
+            NULLIF(TRIM(d.grade_level), ''),
+            NULLIF(TRIM(d.extracted_fields->>'grade_level'), ''),
+            NULLIF(TRIM(d.extracted_fields->>'selected_grade_level'), ''),
+            NULLIF(TRIM(d.extracted_fields->'student'->>'grade_level'), ''),
+            (SELECT s.grade_level FROM public.students s WHERE s.id = d.student_id)
+        )
+    ),
+    semester = COALESCE(
+        NULLIF(TRIM(d.semester), ''),
+        NULLIF(TRIM(d.extracted_fields->>'semester'), ''),
+        NULLIF(TRIM(d.extracted_fields->>'term'), '')
+    ),
+    file_hash = COALESCE(
+        NULLIF(TRIM(d.file_hash), ''),
+        NULLIF(TRIM(d.extracted_fields->>'file_hash'), ''),
+        NULLIF(TRIM(d.extracted_fields->'scan_history'->0->>'file_hash'), ''),
+        CASE
+            WHEN d.image_url IS NOT NULL AND TRIM(d.image_url) <> ''
+            THEN md5(d.image_url)
+            ELSE md5(d.id::text)
+        END
+    )
+WHERE d.school_year IS NULL
+   OR d.grade_level IS NULL
+   OR d.grade_level IN ('11', '12')
+   OR d.file_hash IS NULL
+   OR d.canonical_lrn IS NULL;
 
 -- ------------------------------------------------------------------------------
 -- 5. Harden process_approved_document() Trigger Function
@@ -1207,6 +1229,187 @@ $$;
 GRANT EXECUTE ON FUNCTION public.acquire_canonical_document_lock(uuid, text, text, text, text) TO authenticated, service_role;
 
 -- ------------------------------------------------------------------------------
+-- 6b. Authorized, Audited Manual Identity-Conflict Resolution RPC
+--     ONLY sanctioned path to set extracted_fields.lrn_conflict_verified = true
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.resolve_document_identity_conflict(
+    p_document_id uuid,
+    p_verified_lrn text,
+    p_verified_first_name text,
+    p_verified_last_name text,
+    p_verified_middle_name text DEFAULT NULL,
+    p_resolution_reason text DEFAULT NULL,
+    p_resolution_action text DEFAULT 'VERIFY_LRN_AND_IDENTITY'
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_actor_id uuid;
+    v_actor_role text;
+    v_actor_status text;
+    v_actor_school_id uuid;
+    v_doc record;
+    v_clean_lrn text;
+    v_clean_first text;
+    v_clean_last text;
+    v_clean_middle text;
+    v_clean_reason text;
+    v_existing_student record;
+    v_updated_fields jsonb;
+BEGIN
+    v_actor_id := auth.uid();
+    IF v_actor_id IS NULL THEN
+        RAISE EXCEPTION 'Unauthorized: Authentication required to resolve document identity conflict.'
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT role, account_status, school_id
+    INTO v_actor_role, v_actor_status, v_actor_school_id
+    FROM public.user_roles
+    WHERE user_id = v_actor_id
+    LIMIT 1;
+
+    IF v_actor_role IS NULL OR COALESCE(v_actor_status, '') <> 'Approved' OR LOWER(v_actor_role) NOT IN ('admin', 'teacher', 'faculty') THEN
+        RAISE EXCEPTION 'Forbidden: Only approved Faculty/Teacher or Admin users may resolve document identity conflicts.'
+            USING ERRCODE = '42501';
+    END IF;
+
+    SELECT * INTO v_doc
+    FROM public.documents
+    WHERE id = p_document_id
+    FOR UPDATE;
+
+    IF v_doc.id IS NULL THEN
+        RAISE EXCEPTION 'Not Found: Document % does not exist.', p_document_id
+            USING ERRCODE = 'P0002';
+    END IF;
+
+    IF LOWER(v_actor_role) <> 'admin' AND (v_actor_school_id IS NULL OR v_actor_school_id <> v_doc.school_id) THEN
+        RAISE EXCEPTION 'Forbidden: Cross-school identity conflict resolution is prohibited.'
+            USING ERRCODE = '42501';
+    END IF;
+
+    IF v_actor_school_id IS NOT NULL AND v_doc.school_id IS NOT NULL AND v_actor_school_id <> v_doc.school_id THEN
+        RAISE EXCEPTION 'Forbidden: Cross-school identity conflict resolution is prohibited.'
+            USING ERRCODE = '42501';
+    END IF;
+
+    v_clean_lrn := REGEXP_REPLACE(TRIM(COALESCE(p_verified_lrn, '')), '[^0-9]', '', 'g');
+    IF v_clean_lrn !~ '^[0-9]{12}$' THEN
+        RAISE EXCEPTION 'Validation Failed: A valid 12-digit LRN is required to resolve identity conflict.'
+            USING ERRCODE = '23514';
+    END IF;
+
+    v_clean_first := NULLIF(TRIM(COALESCE(p_verified_first_name, '')), '');
+    v_clean_last := NULLIF(TRIM(COALESCE(p_verified_last_name, '')), '');
+    v_clean_middle := NULLIF(TRIM(COALESCE(p_verified_middle_name, '')), '');
+    v_clean_reason := NULLIF(TRIM(COALESCE(p_resolution_reason, '')), '');
+
+    IF v_clean_first IS NULL OR v_clean_last IS NULL OR UPPER(v_clean_first) = 'UNKNOWN' OR UPPER(v_clean_last) = 'UNKNOWN' THEN
+        RAISE EXCEPTION 'Validation Failed: Verified first_name and last_name are required.'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF v_clean_reason IS NULL OR LENGTH(v_clean_reason) < 10 THEN
+        RAISE EXCEPTION 'Validation Failed: A detailed verification reason (at least 10 characters) is required for audit compliance.'
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- Check if the verified LRN is already registered to a student with a different last name
+    SELECT id, school_id, first_name, last_name
+    INTO v_existing_student
+    FROM public.students
+    WHERE lrn = v_clean_lrn
+    LIMIT 1;
+
+    IF v_existing_student.id IS NOT NULL THEN
+        IF v_existing_student.school_id <> v_doc.school_id THEN
+            RAISE EXCEPTION 'Cross-school student conflict: LRN % belongs to another school.', v_clean_lrn
+                USING ERRCODE = '23505';
+        END IF;
+
+        IF LOWER(REGEXP_REPLACE(v_clean_last, '[^a-zA-Z]', '', 'g')) <> LOWER(REGEXP_REPLACE(v_existing_student.last_name, '[^a-zA-Z]', '', 'g'))
+           AND COALESCE(p_resolution_action, '') <> 'CONFIRM_SAME_STUDENT_NAME_CORRECTION' THEN
+            RAISE EXCEPTION 'Identity Collision Unresolved: LRN % is registered to %, which still conflicts with verified last name %. Provide a distinct verified LRN or explicit CONFIRM_SAME_STUDENT_NAME_CORRECTION.',
+                v_clean_lrn, v_existing_student.last_name, v_clean_last
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    -- Authorize the trigger to accept lrn_conflict_verified = true for this specific document in this transaction
+    PERFORM set_config('avv.conflict_resolution_authorized', p_document_id::text, true);
+
+    v_updated_fields := COALESCE(v_doc.extracted_fields, '{}'::jsonb)
+        || jsonb_build_object(
+            'lrn', v_clean_lrn,
+            'first_name', v_clean_first,
+            'last_name', v_clean_last,
+            'middle_name', COALESCE(v_clean_middle, v_doc.extracted_fields->>'middle_name', ''),
+            'name', v_clean_last || ', ' || v_clean_first || CASE WHEN v_clean_middle IS NOT NULL THEN ' ' || v_clean_middle ELSE '' END,
+            'identity_conflict', false,
+            'manual_lrn_verification_required', false,
+            'lrn_conflict_verified', true,
+            'identity_conflict_resolution', jsonb_build_object(
+                'verified_by', v_actor_id,
+                'verified_role', v_actor_role,
+                'verified_at', now(),
+                'verified_lrn', v_clean_lrn,
+                'verified_first_name', v_clean_first,
+                'verified_last_name', v_clean_last,
+                'previous_lrn', v_doc.extracted_fields->>'lrn',
+                'previous_name', v_doc.extracted_fields->>'name',
+                'resolution_action', p_resolution_action,
+                'reason', v_clean_reason
+            )
+        );
+
+    UPDATE public.documents
+    SET extracted_fields = v_updated_fields,
+        updated_at = now()
+    WHERE id = p_document_id;
+
+    INSERT INTO public.audit_logs (
+        request_id, category, action, outcome, actor_user_id, actor_role, school_id,
+        target_type, target_id, target_label, reason, details
+    ) VALUES (
+        gen_random_uuid()::text,
+        'DOCUMENT',
+        'DOCUMENT_IDENTITY_CONFLICT_RESOLVED',
+        'SUCCESS',
+        v_actor_id,
+        v_actor_role,
+        v_doc.school_id,
+        'document',
+        p_document_id::text,
+        'Manual LRN & Identity Conflict Verification',
+        v_clean_reason,
+        jsonb_build_object(
+            'document_id', p_document_id,
+            'verified_lrn', v_clean_lrn,
+            'verified_first_name', v_clean_first,
+            'verified_last_name', v_clean_last,
+            'previous_lrn', v_doc.extracted_fields->>'lrn',
+            'previous_name', v_doc.extracted_fields->>'name',
+            'resolution_action', p_resolution_action
+        )
+    );
+
+    RETURN jsonb_build_object(
+        'status', 'SUCCESS',
+        'document_id', p_document_id,
+        'verified_lrn', v_clean_lrn,
+        'verified_by', v_actor_id
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.resolve_document_identity_conflict(uuid, text, text, text, text, text, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.resolve_document_identity_conflict(uuid, text, text, text, text, text, text) TO authenticated, service_role;
+
+-- ------------------------------------------------------------------------------
 -- 7. Reviewed Transactional Historical Reconciliation Procedure
 --    Preserves:
 --    - Original scanned files (in public.document_scans & scan_history)
@@ -1258,6 +1461,7 @@ BEGIN
     -- Ensure canonical document top-level metadata is populated
     UPDATE public.documents
     SET
+        canonical_lrn = '111304581972',
         school_year = '2019-2020',
         grade_level = 'Grade 11',
         file_hash = COALESCE(file_hash, md5(COALESCE(image_url, id::text)))
@@ -1344,6 +1548,7 @@ BEGIN
         UPDATE public.documents
         SET
             student_id = v_canonical_doc.student_id,
+            canonical_lrn = '111304581972',
             school_year = '2019-2020',
             grade_level = 'Grade 11',
             status = 'archived',
@@ -1407,6 +1612,7 @@ BEGIN
         UPDATE public.documents
         SET
             student_id = NULL,
+            canonical_lrn = NULL,
             school_year = COALESCE(school_year, '2019-2020'),
             grade_level = COALESCE(grade_level, 'Grade 11'),
             extracted_fields = jsonb_set(
@@ -1479,10 +1685,10 @@ BEGIN
     SELECT COUNT(*) INTO v_linked_collision_count
     FROM public.documents
     WHERE id IN ('cc8b4c08-14bb-4c92-9958-d670f878ac29', 'edda579a-6e1d-4acb-81d8-25d078798ff7')
-      AND student_id IS NOT NULL;
+      AND (student_id IS NOT NULL OR canonical_lrn IS NOT NULL);
 
     IF v_linked_collision_count <> 0 THEN
-        RAISE EXCEPTION 'Reconciliation Post-flight Failed: Collision documents are still linked to a student.';
+        RAISE EXCEPTION 'Reconciliation Post-flight Failed: Collision documents are still linked to a student or canonical_lrn.';
     END IF;
 
     v_result := jsonb_build_object(
@@ -1498,85 +1704,63 @@ BEGIN
 END;
 $$;
 
--- Execute historical reconciliation automatically within the migration transaction
--- if the known production canonical document (840dc1c4-a272-444e-9ff4-2faba4b94c0b) is present.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM public.documents
-        WHERE id = '840dc1c4-a272-444e-9ff4-2faba4b94c0b'
-          AND status = 'approved'
-    ) THEN
-        PERFORM public.reconcile_historical_duplicate_documents();
-    END IF;
-END $$;
+-- NOTE: Historical duplicate reconciliation (`SELECT public.reconcile_historical_duplicate_documents();`)
+-- is EXPLICITLY MANUAL and is NOT executed automatically during Migration 021.
+-- The operator must run the read-only pre-flight audit first, then explicitly execute:
+--   SELECT public.reconcile_historical_duplicate_documents();
+-- before executing Section 8 & 9 (`SELECT public.enforce_canonical_document_unique_indexes();`).
 
 -- ------------------------------------------------------------------------------
--- 8. Enforce Validated Canonical Identity Fields on All Active & Approved Records
+-- 8 & 9. Enforce Validated Canonical Identity Constraints and All 4 Unique Indexes
 -- ------------------------------------------------------------------------------
--- Any record with student_id IS NOT NULL that is active (status NOT IN ('archived', 'rejected'))
--- is missing school_year or grade_level for SF9 must be demoted to staging (student_id = NULL)
--- unless it is 'approved' (which will fail the constraint if invalid).
-UPDATE public.documents
-SET student_id = NULL
-WHERE student_id IS NOT NULL
-  AND status NOT IN ('archived', 'rejected', 'approved')
-  AND (
-      school_id IS NULL
-      OR document_type NOT IN ('sf9', 'sf10')
-      OR (
-          document_type = 'sf9'
-          AND (
-              school_year IS NULL OR btrim(school_year) = ''
-              OR grade_level IS NULL OR btrim(grade_level) = ''
-          )
-      )
-  );
-
-ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS chk_documents_canonical_active_fields;
-ALTER TABLE public.documents ADD CONSTRAINT chk_documents_canonical_active_fields
-    CHECK (
-        (
-            NOT (student_id IS NOT NULL AND status NOT IN ('archived', 'rejected'))
-            OR (
-                school_id IS NOT NULL
-                AND document_type IN ('sf9', 'sf10')
-                AND (
-                    document_type <> 'sf9'
-                    OR (
-                        school_year IS NOT NULL AND btrim(school_year) <> ''
-                        AND grade_level IS NOT NULL AND btrim(grade_level) <> ''
-                    )
-                )
-            )
-        )
-        AND (
-            status <> 'approved'
-            OR (
-                student_id IS NOT NULL
-                AND school_id IS NOT NULL
-                AND document_type IN ('sf9', 'sf10')
-                AND (
-                    document_type <> 'sf9'
-                    OR (
-                        school_year IS NOT NULL AND btrim(school_year) <> ''
-                        AND grade_level IS NOT NULL AND btrim(grade_level) <> ''
-                    )
-                )
-            )
-        )
-    );
-
--- ------------------------------------------------------------------------------
--- 9. Strictly Enforce Canonical Unique Indexes (Never Silently Skip)
--- ------------------------------------------------------------------------------
-DO $$
+CREATE OR REPLACE FUNCTION public.enforce_canonical_document_unique_indexes()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
+    dup_active_sf9_lrn_count integer;
     dup_active_sf9_stu_count integer;
-    dup_active_sf10_stu_count integer;
-    dup_staging_hash_count integer;
+    dup_active_sf10_lrn_count integer;
+    dup_unresolved_hash_count integer;
 BEGIN
-    -- Preflight Check 1: Duplicate active SF9 by (school_id, student_id, document_type, school_year, grade_level)
+    -- Demote any non-approved staging record that lacks required canonical identity fields
+    UPDATE public.documents
+    SET student_id = NULL
+    WHERE student_id IS NOT NULL
+      AND status NOT IN ('archived', 'rejected', 'approved')
+      AND (
+          school_id IS NULL
+          OR document_type NOT IN ('sf9', 'sf10')
+          OR (
+              document_type = 'sf9'
+              AND (
+                  school_year IS NULL OR btrim(school_year) = ''
+                  OR grade_level IS NULL OR btrim(grade_level) = ''
+              )
+          )
+      );
+
+    -- Preflight Check 1: Duplicate active SF9 by (school_id, canonical_lrn, document_type, school_year, grade_level)
+    SELECT COUNT(*) INTO dup_active_sf9_lrn_count
+    FROM (
+        SELECT school_id, canonical_lrn, document_type, school_year, grade_level
+        FROM public.documents
+        WHERE status NOT IN ('archived', 'rejected')
+          AND document_type = 'sf9'
+          AND canonical_lrn IS NOT NULL
+          AND school_year IS NOT NULL
+          AND grade_level IS NOT NULL
+        GROUP BY school_id, canonical_lrn, document_type, school_year, grade_level
+        HAVING COUNT(*) > 1
+    ) dups;
+
+    IF dup_active_sf9_lrn_count > 0 THEN
+        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active SF9 group(s) by (school_id, canonical_lrn, document_type, school_year, grade_level). Execute SELECT public.reconcile_historical_duplicate_documents(); first.', dup_active_sf9_lrn_count;
+    END IF;
+
+    -- Preflight Check 2: Duplicate active SF9 by (school_id, student_id, document_type, school_year, grade_level)
     SELECT COUNT(*) INTO dup_active_sf9_stu_count
     FROM (
         SELECT school_id, student_id, document_type, school_year, grade_level
@@ -1584,91 +1768,153 @@ BEGIN
         WHERE status NOT IN ('archived', 'rejected')
           AND document_type = 'sf9'
           AND student_id IS NOT NULL
+          AND school_year IS NOT NULL
+          AND grade_level IS NOT NULL
         GROUP BY school_id, student_id, document_type, school_year, grade_level
         HAVING COUNT(*) > 1
     ) dups;
 
     IF dup_active_sf9_stu_count > 0 THEN
-        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active SF9 group(s) by (school_id, student_id, document_type, school_year, grade_level).', dup_active_sf9_stu_count;
+        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active SF9 group(s) by (school_id, student_id, document_type, school_year, grade_level). Execute SELECT public.reconcile_historical_duplicate_documents(); first.', dup_active_sf9_stu_count;
     END IF;
 
-    -- Preflight Check 2: Duplicate active SF10 by (school_id, student_id, document_type)
-    SELECT COUNT(*) INTO dup_active_sf10_stu_count
+    -- Preflight Check 3: Duplicate active SF10 by (school_id, canonical_lrn, document_type)
+    SELECT COUNT(*) INTO dup_active_sf10_lrn_count
     FROM (
-        SELECT school_id, student_id, document_type
+        SELECT school_id, canonical_lrn, document_type
         FROM public.documents
         WHERE status NOT IN ('archived', 'rejected')
           AND document_type = 'sf10'
-          AND student_id IS NOT NULL
-        GROUP BY school_id, student_id, document_type
+          AND canonical_lrn IS NOT NULL
+        GROUP BY school_id, canonical_lrn, document_type
         HAVING COUNT(*) > 1
     ) dups;
 
-    IF dup_active_sf10_stu_count > 0 THEN
-        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active SF10 group(s) by (school_id, student_id, document_type).', dup_active_sf10_stu_count;
+    IF dup_active_sf10_lrn_count > 0 THEN
+        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active SF10 group(s) by (school_id, canonical_lrn, document_type).', dup_active_sf10_lrn_count;
     END IF;
 
-    -- Preflight Check 3: Duplicate active staging records by (school_id, document_type, file_hash)
-    SELECT COUNT(*) INTO dup_staging_hash_count
+    -- Preflight Check 4: Duplicate active file_hash by (school_id, document_type, file_hash)
+    SELECT COUNT(*) INTO dup_unresolved_hash_count
     FROM (
         SELECT school_id, document_type, file_hash
         FROM public.documents
         WHERE status NOT IN ('archived', 'rejected')
-          AND student_id IS NULL
           AND file_hash IS NOT NULL
         GROUP BY school_id, document_type, file_hash
         HAVING COUNT(*) > 1
     ) dups;
 
-    IF dup_staging_hash_count > 0 THEN
-        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active staging group(s) by (school_id, document_type, file_hash).', dup_staging_hash_count;
+    IF dup_unresolved_hash_count > 0 THEN
+        RAISE EXCEPTION 'Migration 021 Pre-flight Blocked: Found % duplicate active file_hash group(s) by (school_id, document_type, file_hash).', dup_unresolved_hash_count;
     END IF;
 
-    -- Drop any legacy/intermediate index names
-    DROP INDEX IF EXISTS public.idx_documents_canonical_sf9_student_active;
-    DROP INDEX IF EXISTS public.idx_documents_unresolved_file_hash_active;
-    DROP INDEX IF EXISTS public.idx_documents_canonical_active_record;
+    -- Enforce CHECK constraint on canonical active & approved records
+    ALTER TABLE public.documents DROP CONSTRAINT IF EXISTS chk_documents_canonical_active_fields;
+    ALTER TABLE public.documents ADD CONSTRAINT chk_documents_canonical_active_fields
+        CHECK (
+            (
+                NOT (student_id IS NOT NULL AND status NOT IN ('archived', 'rejected'))
+                OR (
+                    school_id IS NOT NULL
+                    AND document_type IN ('sf9', 'sf10')
+                    AND (
+                        document_type <> 'sf9'
+                        OR (
+                            school_year IS NOT NULL AND btrim(school_year) <> ''
+                            AND grade_level IS NOT NULL AND btrim(grade_level) <> ''
+                        )
+                    )
+                )
+            )
+            AND (
+                status <> 'approved'
+                OR (
+                    student_id IS NOT NULL
+                    AND school_id IS NOT NULL
+                    AND document_type IN ('sf9', 'sf10')
+                    AND (
+                        document_type <> 'sf9'
+                        OR (
+                            school_year IS NOT NULL AND btrim(school_year) <> ''
+                            AND grade_level IS NOT NULL AND btrim(grade_level) <> ''
+                        )
+                    )
+                )
+            )
+        );
 
-    -- Create Unique Index 1: Canonical SF9 Academic Identity
-    -- Strictly matches documented identity: (school_id, student_id, document_type, school_year, grade_level)
+    -- Drop any legacy/intermediate index names
+    DROP INDEX IF EXISTS public.idx_documents_canonical_active_record;
+    DROP INDEX IF EXISTS public.idx_documents_staging_file_hash_active;
+
+    -- Create Unique Index 1: Canonical SF9 Academic Identity by Validated LRN
+    -- Protects against duplicate SF9 records even when student_id IS NULL
     DROP INDEX IF EXISTS public.idx_documents_canonical_sf9_active;
     CREATE UNIQUE INDEX idx_documents_canonical_sf9_active
+        ON public.documents (school_id, canonical_lrn, document_type, school_year, grade_level)
+        WHERE status NOT IN ('archived', 'rejected')
+          AND document_type = 'sf9'
+          AND canonical_lrn IS NOT NULL
+          AND school_year IS NOT NULL
+          AND grade_level IS NOT NULL;
+
+    -- Create Unique Index 2: Canonical SF9 Academic Identity by Linked Student ID
+    DROP INDEX IF EXISTS public.idx_documents_canonical_sf9_student_active;
+    CREATE UNIQUE INDEX idx_documents_canonical_sf9_student_active
         ON public.documents (school_id, student_id, document_type, school_year, grade_level)
         WHERE status NOT IN ('archived', 'rejected')
           AND document_type = 'sf9'
-          AND student_id IS NOT NULL;
+          AND student_id IS NOT NULL
+          AND school_year IS NOT NULL
+          AND grade_level IS NOT NULL;
 
-    -- Create Unique Index 2: Canonical SF10 Permanent Record Identity
-    -- Strictly matches documented identity: (school_id, student_id, document_type)
+    -- Create Unique Index 3: Canonical SF10 Permanent Record Identity by Validated LRN
     DROP INDEX IF EXISTS public.idx_documents_canonical_sf10_active;
     CREATE UNIQUE INDEX idx_documents_canonical_sf10_active
-        ON public.documents (school_id, student_id, document_type)
+        ON public.documents (school_id, canonical_lrn, document_type)
         WHERE status NOT IN ('archived', 'rejected')
           AND document_type = 'sf10'
-          AND student_id IS NOT NULL;
+          AND canonical_lrn IS NOT NULL;
 
-    -- Create Unique Index 3: Active Staging Record File Hash Deduplication (when student_id IS NULL)
-    DROP INDEX IF EXISTS public.idx_documents_staging_file_hash_active;
-    CREATE UNIQUE INDEX idx_documents_staging_file_hash_active
+    -- Create Unique Index 4: Active File Hash Deduplication
+    DROP INDEX IF EXISTS public.idx_documents_unresolved_file_hash_active;
+    CREATE UNIQUE INDEX idx_documents_unresolved_file_hash_active
         ON public.documents (school_id, document_type, file_hash)
         WHERE status NOT IN ('archived', 'rejected')
-          AND student_id IS NULL
           AND file_hash IS NOT NULL;
 
-    -- Verify all unique indexes exist and are active in pg_indexes
+    -- Verify all 4 unique indexes exist and are active in pg_indexes
     IF NOT EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND indexname = 'idx_documents_canonical_sf9_active'
     ) OR NOT EXISTS (
         SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'idx_documents_canonical_sf9_student_active'
+    ) OR NOT EXISTS (
+        SELECT 1 FROM pg_indexes
         WHERE schemaname = 'public' AND indexname = 'idx_documents_canonical_sf10_active'
     ) OR NOT EXISTS (
         SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'public' AND indexname = 'idx_documents_staging_file_hash_active'
+        WHERE schemaname = 'public' AND indexname = 'idx_documents_unresolved_file_hash_active'
     ) THEN
-        RAISE EXCEPTION 'Migration 021 Verification Failed: Required canonical unique indexes were not installed.';
+        RAISE EXCEPTION 'Migration 021 Verification Failed: All 4 required canonical unique indexes were not installed.';
     END IF;
-END $$;
+
+    RETURN jsonb_build_object(
+        'status', 'SUCCESS',
+        'indexes_created', jsonb_build_array(
+            'idx_documents_canonical_sf9_active',
+            'idx_documents_canonical_sf9_student_active',
+            'idx_documents_canonical_sf10_active',
+            'idx_documents_unresolved_file_hash_active'
+        )
+    );
+END;
+$$;
+
+-- Enforce canonical unique indexes (blocks if un-reconciled duplicates exist)
+SELECT public.enforce_canonical_document_unique_indexes();
 
 COMMIT;
 
