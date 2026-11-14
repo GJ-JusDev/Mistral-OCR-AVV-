@@ -38,6 +38,7 @@ const adminNavigation = [
   { name: "Review Queue", href: "/review", icon: CheckSquare },
   { name: "Students", href: "/students", icon: Users },
   { name: "User Management", href: "/admin/users", icon: UserCheck },
+  { name: "Teacher Registry", href: "/admin/teacher-registry", icon: GraduationCap },
   { name: "Audit Logs", href: "/admin/audit-logs", icon: ShieldCheck },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
@@ -128,7 +129,7 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
               <span className={`inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-semibold border ${roleBadgeStyle}`}>
                 {roleLabel}
               </span>
-              <span className="text-[9px] text-slate-400">ID 300792</span>
+              <span className="text-[9px] text-slate-400">ID 500169</span>
             </div>
           </div>
         </div>

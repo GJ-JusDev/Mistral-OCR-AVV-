@@ -13,7 +13,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { TrOcrProvider } from "../src/lib/ocr/providers/trocrProvider.ts";
+import { OcrOrchestrator } from "../src/lib/ocr/providers/orchestrator.ts";
 
 function parseOcrOutputPure(text) {
   const fields = {
@@ -149,7 +149,7 @@ async function main() {
 
   console.log(`\n================================================================`);
   console.log(`AVV NEXT.JS IN-MEMORY OCR EVALUATION: ${path.basename(resolved)}`);
-  console.log(`Target: Local TrOCR Fallback Pipeline (No Supabase writes)`);
+  console.log(`Target: AVV Orchestrator (Azure Primary -> Mistral Fallback)`);
   console.log(`================================================================\n`);
 
   const fileBytes = fs.readFileSync(resolved);
@@ -161,18 +161,12 @@ async function main() {
 
   const base64Data = fileBytes.toString("base64");
 
-  const provider = new TrOcrProvider({ serviceUrl: "http://127.0.0.1:5001" });
+  const orchestrator = new OcrOrchestrator();
 
   try {
-    const isReady = await provider.isAvailable();
-    if (!isReady) {
-      console.error("[Error] Local TrOCR service is not responding at http://127.0.0.1:5001/health.");
-      process.exit(1);
-    }
-
-    // Health check succeeded; measure predictive execution
+    // Measure predictive execution
     const t0 = Date.now();
-    const ocrRes = await provider.recognize({
+    const ocrRes = await orchestrator.execute({
       image: `data:${mimeType};base64,${base64Data}`,
       extractFields: true,
       gradeLevel: "Senior High School",
@@ -181,8 +175,8 @@ async function main() {
     const fields = parseOcrOutputPure(ocrRes.text);
 
     console.log(`- Document Type Detected: ${fields.document_type}`);
-    console.log(`- OCR Provider: trocr-local`);
-    console.log(`- Model Name: ${ocrRes.model || "microsoft/trocr-base-handwritten"}`);
+    console.log(`- OCR Provider: ${ocrRes.provider}`);
+    console.log(`- Model Name: ${ocrRes.model}`);
     console.log(`- Total Round-Trip Latency: ${latency} ms`);
     console.log(`- Confidence Score: ${typeof ocrRes.confidence === "number" ? (ocrRes.confidence * 100).toFixed(1) + "%" : "Unmeasured"}`);
     console.log(`- Fields Requiring Manual Review: ${fields.flags.length ? fields.flags.join(", ") : "None"}`);

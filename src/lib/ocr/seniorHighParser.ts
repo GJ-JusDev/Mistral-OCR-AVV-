@@ -2,6 +2,7 @@ import type { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/doc
 import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
 import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
+import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
 
 /**
  * MGA KEYWORDS NA HINDI DAPAT ITURING NA ACADEMIC SUBJECT
@@ -420,7 +421,8 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   }
 
   if (grades.length > 0) {
-    fields.grades = grades;
+    fields.grades = normalizeGradeRecords(grades, currentSemester);
+    Object.assign(fields, updateExtractedFieldsAverages(fields));
   }
   if (attendance.length > 0) {
     fields.attendance = attendance;

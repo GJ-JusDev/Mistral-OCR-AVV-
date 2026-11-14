@@ -589,15 +589,16 @@ export function extractSpatialIdentity(
 
       // Check if this line is an isolated "School" or "Paaralan" label in the identity header
       const isHeaderSchoolLabel =
-        (/^school$/i.test(lineText) || /^paaralan$/i.test(lineText) || /^name\s+of\s+school$/i.test(lineText)) &&
-        lineBBox.centerY >= 0.10 &&
+        (/^school$/i.test(lineText) || /^paaralan$/i.test(lineText) || /^name\s+of\s+school$/i.test(lineText) || /^pangalan\s+ng\s+paaralan$/i.test(lineText)) &&
+        lineBBox.centerY >= 0.05 &&
         lineBBox.centerY <= 0.45 &&
-        lineBBox.centerX >= 0.35;
+        lineBBox.centerX >= 0.15 &&
+        lineBBox.centerX <= 0.85;
 
       if (isHeaderSchoolLabel) {
         // Search for lines directly above this label
-        // deltaY between -0.055 and -0.005, deltaX <= 0.25
-        const candidateLines: Array<{ content: string; deltaY: number; deltaX: number }> = [];
+        // deltaY between -0.09 and -0.003, deltaX <= 0.35
+        const candidateLines: Array<{ content: string; deltaY: number; deltaX: number; centerY: number }> = [];
         for (let cIdx = 0; cIdx < page.lines.length; cIdx++) {
           if (cIdx === lIdx) continue;
           const candObj = page.lines[cIdx];
@@ -608,23 +609,58 @@ export function extractSpatialIdentity(
           const deltaY = cBBox.centerY - lineBBox.centerY;
           const deltaX = Math.abs(cBBox.centerX - lineBBox.centerX);
 
-          if (deltaY >= -0.055 && deltaY <= -0.005 && deltaX <= 0.25) {
-            candidateLines.push({ content: candObj.content, deltaY, deltaX });
+          const candLower = candObj.content.toLowerCase().trim();
+          if (
+            candLower === "division" ||
+            candLower.startsWith("division of") ||
+            candLower.startsWith("dibisyon") ||
+            candLower.startsWith("region") ||
+            candLower.startsWith("rehiyon") ||
+            candLower.includes("department of education") ||
+            candLower.includes("kagawaran ng edukasyon") ||
+            candLower === "school head" ||
+            candLower === "principal" ||
+            candLower === "adviser"
+          ) {
+            continue;
+          }
+
+          if (deltaY >= -0.09 && deltaY <= -0.003 && deltaX <= 0.35) {
+            candidateLines.push({ content: candObj.content, deltaY, deltaX, centerY: cBBox.centerY });
           }
         }
 
-        // Sort candidate lines by deltaY descending (closest to the School label first)
-        candidateLines.sort((a, b) => b.deltaY - a.deltaY);
+        // Sort candidate lines top-to-bottom (ascending centerY) to preserve natural OCR line order
+        candidateLines.sort((a, b) => a.centerY - b.centerY);
 
-        for (const cand of candidateLines) {
-          const cleaned = cleanSchoolName(cand.content);
-          if (isValidSchoolCandidate(cleaned, {
-            learnerName: result.name,
-            learnerFirstName: result.first_name,
-            learnerLastName: result.last_name,
-          })) {
-            result.school_name = cleaned;
-            break;
+        if (candidateLines.length > 0) {
+          // If multiple lines, try joined candidate first
+          if (candidateLines.length > 1) {
+            const joined = candidateLines.map((c) => c.content).join(" ");
+            const cleanedJoined = cleanSchoolName(joined);
+            if (isValidSchoolCandidate(cleanedJoined, {
+              learnerName: result.name,
+              learnerFirstName: result.first_name,
+              learnerLastName: result.last_name,
+            })) {
+              result.school_name = cleanedJoined;
+            }
+          }
+
+          if (!result.school_name) {
+            // Check individual lines (closest to School label first)
+            const sortedByProximity = [...candidateLines].sort((a, b) => b.deltaY - a.deltaY);
+            for (const cand of sortedByProximity) {
+              const cleaned = cleanSchoolName(cand.content);
+              if (isValidSchoolCandidate(cleaned, {
+                learnerName: result.name,
+                learnerFirstName: result.first_name,
+                learnerLastName: result.last_name,
+              })) {
+                result.school_name = cleaned;
+                break;
+              }
+            }
           }
         }
 
@@ -639,9 +675,10 @@ export function extractSpatialIdentity(
       const clean = w.cleanText;
       return (
         (clean === "school" || clean === "paaralan") &&
-        w.bbox.centerY >= 0.10 &&
+        w.bbox.centerY >= 0.05 &&
         w.bbox.centerY <= 0.45 &&
-        w.bbox.centerX >= 0.35
+        w.bbox.centerX >= 0.15 &&
+        w.bbox.centerX <= 0.85
       );
     });
 
@@ -661,7 +698,7 @@ export function extractSpatialIdentity(
         if (cand === labelWord || cand.isLabel) return false;
         const deltaY = cand.bbox.centerY - labelWord.bbox.centerY;
         const deltaX = Math.abs(cand.bbox.centerX - labelWord.bbox.centerX);
-        return deltaY >= -0.055 && deltaY <= -0.005 && deltaX <= 0.25;
+        return deltaY >= -0.09 && deltaY <= -0.003 && deltaX <= 0.35;
       });
 
       if (wordsAbove.length > 0) {
@@ -681,18 +718,50 @@ export function extractSpatialIdentity(
           }
         }
 
-        const sortedLineKeys = Array.from(lineMap.keys()).sort((a, b) => b - a);
+        // Sort lines top-to-bottom (ascending Y)
+        const sortedLineKeys = Array.from(lineMap.keys()).sort((a, b) => a - b);
+        const assembledLines: string[] = [];
         for (const lineY of sortedLineKeys) {
           const lineWords = lineMap.get(lineY) || [];
           lineWords.sort((a, b) => a.bbox.minX - b.bbox.minX);
-          const candStr = cleanSchoolName(lineWords.map((w) => w.content).join(" "));
-          if (isValidSchoolCandidate(candStr, {
+          const lineText = lineWords.map((w) => w.content).join(" ");
+          const lower = lineText.toLowerCase().trim();
+          if (
+            lower === "division" ||
+            lower.startsWith("division of") ||
+            lower.startsWith("dibisyon") ||
+            lower.startsWith("region") ||
+            lower.startsWith("rehiyon") ||
+            lower.includes("department of education") ||
+            lower.includes("kagawaran ng edukasyon")
+          ) {
+            continue;
+          }
+          assembledLines.push(lineText);
+        }
+
+        if (assembledLines.length > 1) {
+          const joinedStr = cleanSchoolName(assembledLines.join(" "));
+          if (isValidSchoolCandidate(joinedStr, {
             learnerName: result.name,
             learnerFirstName: result.first_name,
             learnerLastName: result.last_name,
           })) {
-            result.school_name = candStr;
-            break;
+            result.school_name = joinedStr;
+          }
+        }
+
+        if (!result.school_name) {
+          for (let idx = assembledLines.length - 1; idx >= 0; idx--) {
+            const candStr = cleanSchoolName(assembledLines[idx]);
+            if (isValidSchoolCandidate(candStr, {
+              learnerName: result.name,
+              learnerFirstName: result.first_name,
+              learnerLastName: result.last_name,
+            })) {
+              result.school_name = candStr;
+              break;
+            }
           }
         }
         if (result.school_name) break;
@@ -963,7 +1032,10 @@ export const SCHOOL_EXCLUSION_KEYWORDS: string[] = [
   "lagda",
 ];
 
-export function cleanSchoolName(raw: string): string {
+export function cleanSchoolName(
+  raw: string,
+  options?: { preserveAgencyPrefix?: boolean }
+): string {
   let cleaned = raw
     .replace(/[*_#`|[\]]+/g, " ")
     .replace(/^[:\-\s.]+/, "")
@@ -972,15 +1044,21 @@ export function cleanSchoolName(raw: string): string {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Strip leading "DEPED " agency indicator to extract the clean canonical school name
+  // Strip leading "DEPED " agency indicator unless preserveAgencyPrefix is set
   // e.g. "DEPED TAMBAYAN NATIONAL HIGH SCHOOL" -> "TAMBAYAN NATIONAL HIGH SCHOOL"
-  cleaned = cleaned.replace(/^deped[\s:-]+/i, "").trim();
+  if (!options?.preserveAgencyPrefix) {
+    cleaned = cleaned.replace(/^deped[\s:-]+/i, "").trim();
+  }
 
-  // Only strip a trailing "School" or "Paaralan" if it is an isolated label artifact,
-  // NOT when preceded by "High", "Elementary", "Integrated", "Vocational", etc.
+  // Strip duplicate trailing "School" or "Paaralan" label artifact
+  // e.g. "TAMBAYAN NATIONAL HIGH SCHOOL School" -> "TAMBAYAN NATIONAL HIGH SCHOOL"
   if (
+    /(?:high|elementary|integrated|vocational|secondary|primary|community|science|national|memorial|central)\s+school[\s:-]+(?:school|paaralan)$/i.test(cleaned)
+  ) {
+    cleaned = cleaned.replace(/[\s:-]+(?:school|paaralan)$/i, "").trim();
+  } else if (
     /[\s:-]+(?:school|paaralan)$/i.test(cleaned) &&
-    !/(?:high|elementary|integrated|vocational|secondary|primary|community|science)\s+school$/i.test(cleaned)
+    !/(?:high|elementary|integrated|vocational|secondary|primary|community|science|national|memorial|central)\s+school$/i.test(cleaned)
   ) {
     cleaned = cleaned.replace(/[\s:-]+(?:school|paaralan)$/i, "").trim();
   }
@@ -1109,20 +1187,51 @@ export function extractSchoolFromText(
       }
     }
 
-    // Pattern 3: Isolated "School" or "Paaralan" label line -> search upward line above
-    if (/^(?:school|paaralan|name\s+of\s+school)$/i.test(cleanLine)) {
+    // Pattern 3: Isolated "School" or "Paaralan" label line -> search upward line(s) between Division and School
+    if (/^(?:school|paaralan|name\s+of\s+school|pangalan\s+ng\s+paaralan)$/i.test(cleanLine)) {
       hasSchoolLabel = true;
-      for (let k = i - 1; k >= Math.max(0, i - 3); k--) {
-        const candLine = lines[k];
-        if (!candLine) continue;
-        if (/^[\s_.\-–—=~]+$/.test(candLine)) continue;
+      const candLines: string[] = [];
+      for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
+        const lineAbove = lines[k];
+        if (!lineAbove) continue;
+        if (/^[\s_.\-–—=~]+$/.test(lineAbove)) continue;
 
-        const cleaned = cleanSchoolName(candLine);
-        if (isValidSchoolCandidate(cleaned, options)) {
-          candidateSchool = cleaned;
+        const lowerAbove = lineAbove.toLowerCase().trim();
+        // Stop searching upward when hitting division, region, learner name, or central agency boundaries
+        if (
+          lowerAbove.includes("division of") ||
+          lowerAbove.includes("dibisyon ng") ||
+          lowerAbove === "division" ||
+          lowerAbove.startsWith("region") ||
+          lowerAbove.startsWith("rehiyon") ||
+          lowerAbove.includes("department of education") ||
+          lowerAbove.includes("kagawaran ng edukasyon") ||
+          lowerAbove.startsWith("name") ||
+          lowerAbove.startsWith("lrn")
+        ) {
+          break;
+        }
+
+        candLines.unshift(lineAbove); // Preserve top-to-bottom reading order!
+      }
+
+      if (candLines.length > 0) {
+        // Try joined multi-line first
+        const joined = candLines.join(" ");
+        const cleanedJoined = cleanSchoolName(joined);
+        if (isValidSchoolCandidate(cleanedJoined, options)) {
+          candidateSchool = cleanedJoined;
           return { schoolName: candidateSchool, hasSchoolLabel: true };
         }
-        break;
+
+        // Try individual lines from closest to School label up
+        for (let idx = candLines.length - 1; idx >= 0; idx--) {
+          const cleaned = cleanSchoolName(candLines[idx]);
+          if (isValidSchoolCandidate(cleaned, options)) {
+            candidateSchool = cleaned;
+            return { schoolName: candidateSchool, hasSchoolLabel: true };
+          }
+        }
       }
     }
   }

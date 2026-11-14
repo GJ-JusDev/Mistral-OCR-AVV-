@@ -5,6 +5,9 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
+import { deriveMiddleInitial, evaluateRegistryMatch } from "@/lib/registry/nameMatcher";
+
+const TRIS_SCHOOL_ID = "a0000000-0000-0000-0000-000000000001";
 
 export async function login(formData: FormData) {
   const email = formData.get("email") as string;
@@ -145,6 +148,7 @@ export async function register(formData: FormData) {
   const password = formData.get("password") as string;
   const firstName = (formData.get("firstName") as string)?.trim();
   const middleName = (formData.get("middleName") as string)?.trim();
+  const hasNoMiddleName = formData.get("hasNoMiddleName") === "true" || formData.get("hasNoMiddleName") === "on";
   const lastName = (formData.get("lastName") as string)?.trim();
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
   
@@ -152,9 +156,22 @@ export async function register(formData: FormData) {
     return { error: "Email address is required." };
   }
 
+  // DepEd TRIS Personal Gmail requirement
+  if (!/^[a-zA-Z0-9._%+-]+@gmail\.com$/i.test(email)) {
+    return { error: "Registration requires a valid personal Gmail address (@gmail.com)." };
+  }
+
   if (!firstName || !lastName) {
     return { error: "First Name and Last Name are required." };
   }
+
+  if (!hasNoMiddleName && !middleName) {
+    // If user didn't enter a middle name, they must acknowledge having no middle name or enter it
+    // To allow flexibility while enforcing awareness:
+    // (If user leaves it blank without checking, we treat it as no middle name with warning or allow if checked)
+  }
+
+  const derivedMi = deriveMiddleInitial(middleName, hasNoMiddleName);
 
   const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}$/;
   if (!passwordRegex.test(password)) {
@@ -179,11 +196,14 @@ export async function register(formData: FormData) {
     options: {
       data: {
         first_name: firstName,
-        middle_name: middleName,
+        middle_name: middleName || null,
+        middle_initial: derivedMi,
+        has_no_middle_name: hasNoMiddleName,
         last_name: lastName,
         name_extension: nameExtension,
         role: "Teacher",
-        account_status: "Pending" // Automatically mark new users as Pending
+        account_status: "Pending", // Automatically mark new users as Pending
+        school_id: TRIS_SCHOOL_ID,
       }
     }
   });
@@ -201,12 +221,41 @@ export async function register(formData: FormData) {
     return { error: "An account with this email address already exists. Please sign in or contact the administrator." };
   }
 
-  // Verify and ensure authoritative user_roles entry with Pending status
+  // Verify and ensure authoritative user_roles entry with Pending status & Registry Matching
+  const registrationTimestamp = new Date().toISOString();
+  const reviewEligibilityTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  let matchStatus = "NOT_FOUND";
+  let matchedRegistryId: string | null = null;
+  let matchedTeacherName: string | null = null;
+  let matchReason: string = "Registry evaluation initialized";
+
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (serviceKey) {
     const adminClient = createSupabaseClient(supabaseUrl, serviceKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
+
+    // Fetch official registry for TRIS to evaluate deterministic match
+    const { data: registryTeachers } = await adminClient
+      .from("school_teacher_registry")
+      .select("*")
+      .eq("school_id", TRIS_SCHOOL_ID);
+
+    const matchResult = evaluateRegistryMatch(
+      {
+        firstName,
+        lastName,
+        middleName: hasNoMiddleName ? null : middleName,
+        hasNoMiddleName,
+        email,
+      },
+      registryTeachers || []
+    );
+
+    matchStatus = matchResult.status;
+    matchedRegistryId = matchResult.matchedRegistryEntry?.id || null;
+    matchedTeacherName = matchResult.matchedRegistryEntry?.full_name_original || null;
+    matchReason = matchResult.reasons.join("; ") || "Registry evaluation completed";
 
     const { data: existingRole } = await adminClient
       .from("user_roles")
@@ -221,6 +270,14 @@ export async function register(formData: FormData) {
           user_id: signUpData.user.id,
           role: "teacher",
           account_status: "Pending",
+          school_id: TRIS_SCHOOL_ID,
+          registration_timestamp: registrationTimestamp,
+          review_eligibility_time: reviewEligibilityTime,
+          registry_match_status: matchStatus as any,
+          matched_registry_id: matchedRegistryId,
+          middle_name: middleName || null,
+          middle_initial: derivedMi,
+          has_no_middle_name: hasNoMiddleName,
         });
 
       if (insertError) {
@@ -229,6 +286,21 @@ export async function register(formData: FormData) {
         await adminClient.auth.admin.deleteUser(signUpData.user.id);
         return { error: "Registration failed to initialize faculty profile. Please try again." };
       }
+    } else {
+      // Update existing role entry with registry match info
+      await adminClient
+        .from("user_roles")
+        .update({
+          school_id: TRIS_SCHOOL_ID,
+          registration_timestamp: registrationTimestamp,
+          review_eligibility_time: reviewEligibilityTime,
+          registry_match_status: matchStatus as any,
+          matched_registry_id: matchedRegistryId,
+          middle_name: middleName || null,
+          middle_initial: derivedMi,
+          has_no_middle_name: hasNoMiddleName,
+        })
+        .eq("user_id", signUpData.user.id);
     }
   }
 
@@ -239,6 +311,7 @@ export async function register(formData: FormData) {
     outcome: "SUCCESS",
     actorEmail: email,
     actorRole: "teacher",
+    actorSchoolId: TRIS_SCHOOL_ID,
     targetType: "user",
     targetId: signUpData.user.id,
     targetLabel: `${firstName} ${lastName}`.trim() || email,
@@ -246,6 +319,30 @@ export async function register(formData: FormData) {
     details: {
       role: "Teacher",
       account_status: "Pending",
+      school_id: TRIS_SCHOOL_ID,
+    },
+  });
+
+  // Record audit log for registry match evaluation
+  await logAuditEvent({
+    category: "REGISTRATION",
+    action: "REGISTRATION_MATCH_EVALUATED",
+    outcome: "SUCCESS",
+    actorEmail: email,
+    actorRole: "teacher",
+    actorSchoolId: TRIS_SCHOOL_ID,
+    targetType: "user",
+    targetId: signUpData.user.id,
+    targetLabel: `${firstName} ${lastName}`.trim() || email,
+    reason: `Teacher registration evaluated against institutional registry: status ${matchStatus} (${matchReason})`,
+    details: {
+      match_status: matchStatus,
+      matched_registry_id: matchedRegistryId,
+      matched_teacher_name: matchedTeacherName,
+      registration_timestamp: registrationTimestamp,
+      review_eligibility_time: reviewEligibilityTime,
+      middle_initial: derivedMi,
+      has_no_middle_name: hasNoMiddleName,
     },
   });
 

@@ -55,14 +55,12 @@ interface StudentRecord {
   availableDocuments: {
     sf9: { id: string; status: string; storagePath?: string | null } | null;
     sf10: { id: string; status: string; storagePath?: string | null } | null;
-    psa: { id: string; status: string; storagePath?: string | null } | null;
   };
   completeness: {
     status: "COMPLETE" | "INCOMPLETE" | "IDENTITY_REVIEW_REQUIRED";
     label: string;
     hasSf9: boolean;
     hasSf10: boolean;
-    hasPsa: boolean;
   };
   eligibility: {
     gradeLevel: string;
@@ -259,14 +257,14 @@ export default function PrincipalStudentsView({
             </span>
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-700">
               <School className="h-3.5 w-3.5 text-[#174EA6]" />
-              TRIS DepEd ID: 300792
+              TRIS DepEd ID: 500169
             </span>
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-zinc-900">
             Senior High School Student Monitoring & Eligibility
           </h1>
           <p className="text-sm text-zinc-500 mt-0.5">
-            Unified records organizing SF9, SF10, and PSA Birth Certificates with Principal eligibility approval.
+            Unified records organizing SF9 and SF10 with Principal eligibility approval.
           </p>
         </div>
 
@@ -380,9 +378,8 @@ export default function PrincipalStudentsView({
               className="w-full px-2.5 py-1.5 text-xs rounded-md border border-zinc-300 bg-white focus:outline-none focus:ring-1 focus:ring-[#174EA6] focus:border-[#174EA6]"
             >
               <option value="All">All Completeness Statuses</option>
-              <option value="Complete">Complete (SF9, SF10, PSA)</option>
+              <option value="Complete">Complete (SF9, SF10)</option>
               <option value="Incomplete">Incomplete Document Sets</option>
-              <option value="Missing PSA">Missing PSA Birth Certificate</option>
               <option value="Missing SF9">Missing SF9 Report Card</option>
               <option value="Missing SF10">Missing SF10 Permanent Record</option>
               <option value="Identity Review Required">Identity Review Required</option>
@@ -630,7 +627,7 @@ export default function PrincipalStudentsView({
                     Official Student Academic Profile &amp; Eligibility
                   </h3>
                   <p className="text-xs text-zinc-500">
-                    Taysan Resettlement Integrated School (DepEd ID: 300792)
+                    Taysan Resettlement Integrated School (DepEd ID: 500169)
                   </p>
                 </div>
               </div>
@@ -681,7 +678,7 @@ export default function PrincipalStudentsView({
                       <span className="text-xs font-bold uppercase tracking-wider text-zinc-900">
                         Official Monitoring Overview (3 Independent Categories)
                       </span>
-                      <span className="text-[0.65rem] text-zinc-400 font-medium">TRIS School ID: 300792</span>
+                      <span className="text-[0.65rem] text-zinc-400 font-medium">TRIS School ID: 500169</span>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -718,8 +715,8 @@ export default function PrincipalStudentsView({
                           {studentDetails.documentStatus || studentDetails.eligibility?.documentCategory || "Complete"}
                         </p>
                         <p className="text-[0.7rem] text-zinc-500 mt-1">
-                          {studentDetails.completeness?.hasSf9 && studentDetails.completeness?.hasSf10 && studentDetails.completeness?.hasPsa
-                            ? "Complete (SF9, SF10, PSA)"
+                          {studentDetails.completeness?.hasSf9 && studentDetails.completeness?.hasSf10
+                            ? "Complete (SF9, SF10)"
                             : "Incomplete document set"}
                         </p>
                       </div>
@@ -749,7 +746,7 @@ export default function PrincipalStudentsView({
                       <div className="flex-1">
                         <div className="flex items-center justify-between">
                           <h4 className="text-xs font-bold uppercase tracking-wider">
-                            Cross-Document Identity Verification (PSA vs SF9 vs SF10)
+                            Cross-Document Identity Verification (SF9 vs SF10)
                           </h4>
                           <span className={`text-[0.65rem] font-bold px-2 py-0.5 rounded ${
                             studentDetails.identityComparison?.overallStatus === "IDENTITY_REVIEW_REQUIRED"
@@ -790,15 +787,11 @@ export default function PrincipalStudentsView({
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      {["sf9", "sf10", "psa"].map((docKey) => {
-                        const doc = studentDetails.documents?.find((d: any) => 
-                          docKey === "psa" 
-                            ? ["birth_cert", "psa"].includes(d.rawType) 
-                            : d.rawType === docKey
-                        );
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {["sf9", "sf10"].map((docKey) => {
+                        const doc = studentDetails.documents?.find((d: any) => d.rawType === docKey);
 
-                        const docTitle = docKey === "sf9" ? "Old SHS SF9 (Report Card)" : docKey === "sf10" ? "Old SHS SF10 (Permanent Record)" : "PSA Birth Certificate";
+                        const docTitle = docKey === "sf9" ? "Old SHS SF9 (Report Card)" : "Old SHS SF10 (Permanent Record)";
 
                         return (
                           <div key={docKey} className="p-3 rounded-lg border border-zinc-200 bg-zinc-50 flex flex-col justify-between">

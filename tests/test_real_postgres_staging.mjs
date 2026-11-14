@@ -189,7 +189,7 @@ test('Real PostgreSQL Staging Verification', async (t) => {
     assert.ok(colNames.includes('school_id'), 'user_roles has school_id');
 
     // Verify TRIS seeded
-    const tris = await db.query(`SELECT * FROM public.schools WHERE school_id = '300792';`);
+    const tris = await db.query(`SELECT * FROM public.schools WHERE id = 'a0000000-0000-0000-0000-000000000001' OR school_id IN ('500169', '300792');`);
     assert.equal(tris.rows.length, 1);
     assert.equal(tris.rows[0].name, 'Taysan Resettlement Integrated School');
   });

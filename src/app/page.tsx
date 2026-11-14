@@ -195,9 +195,9 @@ export default async function DashboardPage({
     <PageContainer>
       <Header 
         title="Teacher Validation Dashboard" 
-        description={`Welcome back, ${teacherName}. Manage SF9, SF10, and PSA document verifications with automated DepEd grade recalculations.`}
+        description={`Welcome back, ${teacherName}. Manage SF9 and SF10 document verifications with automated DepEd grade recalculations.`}
         roleBadge={{ role: role || "teacher", label: "Faculty Validator" }}
-        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
           <Link href="/upload">
             <Button
@@ -242,7 +242,7 @@ export default async function DashboardPage({
             variant="danger"
           />
         </div>
-        
+
         {/* Activity & Validation Breakdown Charts */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2">

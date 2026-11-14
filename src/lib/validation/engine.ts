@@ -35,6 +35,7 @@ export function validateFields(
     knownSchools: context.knownSchools ?? [],
     allFields: fields,
     ocrConfidence: context.ocrConfidence !== undefined ? context.ocrConfidence : undefined,
+    schoolAliases: context.schoolAliases,
   };
 
   // I-execute ang bawat validation rule laban sa kaukulang field

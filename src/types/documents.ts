@@ -29,6 +29,10 @@ export type GradeRecord = {
   action_taken?: string;
   remark?: string;
   computed_final_grade?: number;
+  raw_calculated_final?: number;
+  official_computed_final?: number;
+  is_auto_computed?: boolean;
+  grade_source?: "ocr" | "auto_computed" | "manual_edit" | "verified";
   has_calculation_discrepancy?: boolean;
   calculation_notes?: string;
   status: "Passed" | "Failed" | "Missing";
@@ -77,6 +81,14 @@ export type ExtractedFields = {
   general_average?: number
   general_average_action_taken?: string
   shs_general_average_printed?: number
+  sem1_raw_general_average?: number
+  sem1_general_average?: number
+  sem1_subject_count?: number
+  sem1_completeness?: "COMPLETE" | "INCOMPLETE" | "EMPTY"
+  sem2_raw_general_average?: number
+  sem2_general_average?: number
+  sem2_subject_count?: number
+  sem2_completeness?: "COMPLETE" | "INCOMPLETE" | "EMPTY"
   attendance?: AttendanceRecord[]
   attendance_months?: string[]
   attendance_totals?: {

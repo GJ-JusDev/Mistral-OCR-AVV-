@@ -123,7 +123,7 @@ const ACADEMIC_SUBJECT_KEYWORDS = [
 export function classifyDocument(
   text: string,
   rawLayout?: any,
-  expectedType?: "sf9" | "sf10" | "birth_cert"
+  expectedType?: "sf9" | "sf10"
 ): DocumentClassificationResult {
   const lower = (text || "").toLowerCase().trim();
   const reasons: string[] = [];
@@ -184,16 +184,16 @@ export function classifyDocument(
     };
   }
 
-  // 4. Distinguish PSA Birth Certificate
+  // 4. Distinguish PSA Birth Certificate (Explicitly rejected in AVV System)
   if (isPsaRelated && psaMatches.length >= 2 && !hasAcademicTable) {
     return {
       detectedType: "birth_cert",
       expectedType,
-      isPlausible: expectedType === "birth_cert",
+      isPlausible: false,
       confidence: 0.9,
-      reasons: ["PSA Certificate of Live Birth signature detected."],
-      warnings: expectedType && expectedType !== "birth_cert" ? [`Expected ${expectedType.toUpperCase()} but received PSA Birth Certificate.`] : [],
-      needsTeacherReview: expectedType !== "birth_cert",
+      reasons: ["PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."],
+      warnings: ["PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."],
+      needsTeacherReview: true,
       hasAcademicGrades: false,
       hasLearnerIdentity: hasLrn || lower.includes("child") || lower.includes("name"),
       hasAttendance: false,
@@ -356,3 +356,6 @@ export function validateSf9CrossSideCompatibility(
 
   return { isCompatible, reasons, warnings };
 }
+
+export const classifyDocumentLayout = classifyDocument;
+

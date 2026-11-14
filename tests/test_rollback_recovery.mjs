@@ -144,7 +144,7 @@ test('Migration 009 Two-Step Application and Rollback Recovery Verification', as
     `);
     assert.equal(studentCols.length, 1, 'students.overall_status must exist');
 
-    const { rows: tris } = await db.query(`SELECT id, school_id, name FROM public.schools WHERE school_id = '300792';`);
+    const { rows: tris } = await db.query(`SELECT id, school_id, name FROM public.schools WHERE id = 'a0000000-0000-0000-0000-000000000001' OR school_id IN ('500169', '300792');`);
     assert.equal(tris.length, 1, 'TRIS school record must be seeded');
     assert.equal(tris[0].name, 'Taysan Resettlement Integrated School');
   });

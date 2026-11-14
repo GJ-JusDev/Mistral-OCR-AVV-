@@ -34,13 +34,9 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
       "Actions must organize and link documents by student_id"
     );
 
-    // Must account for all 3 supported document types
+    // Must account for supported academic document types
     assert.ok(content.includes('"sf9"'), "Must organize SF9 report cards");
     assert.ok(content.includes('"sf10"'), "Must organize SF10 permanent records");
-    assert.ok(
-      content.includes('"psa"') || content.includes('"birth_cert"'),
-      "Must organize PSA birth certificates"
-    );
 
     // Verification of single student unified structure
     assert.ok(content.includes("availableDocuments: {"), "Must structure availableDocuments in unified profile");
@@ -121,7 +117,7 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
     assert.strictEqual(unifiedDiscrepancy.canLink, false);
   });
 
-  test("Requirement 3: Student with SF9 + SF10 but missing PSA displays Incomplete ('Missing PSA Birth Certificate')", () => {
+  test("Requirement 3: Student with SF9 but missing SF10 displays Incomplete ('Missing SF10')", () => {
     const studentGrades = [
       { subject: "General Mathematics", final_grade: 86, status: "Passed" },
       { subject: "Oral Communication", final_grade: 89, status: "Passed" },
@@ -134,22 +130,21 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
       documentCompleteness: {
         isComplete: false,
         hasSf9: true,
-        hasSf10: true,
-        hasPsa: false,
+        hasSf10: false,
       },
     });
 
     // Incomplete document set
-    assert.ok(result.blockingFactors.some(f => f.includes("Missing PSA Birth Certificate")), "Must explicitly cite Missing PSA Birth Certificate");
-    assert.strictEqual(result.canPrincipalApprove, false, "Principal cannot approve student missing PSA");
+    assert.ok(result.blockingFactors.some(f => f.includes("Missing SF10")), "Must explicitly cite Missing SF10");
+    assert.strictEqual(result.canPrincipalApprove, false, "Principal cannot approve student missing required documents");
 
     // Check UI component label rendering
     const viewPath = path.join(rootDir, "src/components/principal/PrincipalStudentsView.tsx");
     const viewContent = fs.readFileSync(viewPath, "utf-8");
-    assert.ok(viewContent.includes("Missing PSA"), "Principal view must display 'Missing PSA' badge");
+    assert.ok(viewContent.includes("Missing SF10"), "Principal view must display 'Missing SF10' option");
   });
 
-  test("Requirement 4: Student with all 3 approved documents displays Complete (green)", () => {
+  test("Requirement 4: Student with both approved documents (SF9 + SF10) displays Complete (green)", () => {
     const studentGrades = [
       { subject: "General Mathematics", final_grade: 85, status: "Passed" },
       { subject: "Oral Communication", final_grade: 88, status: "Passed" },
@@ -164,7 +159,6 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
         isComplete: true,
         hasSf9: true,
         hasSf10: true,
-        hasPsa: true,
         identityStatus: "MATCH",
       },
     });
@@ -194,7 +188,6 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
         isComplete: true,
         hasSf9: true,
         hasSf10: true,
-        hasPsa: true,
       },
     });
 
@@ -223,7 +216,6 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
         isComplete: false,
         hasSf9: true,
         hasSf10: false,
-        hasPsa: false,
       },
     });
 
@@ -327,7 +319,7 @@ describe("AVV System — Student Document Completeness, PSA Comparison & Princip
     const modalContent = fs.readFileSync(modalPath, "utf-8");
 
     // Institution and School ID
-    assert.ok(modalContent.includes("300792"), "Digital record must include DepEd School ID 300792");
+    assert.ok(modalContent.includes("500169"), "Digital record must include DepEd School ID 500169");
     assert.ok(modalContent.includes("TAYSAN RESETTLEMENT INTEGRATED SCHOOL"), "Digital record must display TRIS header");
 
     // Mandatory legal/administrative disclaimer

@@ -425,7 +425,7 @@ export function generateAuditLogsCsv(events: AuditEvent[]): string {
     sanitizeCsvCell(e.outcome),
     sanitizeCsvCell(e.actor_role),
     sanitizeCsvCell(e.actor_email || "N/A"),
-    sanitizeCsvCell(e.actor_school_name || "TRIS (300792)"),
+    sanitizeCsvCell(e.actor_school_name || "TRIS (500169)"),
     sanitizeCsvCell(e.target_type || "N/A"),
     sanitizeCsvCell(e.target_id || "N/A"),
     sanitizeCsvCell(e.target_label || "N/A"),

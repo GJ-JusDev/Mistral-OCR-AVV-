@@ -308,6 +308,16 @@ export async function handleOcrRoute(
     const { image, frontImage, backImage, images, extractFields, gradeLevel, documentSide, documentType, docType } = body || {};
     const effectiveDocType = (documentType || docType || "").toLowerCase().trim();
 
+    if (effectiveDocType === "birth_cert" || effectiveDocType === "psa" || gradeLevel === "PSA") {
+      return Response.json(
+        {
+          error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.",
+          code: "DOCUMENT_TYPE_NOT_SUPPORTED",
+        },
+        { status: 400 }
+      );
+    }
+
     const ALLOWED_OCR_MIME_TYPES = new Set([
       "image/jpeg",
       "image/jpg",
@@ -424,6 +434,11 @@ export async function handleOcrRoute(
             ocr_provider: frontResult.provider || "azure",
             ocr_model: `${frontResult.model}+${backResult.model.replace(/^azure\//, "")}`,
           };
+          if (Array.isArray(unifiedFields.grades) && unifiedFields.grades.length > 0) {
+            const { normalizeGradeRecords, updateExtractedFieldsAverages } = await import("../validation/gradeUtils");
+            unifiedFields.grades = normalizeGradeRecords(unifiedFields.grades, unifiedFields.semester);
+            Object.assign(unifiedFields, updateExtractedFieldsAverages(unifiedFields));
+          }
           if (typeof avgConfidence === "number") {
             unifiedFields.ocr_confidence = avgConfidence;
           }
@@ -440,18 +455,7 @@ export async function handleOcrRoute(
           return Response.json(responseData);
         }
 
-        let imageToExecute = image || effectiveFrontImage || effectiveBackImage;
-        if (effectiveDocType === "birth_cert" && imageToExecute) {
-          try {
-            const { enhancePsaImagePayload } = await import("../image/psaEnhancer");
-            const enhanced = await enhancePsaImagePayload(imageToExecute);
-            if (enhanced?.enhancedDataUrl) {
-              imageToExecute = enhanced.enhancedDataUrl;
-            }
-          } catch (e) {
-            console.warn("[ocr] Server-side PSA enhancement fallback:", e);
-          }
-        }
+        const imageToExecute = image || effectiveFrontImage || effectiveBackImage;
 
         const ocrResult = await orchestrator.execute({
           image: imageToExecute,
@@ -543,6 +547,11 @@ export async function handleOcrRoute(
           ocr_provider: "mistral",
           ocr_model: "mistral-ocr-latest",
         };
+        if (Array.isArray(unifiedFields.grades) && unifiedFields.grades.length > 0) {
+          const { normalizeGradeRecords, updateExtractedFieldsAverages } = await import("../validation/gradeUtils");
+          unifiedFields.grades = normalizeGradeRecords(unifiedFields.grades, unifiedFields.semester);
+          Object.assign(unifiedFields, updateExtractedFieldsAverages(unifiedFields));
+        }
         return Response.json({
           text: combinedText,
           model: "mistral-ocr-latest",

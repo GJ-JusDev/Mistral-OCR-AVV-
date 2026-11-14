@@ -55,7 +55,7 @@ interface StudentDigitalRecord {
     label: string;
     hasSf9: boolean;
     hasSf10: boolean;
-    hasPsa: boolean;
+    hasPsa?: boolean;
   };
   documents: {
     id: string;
@@ -139,7 +139,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
               TAYSAN RESETTLEMENT INTEGRATED SCHOOL
             </h1>
             <p className="text-xs font-medium text-zinc-600 mt-0.5">
-              Taysan, Legazpi City, Albay &bull; DepEd School ID: <span className="font-bold text-zinc-900">300792</span>
+              Taysan, Legazpi City, Albay &bull; DepEd School ID: <span className="font-bold text-zinc-900">500169</span>
             </p>
             <div className="inline-block mt-3 px-3 py-1 bg-zinc-100 border border-zinc-300 rounded text-xs font-bold uppercase tracking-wider">
               Senior High School Digital Academic Record
@@ -183,11 +183,6 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
                   student.completeness.hasSf10 ? "bg-blue-100 text-blue-800 border border-blue-300" : "bg-zinc-200 text-zinc-500"
                 }`}>
                   SF10 Transcript: {student.completeness.hasSf10 ? "Verified" : "Missing"}
-                </span>
-                <span className={`px-2 py-0.5 rounded text-[0.65rem] font-bold ${
-                  student.completeness.hasPsa ? "bg-emerald-100 text-emerald-800 border border-emerald-300" : "bg-amber-100 text-amber-800 border border-amber-300"
-                }`}>
-                  PSA Birth Cert: {student.completeness.hasPsa ? "Verified" : "Missing PSA"}
                 </span>
               </div>
             </div>
@@ -372,7 +367,7 @@ export default function DigitalAcademicRecordModal({ student, onClose }: Props) 
                 SCHOOL PRINCIPAL / SCHOOL HEAD
               </div>
               <p className="text-[0.65rem] text-zinc-500 mt-1">
-                Taysan Resettlement Integrated School &bull; DepEd School ID 300792
+                Taysan Resettlement Integrated School &bull; DepEd School ID 500169
               </p>
               {isApproved && student.approvalRecord?.approvedAt && (
                 <p className="text-[0.65rem] text-emerald-700 font-semibold mt-1">

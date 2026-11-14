@@ -39,4 +39,5 @@ export type ValidationContext = {
   knownSchools: string[]
   allFields: ExtractedFields
   ocrConfidence?: number
+  schoolAliases?: Record<string, string[]>
 }

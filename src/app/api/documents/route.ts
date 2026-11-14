@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { validateFields } from '@/lib/validation/engine';
 import { evaluateStudentIdentity, verifyStudentCollision } from '@/lib/validation/studentMatcher';
-import { normalizeGradeRecords } from '@/lib/validation/gradeUtils';
+import { normalizeGradeRecords, updateExtractedFieldsAverages } from '@/lib/validation/gradeUtils';
+import { matchSchool } from '@/lib/validation/schoolMatcher';
 import { logAuditEvent } from '@/lib/audit/auditLogger';
 
 export async function GET(request: NextRequest) {
@@ -36,6 +37,8 @@ export async function GET(request: NextRequest) {
 
     if (status) {
       query = query.eq('status', status);
+    } else {
+      query = query.neq('status', 'archived');
     }
 
     const { data, error } = await query;
@@ -73,12 +76,18 @@ export async function POST(request: NextRequest) {
 
     const uploadedBy = user.id;
 
-    // 2. Enforce active document_type: strictly 'sf9' | 'sf10' | 'birth_cert'
+    // 2. Enforce active document_type: strictly 'sf9' | 'sf10'
     let documentType = String(body.document_type || "sf9").toLowerCase().trim();
-    const validDocTypes = ['sf9', 'sf10', 'birth_cert'];
+    if (documentType === "birth_cert" || documentType === "psa") {
+      return NextResponse.json({
+        error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.",
+        code: "DOCUMENT_TYPE_NOT_SUPPORTED",
+      }, { status: 400 });
+    }
+    const validDocTypes = ['sf9', 'sf10'];
     if (!validDocTypes.includes(documentType)) {
       return NextResponse.json({
-        error: `Unsupported document type: '${documentType}'. The active AVV scope supports only SF9, SF10, and PSA Certificate of Live Birth (birth_cert).`,
+        error: `Unsupported document type: '${documentType}'. The active AVV scope supports only SF9 and SF10.`,
       }, { status: 400 });
     }
 
@@ -94,11 +103,7 @@ export async function POST(request: NextRequest) {
     // Documents uploaded via OCR staging do NOT create records in the 'students' table.
     let studentId = body.student_id || null;
     const extractedFields = body.extracted_fields ? { ...body.extracted_fields } : {};
-    if (documentType === 'birth_cert') {
-      delete extractedFields.academic_level;
-      delete extractedFields.selected_grade_level;
-      delete extractedFields.grading_period_scheme;
-    } else if (documentType === 'sf9' || documentType === 'sf10') {
+    if (documentType === 'sf9' || documentType === 'sf10') {
       const candidateGrade = String(
         body.selected_grade_level ||
         body.grade_level ||
@@ -130,8 +135,8 @@ export async function POST(request: NextRequest) {
     }
     const identityEval = evaluateStudentIdentity(extractedFields);
 
-    if (!studentId && identityEval.isValidLrn && identityEval.normalizedLrn) {
-      // Find existing student by valid 12-digit LRN
+    if (identityEval.isValidLrn && identityEval.normalizedLrn) {
+      // Find existing student by valid 12-digit LRN within authorized scope
       const { data: existingStudent } = await supabase
         .from('students')
         .select('id, first_name, last_name')
@@ -142,6 +147,8 @@ export async function POST(request: NextRequest) {
         const collisionCheck = verifyStudentCollision(identityEval.lastName, existingStudent);
         if (!collisionCheck.hasConflict) {
           studentId = existingStudent.id;
+          extractedFields.existing_student_id = existingStudent.id;
+          extractedFields.existing_student_name = `${existingStudent.last_name}, ${existingStudent.first_name}`;
         } else {
           // Do not link across conflicting names; flag for reviewer
           extractedFields.flags = [...(extractedFields.flags || []), collisionCheck.reason!];
@@ -164,6 +171,22 @@ export async function POST(request: NextRequest) {
           status = 'needs_review';
         }
       }
+    } else {
+      // Missing, unreadable, or invalid LRN: Flag for human review.
+      // Strict DepEd Policy: DO NOT invent an LRN and NEVER auto-merge by student name alone.
+      extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
+      if (!identityEval.normalizedLrn) {
+        if (!extractedFields.flags.includes("missing_lrn")) {
+          extractedFields.flags.push("missing_lrn");
+        }
+      } else {
+        if (!extractedFields.flags.includes("invalid_lrn")) {
+          extractedFields.flags.push("invalid_lrn");
+        }
+      }
+      if (status === 'submitted' || status === 'validated') {
+        status = 'needs_review';
+      }
     }
 
     // 5. Server-enforced institutional identity resolution (TRIS)
@@ -171,12 +194,24 @@ export async function POST(request: NextRequest) {
     let trustedSchoolUuid: string | null = roleRow?.school_id || null;
 
     // 5b. Authoritative institutional record lookup for TRIS (Taysan Resettlement Integrated School)
-    // Single institution in scope: DepEd School ID '300792', UUID 'a0000000-0000-0000-0000-000000000001'
-    const { data: authoritativeSchool } = await supabase
+    // Single institution in scope: DepEd School ID '500169', UUID 'a0000000-0000-0000-0000-000000000001'
+    let { data: authoritativeSchool } = await supabase
       .from('schools')
       .select('id, school_id, name')
-      .eq('school_id', '300792')
+      .eq('school_id', '500169')
       .maybeSingle();
+
+    // Fall back to institutional UUID or legacy 300792 if database migration is pending
+    if (!authoritativeSchool) {
+      const { data: legacySchool } = await supabase
+        .from('schools')
+        .select('id, school_id, name')
+        .or('id.eq.a0000000-0000-0000-0000-000000000001,school_id.eq.300792')
+        .maybeSingle();
+      if (legacySchool) {
+        authoritativeSchool = legacySchool;
+      }
+    }
 
     // Fall back to verified TRIS record when user role school_id is null
     if (!trustedSchoolUuid && authoritativeSchool?.id) {
@@ -207,31 +242,47 @@ export async function POST(request: NextRequest) {
 
     // 5d. Store institutional configuration in extracted_fields
     if (authoritativeSchool) {
-      if (!extractedFields.school_id || extractedFields.school_id.trim() === "") {
-        extractedFields.school_id = authoritativeSchool.school_id;
-        extractedFields.school_id_source = "school_configuration";
-        extractedFields.trusted_school_verified = true;
-      } else if (extractedFields.school_id === authoritativeSchool.school_id) {
-        extractedFields.school_id_source = extractedFields.school_id_source || "school_configuration";
-        extractedFields.trusted_school_verified = true;
+      const isMatchingAuthoritative =
+        !extractedFields.school_name ||
+        extractedFields.school_name.trim() === "" ||
+        matchSchool(extractedFields.school_name, [authoritativeSchool.name]).matched;
+
+      if (isMatchingAuthoritative) {
+        if (!extractedFields.school_id || extractedFields.school_id.trim() === "") {
+          extractedFields.school_id = authoritativeSchool.school_id;
+          extractedFields.school_id_source = "school_configuration";
+          extractedFields.trusted_school_verified = true;
+        } else if (extractedFields.school_id === authoritativeSchool.school_id) {
+          extractedFields.school_id_source = extractedFields.school_id_source || "school_configuration";
+          extractedFields.trusted_school_verified = true;
+        } else {
+          // Document has a conflicting OCR-extracted School ID
+          extractedFields.ocr_extracted_school_id = extractedFields.school_id;
+          extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
+          if (!extractedFields.flags.includes("school_id_discrepancy")) {
+            extractedFields.flags.push("school_id_discrepancy");
+          }
+        }
+
+        if (!extractedFields.school_name || extractedFields.school_name.trim() === "") {
+          extractedFields.school_name = authoritativeSchool.name;
+        }
+        extractedFields.school_uuid = authoritativeSchool.id;
       } else {
-        // Document has a conflicting OCR-extracted School ID
-        extractedFields.ocr_extracted_school_id = extractedFields.school_id;
+        // Document belongs to an external or unrecognized school (e.g. transferee student SF9)
+        // Strictly avoid silently associating this document with authoritativeSchool!
+        extractedFields.trusted_school_verified = false;
         extractedFields.flags = Array.isArray(extractedFields.flags) ? extractedFields.flags : [];
-        if (!extractedFields.flags.includes("school_id_discrepancy")) {
-          extractedFields.flags.push("school_id_discrepancy");
+        if (!extractedFields.flags.includes("external_school_document")) {
+          extractedFields.flags.push("external_school_document");
         }
       }
-
-      if (!extractedFields.school_name || extractedFields.school_name.trim() === "") {
-        extractedFields.school_name = authoritativeSchool.name;
-      }
-      extractedFields.school_uuid = authoritativeSchool.id;
     }
 
     // Normalize grades using semester-aware rules to avoid stale status
     if (Array.isArray(extractedFields.grades) && extractedFields.grades.length > 0) {
       extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
+      Object.assign(extractedFields, updateExtractedFieldsAverages(extractedFields));
     }
 
     // Prepare document payload
@@ -252,24 +303,67 @@ export async function POST(request: NextRequest) {
     let docData: any;
     let docError: any;
 
-    // Idempotent retry: if document_id is provided, update existing document instead of duplicating
+    // Idempotent upsert: if document_id is provided, check if document already exists
     if (body.document_id) {
-      const updateRes = await supabase
+      const { data: existingDoc } = await supabase
         .from('documents')
-        .update(documentPayload)
+        .select('id')
         .eq('id', body.document_id)
-        .select()
-        .single();
-      docData = updateRes.data;
-      docError = updateRes.error;
+        .maybeSingle();
+
+      if (existingDoc?.id) {
+        const updateRes = await supabase
+          .from('documents')
+          .update(documentPayload)
+          .eq('id', body.document_id)
+          .select()
+          .single();
+        docData = updateRes.data;
+        docError = updateRes.error;
+      } else {
+        const insertRes = await supabase
+          .from('documents')
+          .insert({ ...documentPayload, id: body.document_id })
+          .select()
+          .single();
+        docData = insertRes.data;
+        docError = insertRes.error;
+      }
     } else {
-      const insertRes = await supabase
-        .from('documents')
-        .insert(documentPayload)
-        .select()
-        .single();
-      docData = insertRes.data;
-      docError = insertRes.error;
+      // Deduplication fallback: check for identical recent submission by same teacher
+      if (documentPayload.image_url && documentPayload.image_url !== "uploaded-document") {
+        const { data: recentDup } = await supabase
+          .from('documents')
+          .select('id')
+          .eq('uploaded_by', uploadedBy)
+          .eq('document_type', documentType)
+          .eq('image_url', documentPayload.image_url)
+          .in('status', ['submitted', 'extracted', 'validated', 'needs_review'])
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (recentDup?.id) {
+          const updateRes = await supabase
+            .from('documents')
+            .update(documentPayload)
+            .eq('id', recentDup.id)
+            .select()
+            .single();
+          docData = updateRes.data;
+          docError = updateRes.error;
+        }
+      }
+
+      if (!docData) {
+        const insertRes = await supabase
+          .from('documents')
+          .insert(documentPayload)
+          .select()
+          .single();
+        docData = insertRes.data;
+        docError = insertRes.error;
+      }
     }
 
     if (docError) {
@@ -301,7 +395,8 @@ export async function POST(request: NextRequest) {
         }
 
         // Determine updated status from validation report
-        let newStatus = 'validated';
+        // If the document is staged as needs_review, preserve needs_review for mandatory human verification
+        let newStatus = status === 'needs_review' ? 'needs_review' : 'validated';
         if (report.status === 'invalid') {
           newStatus = 'rejected';
         } else if (report.status === 'needs_review') {

@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { normalizeLrn, isValidLrn } from '@/lib/validation/patterns';
+import { compareScannedGradesWithExisting } from '@/lib/validation/gradeComparator';
+import {
+  normalizeGradeRecords,
+  recalculateSubjectGradeStatus,
+  updateExtractedFieldsAverages,
+} from '@/lib/validation/gradeUtils';
 
 export async function GET(
   request: NextRequest,
@@ -20,8 +27,8 @@ export async function GET(
       .eq('id', id)
       .single();
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 404 });
+    if (error || !data) {
+      return NextResponse.json({ error: error?.message || "Document not found" }, { status: 404 });
     }
 
     const refreshSignedUrl = async (urlOrPath: string | undefined | null): Promise<string | undefined> => {
@@ -60,9 +67,106 @@ export async function GET(
           ef[key] = await refreshSignedUrl(ef[key]);
         }
       }
+      if (Array.isArray(ef.grades) && ef.grades.length > 0) {
+        ef.grades = normalizeGradeRecords(ef.grades, ef.semester || data.semester);
+        Object.assign(ef, updateExtractedFieldsAverages(ef));
+      }
     }
 
-    return NextResponse.json({ document: data, ...data });
+    // Resolve student identity and active academic grades for controlled deduplication and review
+    let matchedStudent: any = null;
+    let existingGrades: any[] = [];
+    let gradeChangeHistory: any[] = [];
+    let gradeComparison: any = null;
+
+    let targetStudentId = data?.student_id;
+    const efData = (data?.extracted_fields || {}) as any;
+    const rawLrn = efData.lrn || efData.learner_reference_number;
+    const cleanLrn = normalizeLrn(rawLrn ? String(rawLrn) : "");
+
+    if (!targetStudentId && isValidLrn(cleanLrn)) {
+      const { data: stRow } = await supabase
+        .from('students')
+        .select('*')
+        .eq('lrn', cleanLrn)
+        .maybeSingle();
+      if (stRow?.id) {
+        targetStudentId = stRow.id;
+        matchedStudent = stRow;
+      }
+    } else if (targetStudentId) {
+      const { data: stRow } = await supabase
+        .from('students')
+        .select('*')
+        .eq('id', targetStudentId)
+        .maybeSingle();
+      if (stRow) {
+        matchedStudent = stRow;
+      }
+    }
+
+    if (targetStudentId) {
+      const { data: sgRows } = await supabase
+        .from('subject_grades')
+        .select('*')
+        .eq('student_id', targetStudentId);
+      existingGrades = (sgRows || []).map((g: any) => {
+        const rec = {
+          subject: g.subject,
+          semester: g.semester,
+          q1: g.q1,
+          q2: g.q2,
+          q3: g.q3,
+          q4: g.q4,
+          final: g.final_grade,
+          sem1_final_grade: g.semester?.includes("1st") ? g.final_grade : undefined,
+          sem2_final_grade: g.semester?.includes("2nd") ? g.final_grade : undefined,
+          status: g.status,
+        };
+        const norm = recalculateSubjectGradeStatus(rec as any, g.semester);
+        return {
+          ...g,
+          final_grade: norm.final ?? g.final_grade,
+          status: norm.status ?? g.status,
+          raw_calculated_final: norm.raw_calculated_final,
+          computed_final_grade: norm.computed_final_grade,
+        };
+      });
+
+      try {
+        const { data: gchRows } = await (supabase as any)
+          .from('grade_change_history')
+          .select('*')
+          .eq('student_id', targetStudentId)
+          .order('created_at', { ascending: false });
+        gradeChangeHistory = gchRows || [];
+      } catch {
+        // Migration 015 table might not yet be applied
+      }
+
+      if (Array.isArray(efData.grades)) {
+        gradeComparison = compareScannedGradesWithExisting({
+          existingGrades,
+          scannedGrades: efData.grades,
+          schoolYear: data?.school_year || efData.school_year,
+          semester: data?.semester || efData.semester,
+          studentId: targetStudentId,
+        });
+      }
+    }
+
+    const responsePayload = {
+      ...data,
+      matched_student: matchedStudent,
+      existing_grades: existingGrades,
+      grade_change_history: gradeChangeHistory,
+      grade_comparison: gradeComparison,
+    };
+
+    return NextResponse.json({
+      document: responsePayload,
+      ...responsePayload,
+    });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }

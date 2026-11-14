@@ -3,9 +3,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 import { evaluateStudentIdentity, verifyStudentCollision } from "@/lib/validation/studentMatcher";
-import { isValidSchoolYear } from "@/lib/validation/patterns";
+import { isValidSchoolYear, normalizeLrn, isValidLrn } from "@/lib/validation/patterns";
 import { validateFields } from "@/lib/validation/engine";
-import { normalizeGradeRecords } from "@/lib/validation/gradeUtils";
+import { normalizeGradeRecords, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
+import { compareScannedGradesWithExisting } from "@/lib/validation/gradeComparator";
 import { evaluateAttendanceRecords } from "@/lib/attendance/attendanceEvaluator";
 import type { ExtractedFields } from "@/types/documents";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
@@ -125,11 +126,12 @@ export async function submitDocumentReview(
         };
       }
 
-      // 3.3 Verify at i-link ang student record
-      if (!studentId && identityEval.normalizedLrn) {
+      // 3.3 Verify at i-link ang student record gamit ang normalized 12-digit LRN
+      if (identityEval.normalizedLrn) {
+        // Query database by normalized LRN to ensure single verified student per LRN
         const { data: existingStudent } = await supabase
           .from("students")
-          .select("id, first_name, last_name")
+          .select("id, first_name, last_name, lrn")
           .eq("lrn", identityEval.normalizedLrn)
           .maybeSingle();
 
@@ -162,10 +164,30 @@ export async function submitDocumentReview(
             .select("id")
             .single();
 
-          if (createError || !newStudent) {
-            return { error: `Failed to create verified student record: ${createError?.message}` };
+          if (createError) {
+            // Concurrent approval race condition protection:
+            // If another worker just inserted this student, fetch and reuse their student ID
+            if (
+              createError.code === "23505" ||
+              createError.message?.toLowerCase().includes("unique") ||
+              createError.message?.toLowerCase().includes("duplicate")
+            ) {
+              const { data: retryStudent } = await supabase
+                .from("students")
+                .select("id, first_name, last_name")
+                .eq("lrn", identityEval.normalizedLrn)
+                .maybeSingle();
+              if (retryStudent?.id) {
+                studentId = retryStudent.id;
+              } else {
+                return { error: `Failed to create verified student record: ${createError?.message}` };
+              }
+            } else {
+              return { error: `Failed to create verified student record: ${createError?.message}` };
+            }
+          } else if (newStudent?.id) {
+            studentId = newStudent.id;
           }
-          studentId = newStudent.id;
         }
       }
 
@@ -174,6 +196,71 @@ export async function submitDocumentReview(
           .from("documents")
           .update({ student_id: studentId })
           .eq("id", documentId);
+      }
+
+      // 3.4 Grade Comparison & Controlled Update Tracking (Phase 4)
+      if (studentId && Array.isArray(extractedFields.grades) && extractedFields.grades.length > 0) {
+        try {
+          const { data: existingSubjectGrades } = await supabase
+            .from("subject_grades")
+            .select("*")
+            .eq("student_id", studentId);
+
+          if (existingSubjectGrades && existingSubjectGrades.length > 0) {
+            const comparison = compareScannedGradesWithExisting({
+              existingGrades: existingSubjectGrades,
+              scannedGrades: extractedFields.grades,
+              schoolYear: schoolYear,
+              semester: extractedFields.semester || "1st Semester",
+              studentId,
+            });
+
+            // For each proposed update, insert audit log in grade_change_history & update active row
+            for (const item of comparison.subjects) {
+              if (item.status === "PROPOSED_UPDATE" && item.existingId) {
+                for (const diff of item.quarterDiffs) {
+                  if (diff.hasChange && diff.isOverwritable && diff.scannedValue !== null) {
+                    await (supabase as any).from("grade_change_history").insert({
+                      student_id: studentId,
+                      subject_grade_id: item.existingId,
+                      document_id: documentId,
+                      school_year: item.schoolYear,
+                      semester: item.semester,
+                      grade_level: extractedFields.grade_level || "Grade 11",
+                      subject: item.subject,
+                      quarter: diff.quarter,
+                      previous_value: diff.existingValue,
+                      new_value: diff.scannedValue,
+                      reason: comment || "Approved grade update via document review",
+                      changed_by: user.id,
+                    });
+                  }
+                }
+
+                // Update the active subject_grades record directly
+                const updatePayloadGrade: any = {
+                  q1: item.scannedGrades.q1 ?? item.existingGrades?.q1 ?? null,
+                  q2: item.scannedGrades.q2 ?? item.existingGrades?.q2 ?? null,
+                  q3: item.scannedGrades.q3 ?? item.existingGrades?.q3 ?? null,
+                  q4: item.scannedGrades.q4 ?? item.existingGrades?.q4 ?? null,
+                  final_grade: item.proposedFinalGrade ?? item.existingGrades?.final ?? null,
+                  status: item.proposedStatus ?? "Needs Verification",
+                  needs_verification: item.proposedStatus === "Needs Verification",
+                  document_id: documentId,
+                  updated_at: new Date().toISOString(),
+                };
+                await supabase
+                  .from("subject_grades")
+                  .update(updatePayloadGrade)
+                  .eq("id", item.existingId);
+              }
+            }
+
+            extractedFields.grade_comparison = comparison;
+          }
+        } catch (gchErr) {
+          console.warn("Notice: Grade change history recording deferred:", gchErr);
+        }
       }
     }
 
@@ -190,6 +277,7 @@ export async function submitDocumentReview(
       let needsExtractedUpdate = false;
       if (Array.isArray(extractedFields.grades)) {
         extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
+        Object.assign(extractedFields, updateExtractedFieldsAverages(extractedFields));
         needsExtractedUpdate = true;
       }
       if (Array.isArray(extractedFields.attendance) && extractedFields.attendance.length > 0) {
@@ -446,6 +534,7 @@ export async function saveDocumentCorrections(
     // Normalize grades using semester-aware rules to avoid stale status
     if (Array.isArray(mergedFields.grades)) {
       mergedFields.grades = normalizeGradeRecords(mergedFields.grades);
+      Object.assign(mergedFields, updateExtractedFieldsAverages(mergedFields));
     }
 
     // Evaluate attendance whenever attendance records are provided or modified
@@ -465,12 +554,33 @@ export async function saveDocumentCorrections(
       ? doc.status
       : validationReport.status === "valid" ? "validated" : "needs_review";
 
+    // Re-link student_id if reviewer corrected the LRN or learner name
+    let targetStudentId = doc.student_id;
+    const identityEval = evaluateStudentIdentity(mergedFields);
+    if (identityEval.isValidLrn && identityEval.normalizedLrn) {
+      const { data: matchedStudent } = await supabase
+        .from("students")
+        .select("id, first_name, last_name")
+        .eq("lrn", identityEval.normalizedLrn)
+        .maybeSingle();
+
+      if (matchedStudent?.id) {
+        const collision = verifyStudentCollision(identityEval.lastName, matchedStudent);
+        if (!collision.hasConflict) {
+          targetStudentId = matchedStudent.id;
+          mergedFields.existing_student_id = matchedStudent.id;
+          mergedFields.existing_student_name = `${matchedStudent.last_name}, ${matchedStudent.first_name}`;
+        }
+      }
+    }
+
     const operationId = crypto.randomUUID();
 
     // Update document record
     const { error: updateError } = await supabase
       .from("documents")
       .update({
+        student_id: targetStudentId,
         extracted_fields: mergedFields,
         status: newStatus,
         reviewed_by: user.id,

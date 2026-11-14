@@ -1,44 +1,19 @@
-/**
- * Validation rules for school document fields.
- *
- * Each rule targets a specific extracted field and returns whether it passes.
- * Rules are run by the validation engine (engine.ts) against ExtractedFields.
- */
-
-import type { ExtractedFields } from "@/types/documents";
+import type { ValidationRule, ValidationContext } from "@/types/validation";
 import {
-  isValidLrn,
   NAME_PATTERN,
-  SHS_GRADE_PATTERN,
-  GRADE_PATTERN,
+  SCHOOL_ID_PATTERN,
   looksLikeDate,
+  isValidLrn,
   normalizeSex,
   isValidSchoolYear,
-  SCHOOL_ID_PATTERN,
 } from "./patterns";
+import { matchSchool } from "./schoolMatcher";
 
-import type { ValidationContext, ValidationRule } from "@/types/validation";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function isPresent(value: string): boolean {
-  return Boolean(value) && value !== "Not found" && value.trim().length > 0;
-}
-
-function normalize(value: string): string {
-  return value.toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function isPsaBirthCertificate(ctx?: ValidationContext): boolean {
-  const docType = String(ctx?.allFields?.document_type || "").toLowerCase().trim();
-  return (
-    docType === "birth_cert" ||
-    docType === "psa" ||
-    docType === "psa_birth_certificate" ||
-    Boolean((ctx?.allFields as any)?.registry_number)
-  );
+function isPresent(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,6 +21,18 @@ function isPsaBirthCertificate(ctx?: ValidationContext): boolean {
 // ---------------------------------------------------------------------------
 
 export const VALIDATION_RULES: ValidationRule[] = [
+  // ── Document Type Support ─────────────────────────────────────────────
+  {
+    name: "supported_document_type",
+    field: "document_type",
+    message: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.",
+    severity: "error",
+    check: (_v, ctx) => {
+      const docType = String(ctx?.allFields?.document_type || "").toLowerCase().trim();
+      return docType !== "birth_cert" && docType !== "psa" && docType !== "psa_birth_certificate";
+    },
+  },
+
   // ── Name ──────────────────────────────────────────────────────────────
   {
     name: "name_present",
@@ -68,14 +55,14 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "lrn",
     message: "Learner Reference Number (LRN) is required.",
     severity: "error",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
   {
     name: "lrn_format",
     field: "lrn",
     message: "LRN must be exactly 12 digits.",
     severity: "error",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || isValidLrn(v),
+    check: (v) => !isPresent(v) || isValidLrn(v),
   },
 
   // ── Grade ─────────────────────────────────────────────────────────────
@@ -84,7 +71,7 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "grade_level",
     message: "Grade level cannot be blank.",
     severity: "error",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
   {
     name: "grade_valid",
@@ -92,16 +79,23 @@ export const VALIDATION_RULES: ValidationRule[] = [
     message: "Grade level format is not recognized or outside Senior High School scope (expected Grade 11 or Grade 12).",
     severity: "warning",
     check: (v, ctx) => {
-      if (isPsaBirthCertificate(ctx)) return true;
       if (!isPresent(v)) return true;
       const isShs =
         ctx?.allFields?.academic_level === "Senior High School" ||
         ctx?.allFields?.selected_grade_level === "Grade 11" ||
         ctx?.allFields?.selected_grade_level === "Grade 12";
-      if (isShs) {
-        return SHS_GRADE_PATTERN.test(v.trim());
-      }
-      return GRADE_PATTERN.test(v.trim());
+      if (!isShs) return true;
+      const clean = String(v).replace(/\s+/g, " ").trim().toLowerCase();
+      return (
+        clean.includes("11") ||
+        clean.includes("12") ||
+        clean.includes("grade 11") ||
+        clean.includes("grade 12") ||
+        clean.includes("eleven") ||
+        clean.includes("twelve") ||
+        clean.includes("senior high") ||
+        clean.includes("shs")
+      );
     },
   },
 
@@ -124,7 +118,7 @@ export const VALIDATION_RULES: ValidationRule[] = [
         (ctx.allFields as any).school_name_unextracted === true;
       return isUnextracted ? "warning" : "error";
     },
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
   {
     name: "school_recognized",
@@ -132,14 +126,11 @@ export const VALIDATION_RULES: ValidationRule[] = [
     message: "School is not in the recognized list.",
     severity: "warning",
     check: (v, ctx) => {
-      if (isPsaBirthCertificate(ctx)) return true;
       // If no known schools loaded, skip this check (pass by default).
-      if (ctx.knownSchools.length === 0) return true;
+      if (!ctx.knownSchools || ctx.knownSchools.length === 0) return true;
       if (!isPresent(v)) return true;
-      const norm = normalize(v);
-      const normWithoutDeped = normalize(v.replace(/^deped\s+/i, ""));
-      const normalizedKnown = ctx.knownSchools.map((s) => normalize(s));
-      return normalizedKnown.includes(norm) || normalizedKnown.includes(normWithoutDeped);
+      const match = matchSchool(v, ctx.knownSchools, (ctx as any).schoolAliases);
+      return match.matched;
     },
   },
 
@@ -174,14 +165,14 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "school_year",
     message: "School year is missing. Required for DepEd academic progression records.",
     severity: "warning",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
   {
     name: "school_year_valid",
     field: "school_year",
     message: "School year must be in consecutive YYYY-YYYY format (e.g. 2023-2024).",
     severity: "warning",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || isValidSchoolYear(v),
+    check: (v) => !isPresent(v) || isValidSchoolYear(v),
   },
 
   // ── School ID ─────────────────────────────────────────────────────────
@@ -203,15 +194,14 @@ export const VALIDATION_RULES: ValidationRule[] = [
         (ctx.allFields as any).school_id_missing === true;
       return isExplicitlyMissing ? "error" : "warning";
     },
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
   {
     name: "school_id_match_institution",
     field: "school_id",
-    message: "Document school identity conflicts with authorized institutional configuration (TRIS — 300792).",
+    message: "Document school identity conflicts with authorized institutional configuration (TRIS — 500169).",
     severity: "error",
     check: (v, ctx) => {
-      if (isPsaBirthCertificate(ctx)) return true;
       const flags = ctx?.allFields?.flags;
       if (Array.isArray(flags) && flags.includes("school_id_discrepancy")) {
         return false;
@@ -231,7 +221,7 @@ export const VALIDATION_RULES: ValidationRule[] = [
         ? "DepEd School ID is a valid 6-digit number."
         : "DepEd School ID must be a 6-digit number.",
     severity: "error",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || !isPresent(v) || SCHOOL_ID_PATTERN.test(v.trim()),
+    check: (v) => !isPresent(v) || SCHOOL_ID_PATTERN.test(v.trim()),
   },
 
   // ── Class Adviser ─────────────────────────────────────────────────────
@@ -248,7 +238,7 @@ export const VALIDATION_RULES: ValidationRule[] = [
       return "Class adviser name should be recorded.";
     },
     severity: "warning",
-    check: (v, ctx) => isPsaBirthCertificate(ctx) || isPresent(v),
+    check: (v) => isPresent(v),
   },
 
   // ── OCR confidence ────────────────────────────────────────────────────
@@ -259,4 +249,52 @@ export const VALIDATION_RULES: ValidationRule[] = [
     severity: "warning",
     check: (_v, ctx) => typeof ctx.ocrConfidence === "number" && ctx.ocrConfidence >= 0.6,
   },
+
+  // ── Grade Calculation Discrepancy ─────────────────────────────────────
+  {
+    name: "grade_calculation_discrepancy",
+    field: "grades",
+    message: (_v, ctx) => {
+      const grades = ctx.allFields.grades || [];
+      const discrepant = grades.filter((g) => g.has_calculation_discrepancy);
+      if (discrepant.length > 0) {
+        const details = discrepant
+          .slice(0, 3)
+          .map((g) => `${g.subject} (Printed: ${g.final}, Computed: ${g.computed_final_grade})`)
+          .join("; ");
+        return `Grade calculation discrepancy detected: ${details}${discrepant.length > 3 ? ` (+${discrepant.length - 3} more)` : ""}. Verification required.`;
+      }
+      return "Grade calculation discrepancy detected: computed quarter average differs from printed final grade.";
+    },
+    severity: "warning",
+    check: (_v, ctx) => {
+      const grades = ctx.allFields.grades;
+      if (!Array.isArray(grades) || grades.length === 0) return true;
+      return !grades.some((g) => g.has_calculation_discrepancy === true);
+    },
+  },
 ];
+
+export interface ValidationRuleOutput {
+  rule_id: string;
+  status: "PASS" | "FAIL";
+  severity: string;
+  message: string;
+}
+
+export function validateDocument(fields: any): ValidationRuleOutput[] {
+  return VALIDATION_RULES.map((rule) => {
+    const value = fields?.[rule.field] ?? "";
+    const ctx = { allFields: fields || {}, knownSchools: [] };
+    const passed = rule.check(value, ctx);
+    const message = typeof rule.message === "function" ? rule.message(value, ctx) : rule.message;
+    const severity = typeof rule.severity === "function" ? rule.severity(value, ctx) : rule.severity;
+    return {
+      rule_id: rule.name,
+      status: passed ? "PASS" : "FAIL",
+      severity: String(severity).toUpperCase(),
+      message,
+    };
+  });
+}
+

@@ -127,6 +127,9 @@ export interface Database {
           storage_path: string | null
           reviewed_by: string | null
           last_operation_id: string | null
+          archived_at: string | null
+          archived_by: string | null
+          deletion_request_id: string | null
           created_at: string | null
           updated_at: string | null
         }
@@ -157,6 +160,9 @@ export interface Database {
           storage_path?: string | null
           reviewed_by?: string | null
           last_operation_id?: string | null
+          archived_at?: string | null
+          archived_by?: string | null
+          deletion_request_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -187,6 +193,9 @@ export interface Database {
           storage_path?: string | null
           reviewed_by?: string | null
           last_operation_id?: string | null
+          archived_at?: string | null
+          archived_by?: string | null
+          deletion_request_id?: string | null
           created_at?: string | null
           updated_at?: string | null
         }
@@ -395,6 +404,20 @@ export interface Database {
           school_id: string | null
           updated_by: string | null
           last_operation_id: string | null
+          registration_timestamp: string | null
+          review_eligibility_time: string | null
+          registry_match_status: string | null
+          matched_registry_id: string | null
+          approval_method: string | null
+          approval_reason: string | null
+          decline_reason: string | null
+          approved_by: string | null
+          approved_at: string | null
+          declined_by: string | null
+          declined_at: string | null
+          middle_name: string | null
+          middle_initial: string | null
+          has_no_middle_name: boolean | null
           created_at: string | null
         }
         Insert: {
@@ -405,6 +428,20 @@ export interface Database {
           school_id?: string | null
           updated_by?: string | null
           last_operation_id?: string | null
+          registration_timestamp?: string | null
+          review_eligibility_time?: string | null
+          registry_match_status?: string | null
+          matched_registry_id?: string | null
+          approval_method?: string | null
+          approval_reason?: string | null
+          decline_reason?: string | null
+          approved_by?: string | null
+          approved_at?: string | null
+          declined_by?: string | null
+          declined_at?: string | null
+          middle_name?: string | null
+          middle_initial?: string | null
+          has_no_middle_name?: boolean | null
           created_at?: string | null
         }
         Update: {
@@ -415,7 +452,132 @@ export interface Database {
           school_id?: string | null
           updated_by?: string | null
           last_operation_id?: string | null
+          registration_timestamp?: string | null
+          review_eligibility_time?: string | null
+          registry_match_status?: string | null
+          matched_registry_id?: string | null
+          approval_method?: string | null
+          approval_reason?: string | null
+          decline_reason?: string | null
+          approved_by?: string | null
+          approved_at?: string | null
+          declined_by?: string | null
+          declined_at?: string | null
+          middle_name?: string | null
+          middle_initial?: string | null
+          has_no_middle_name?: boolean | null
           created_at?: string | null
+        }
+        Relationships: any[]
+      }
+      school_teacher_registry: {
+        Row: {
+          id: string
+          school_id: string
+          first_name: string
+          middle_initial: string | null
+          last_name: string
+          full_name_original: string | null
+          verified_email: string | null
+          verification_status: "unverified" | "verified" | "inactive"
+          is_active: boolean
+          linked_user_id: string | null
+          verified_by: string | null
+          verified_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          school_id: string
+          first_name: string
+          middle_initial?: string | null
+          last_name: string
+          full_name_original?: string | null
+          verified_email?: string | null
+          verification_status?: "unverified" | "verified" | "inactive"
+          is_active?: boolean
+          linked_user_id?: string | null
+          verified_by?: string | null
+          verified_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          school_id?: string
+          first_name?: string
+          middle_initial?: string | null
+          last_name?: string
+          full_name_original?: string | null
+          verified_email?: string | null
+          verification_status?: "unverified" | "verified" | "inactive"
+          is_active?: boolean
+          linked_user_id?: string | null
+          verified_by?: string | null
+          verified_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      review_deletion_requests: {
+        Row: {
+          id: string
+          target_record_id: string
+          requested_by: string
+          requester_role: string
+          requester_email: string | null
+          school_id: string | null
+          request_reason: string
+          predefined_reason: string | null
+          status: "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED" | "FAILED"
+          reviewed_by: string | null
+          review_reason: string | null
+          requested_at: string
+          reviewed_at: string | null
+          completed_at: string | null
+          failure_details: Json | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          target_record_id: string
+          requested_by: string
+          requester_role?: string
+          requester_email?: string | null
+          school_id?: string | null
+          request_reason: string
+          predefined_reason?: string | null
+          status?: "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED" | "FAILED"
+          reviewed_by?: string | null
+          review_reason?: string | null
+          requested_at?: string
+          reviewed_at?: string | null
+          completed_at?: string | null
+          failure_details?: Json | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          target_record_id?: string
+          requested_by?: string
+          requester_role?: string
+          requester_email?: string | null
+          school_id?: string | null
+          request_reason?: string
+          predefined_reason?: string | null
+          status?: "PENDING" | "APPROVED" | "REJECTED" | "COMPLETED" | "FAILED"
+          reviewed_by?: string | null
+          review_reason?: string | null
+          requested_at?: string
+          reviewed_at?: string | null
+          completed_at?: string | null
+          failure_details?: Json | null
+          created_at?: string
+          updated_at?: string
         }
         Relationships: any[]
       }

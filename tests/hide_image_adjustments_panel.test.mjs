@@ -44,10 +44,10 @@ test("AVV — Hide Image Adjustments Panel Verification Suite", async (t) => {
       "No empty container or spacer should remain between ImagePreview and the action buttons container"
     );
 
-    // Confirm SF9, SF10, and PSA category controls remain present
+    // Confirm SF9 and SF10 category controls remain present and PSA is omitted
     assert.ok(uploadPageSrc.includes('handleCategoryChange("sf9")'));
     assert.ok(uploadPageSrc.includes('handleCategoryChange("sf10")'));
-    assert.ok(uploadPageSrc.includes('handleCategoryChange("birth_cert")'));
+    assert.ok(!uploadPageSrc.includes('handleCategoryChange("birth_cert")'));
   });
 
   await t.test("2. Camera selector, zoom controls, Capture Frame, File Upload, previews, and Extract Data remain intact", () => {
@@ -244,7 +244,7 @@ test("AVV — Hide Image Adjustments Panel Verification Suite", async (t) => {
       assert.strictEqual(recordedCalls[1].getImageDataCalled, false, "Default sharpness=0 must not run sharpen convolution");
       assert.deepStrictEqual(recordedCalls[1].toDataUrlArgs, ["image/jpeg", 0.92]);
 
-      // Confirm SF9, SF10, and PSA OCR request resolution forwards the preprocessed image unchanged
+      // Confirm SF9 and SF10 OCR request resolution forwards the preprocessed image unchanged
       const sf9Req = resolveOcrExtractionRequest({
         docCategory: "sf9",
         workflowType: "two_sided",
@@ -252,7 +252,6 @@ test("AVV — Hide Image Adjustments Panel Verification Suite", async (t) => {
         singleImage: hiddenPanelUrl,
         frontImage: hiddenPanelUrl,
         backImage: hiddenPanelUrl,
-        psaImage: null,
       });
       assert.strictEqual(sf9Req?.kind, "two_sided");
       assert.strictEqual(sf9Req?.frontImage, baselineUrl);
@@ -265,23 +264,19 @@ test("AVV — Hide Image Adjustments Panel Verification Suite", async (t) => {
         singleImage: hiddenPanelUrl,
         frontImage: null,
         backImage: null,
-        psaImage: null,
       });
       assert.strictEqual(sf10Req?.kind, "single");
       assert.strictEqual(sf10Req?.image, baselineUrl);
 
-      const psaIdentityUrl = "data:image/png;base64,psaEnhancedIdentity2x";
-      const psaReq = resolveOcrExtractionRequest({
+      const unsupportedPsaReq = resolveOcrExtractionRequest({
         docCategory: "birth_cert",
         workflowType: "single",
         gradeLevel: "Senior High School",
         singleImage: hiddenPanelUrl,
         frontImage: null,
         backImage: null,
-        psaImage: psaIdentityUrl,
       });
-      assert.strictEqual(psaReq?.kind, "single");
-      assert.strictEqual(psaReq?.image, psaIdentityUrl);
+      assert.strictEqual(unsupportedPsaReq, null);
     } finally {
       globalThis.document = originalDocument;
     }

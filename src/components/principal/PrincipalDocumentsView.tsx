@@ -46,7 +46,6 @@ interface Props {
   totalCount: number;
   sf9Count: number;
   sf10Count: number;
-  psaCount: number;
   flaggedCount: number;
   availableSections: string[];
   availableSchoolYears: string[];
@@ -57,7 +56,6 @@ export default function PrincipalDocumentsView({
   totalCount,
   sf9Count,
   sf10Count,
-  psaCount,
   flaggedCount,
   availableSections,
   availableSchoolYears,
@@ -118,7 +116,7 @@ export default function PrincipalDocumentsView({
       </div>
 
       {/* Summary KPI Badges */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-6">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
         <button
           onClick={() => {
             setDocType("All");
@@ -162,21 +160,6 @@ export default function PrincipalDocumentsView({
         >
           <span className="text-[0.65rem] font-bold text-blue-700 uppercase">Old SHS SF10</span>
           <p className="text-xl font-bold text-blue-900 mt-0.5">{sf10Count}</p>
-        </button>
-
-        <button
-          onClick={() => {
-            setDocType("birth_cert");
-            applyFilters(query, "birth_cert", grade, section, status);
-          }}
-          className={`p-3 rounded-lg border text-left transition-all ${
-            docType === "birth_cert"
-              ? "bg-emerald-100 border-emerald-500 ring-1 ring-emerald-500"
-              : "bg-white border-zinc-200 hover:bg-zinc-50"
-          }`}
-        >
-          <span className="text-[0.65rem] font-bold text-emerald-700 uppercase">PSA Birth Cert</span>
-          <p className="text-xl font-bold text-emerald-900 mt-0.5">{psaCount}</p>
         </button>
 
         <div className="p-3 rounded-lg border border-amber-200 bg-amber-50/60 text-left">
@@ -223,7 +206,6 @@ export default function PrincipalDocumentsView({
               <option value="All">All Supported Types</option>
               <option value="sf9">Old SHS SF9 (Report Card)</option>
               <option value="sf10">Old SHS SF10 (Permanent Record)</option>
-              <option value="birth_cert">PSA Birth Certificate</option>
             </select>
           </div>
 

@@ -11,6 +11,7 @@
 
 import type { GradeRecord, AttendanceRecord, ExtractedFields } from "@/types/documents";
 import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
+import { normalizeGradeRecords } from "../validation/gradeUtils";
 
 export interface ParsedTableGradesResult {
   grades: GradeRecord[];
@@ -670,6 +671,10 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
         result.grades.push(record);
       }
     }
+  }
+
+  if (result.grades.length > 0) {
+    result.grades = normalizeGradeRecords(result.grades);
   }
 
   return result;

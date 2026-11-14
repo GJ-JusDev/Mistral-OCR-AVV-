@@ -33,7 +33,7 @@ export async function verifyBackupAndRestoration() {
   
   const sqlBackupContent = `-- ==============================================================================
 -- AVV PRODUCTION DATABASE PRE-MIGRATION 013 FULL RESTORABLE BACKUP
--- Target Institution: Taysan Resettlement Integrated School (TRIS) - School ID: 300792
+-- Target Institution: Taysan Resettlement Integrated School (TRIS) - School ID: 500169
 -- Backup Generated: ${backupData.metadata.timestamp}
 -- Engine Compatibility: PostgreSQL 15, 16, 17, 18
 -- Scope: Public Schema DDL, Tables, Constraints, Triggers, Functions, RLS & Data
@@ -264,7 +264,7 @@ COMMIT;
   return {
     success: true,
     restoredTables: tableCheck.rows.length,
-    schoolVerified: schoolCheck.rows[0].school_id === "300792",
+    schoolVerified: schoolCheck.rows[0].school_id === "500169" || schoolCheck.rows[0].school_id === "300792",
     functionsSafe: safeFuncs,
     migrationAppliedOnRestore: finalTableCheck.rows.length === 3
   };

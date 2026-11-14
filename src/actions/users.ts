@@ -77,19 +77,56 @@ export async function getUsers() {
   // Fetch authoritative user_roles records from database
   const { data: rolesData } = await adminClient
     .from("user_roles")
-    .select("user_id, role, account_status, school_id, schools:school_id (name, school_id)");
+    .select(`
+      user_id,
+      role,
+      account_status,
+      school_id,
+      registration_timestamp,
+      review_eligibility_time,
+      registry_match_status,
+      matched_registry_id,
+      approval_method,
+      approval_reason,
+      decline_reason,
+      middle_name,
+      middle_initial,
+      has_no_middle_name,
+      schools:school_id (name, school_id)
+    `);
 
   const roleMap = new Map((rolesData || []).map(r => [r.user_id, r]));
+
+  // Fetch registry records to enrich matched names
+  const { data: registryList } = await adminClient
+    .from("school_teacher_registry")
+    .select("id, full_name_original, first_name, last_name, verification_status");
+  const registryMap = new Map((registryList || []).map(r => [r.id, r]));
 
   const safeUsers = usersData.users.map(u => {
     const roleInfo = roleMap.get(u.id);
     const meta = u.user_metadata || {};
+    const reg = roleInfo?.matched_registry_id ? registryMap.get(roleInfo.matched_registry_id) : null;
+
     return {
       ...u,
+      email_confirmed: Boolean(u.email_confirmed_at),
       db_role: roleInfo?.role || meta.role || "Teacher",
       db_account_status: roleInfo?.account_status || meta.account_status || "Pending",
       school_id: roleInfo?.school_id || meta.school_id || null,
       school_name: (roleInfo?.schools as any)?.name || null,
+      registration_timestamp: roleInfo?.registration_timestamp || u.created_at,
+      review_eligibility_time: roleInfo?.review_eligibility_time || null,
+      registry_match_status: roleInfo?.registry_match_status || null,
+      matched_registry_id: roleInfo?.matched_registry_id || null,
+      matched_teacher_name: reg?.full_name_original || null,
+      matched_registry_status: reg?.verification_status || null,
+      approval_method: roleInfo?.approval_method || null,
+      approval_reason: roleInfo?.approval_reason || null,
+      decline_reason: roleInfo?.decline_reason || null,
+      middle_name: roleInfo?.middle_name || meta.middle_name || null,
+      middle_initial: roleInfo?.middle_initial || null,
+      has_no_middle_name: roleInfo?.has_no_middle_name || false,
       user_metadata: {
         ...meta,
         role: roleInfo?.role || meta.role || "Teacher",
@@ -154,9 +191,20 @@ export async function verifyAndRevealPrc(targetUserId: string, adminPassword: st
 }
 
 /**
- * Approve a pending staff account with explicit school assignment and role
+ * Approve a pending staff account with explicit school assignment, role,
+ * and optional early approval verification (admin re-auth, confirmation phrase, reason).
  */
-export async function approveUser(userId: string, schoolId: string, role: string = "teacher") {
+export async function approveUser(
+  userId: string, 
+  schoolId: string, 
+  role: string = "teacher",
+  options?: {
+    adminPassword?: string;
+    confirmationPhrase?: string;
+    justificationReason?: string;
+    isEarlyApproval?: boolean;
+  }
+) {
   const serverClient = await createServerClient();
   const { data: { user } } = await serverClient.auth.getUser();
   
@@ -189,13 +237,73 @@ export async function approveUser(userId: string, schoolId: string, role: string
     return { error: "Invalid school selected. School does not exist in system." };
   }
 
-  // Validate role (Only teacher or principal can be assigned via staff approval)
+  // Validate role
   const roleLower = role.toLowerCase();
   const validRole = ["teacher", "principal"].includes(roleLower) ? roleLower : "teacher";
 
   const { data: targetUser, error: getUserError } = await adminClient.auth.admin.getUserById(userId);
   if (getUserError || !targetUser?.user) {
     return { error: "User not found" };
+  }
+
+  // Check email confirmation status (Phase E requirement)
+  if (!targetUser.user.email_confirmed_at) {
+    return { 
+      error: "Cannot approve account: Applicant's email address has not been confirmed via Supabase Auth email verification." 
+    };
+  }
+
+  // Fetch target user's current user_roles record
+  const { data: targetRole } = await adminClient
+    .from("user_roles")
+    .select("account_status, review_eligibility_time, registry_match_status, matched_registry_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  const isEarly = options?.isEarlyApproval || (
+    targetRole?.review_eligibility_time && new Date(targetRole.review_eligibility_time) > new Date()
+  );
+
+  // If Early Approval, enforce strict re-authentication, confirmation phrase, and justification
+  if (isEarly) {
+    if (!options?.adminPassword) {
+      return { error: "Administrator password is required for early approval." };
+    }
+
+    const pwCheck = await verifyAdminPassword(options.adminPassword);
+    if ("error" in pwCheck && pwCheck.error) {
+      await logAuditEvent({
+        category: "USER_MANAGEMENT",
+        action: "ACCOUNT_EARLY_APPROVAL_DENIED",
+        outcome: "DENIED",
+        actorUserId: user.id,
+        actorEmail: user.email,
+        actorRole: "admin",
+        targetType: "user",
+        targetId: userId,
+        reason: "Early approval denied: Invalid administrator password re-authentication",
+      });
+      return { error: "Incorrect administrator password." };
+    }
+
+    if (options.confirmationPhrase?.trim() !== "ADD THIS USER") {
+      await logAuditEvent({
+        category: "USER_MANAGEMENT",
+        action: "ACCOUNT_EARLY_APPROVAL_DENIED",
+        outcome: "DENIED",
+        actorUserId: user.id,
+        actorEmail: user.email,
+        actorRole: "admin",
+        targetType: "user",
+        targetId: userId,
+        reason: 'Early approval denied: Confirmation phrase does not match "ADD THIS USER"',
+      });
+      return { error: 'Confirmation phrase mismatch. You must type "ADD THIS USER" exactly.' };
+    }
+
+    if (!options.justificationReason || !options.justificationReason.trim()) {
+      return { error: "Justification reason is required for early approval." };
+    }
   }
 
   const currentMetadata = targetUser.user.user_metadata || {};
@@ -214,6 +322,9 @@ export async function approveUser(userId: string, schoolId: string, role: string
   }
 
   const operationId = crypto.randomUUID();
+  const approvalMethod = isEarly ? "MANUAL_EARLY" : "MANUAL";
+  const approvalReason = options?.justificationReason?.trim() || "Administrator approved staff account";
+  const nowIso = new Date().toISOString();
 
   // Update authoritative status, role, and school assignment in database table public.user_roles
   const { error: roleDbErr } = await adminClient
@@ -222,6 +333,10 @@ export async function approveUser(userId: string, schoolId: string, role: string
       account_status: "Approved",
       role: validRole,
       school_id: schoolId,
+      approval_method: approvalMethod,
+      approval_reason: approvalReason,
+      approved_by: user.id,
+      approved_at: nowIso,
       updated_by: user.id,
       last_operation_id: operationId,
     })
@@ -231,11 +346,24 @@ export async function approveUser(userId: string, schoolId: string, role: string
     return { error: roleDbErr.message };
   }
 
+  // Link registry record if there is a matched registry entry
+  if (targetRole?.matched_registry_id) {
+    await adminClient
+      .from("school_teacher_registry")
+      .update({
+        linked_user_id: userId,
+        updated_at: nowIso,
+      })
+      .eq("id", targetRole.matched_registry_id);
+  }
+
+  const actionName = isEarly ? "ACCOUNT_EARLY_APPROVED" : "ACCOUNT_APPROVED";
+
   // Audit account approval
   await logAuditEvent({
     requestId: operationId,
     category: "USER_MANAGEMENT",
-    action: "ACCOUNT_APPROVED",
+    action: actionName as any,
     outcome: "SUCCESS",
     actorUserId: user.id,
     actorEmail: user.email,
@@ -245,13 +373,21 @@ export async function approveUser(userId: string, schoolId: string, role: string
     targetType: "user",
     targetId: userId,
     targetLabel: `${targetUser.user.user_metadata?.first_name || ""} ${targetUser.user.user_metadata?.last_name || ""}`.trim() || targetUser.user.email,
-    reason: `Administrator approved registration for ${validRole} at ${school.name}`,
+    reason: isEarly
+      ? `Administrator granted early approval for ${validRole} at ${school.name}: ${approvalReason}`
+      : `Administrator approved registration for ${validRole} at ${school.name}`,
     details: {
       previous_status: currentMetadata.account_status || "Pending",
       new_status: "Approved",
       assigned_role: validRole,
       assigned_school_id: schoolId,
       assigned_school_name: school.name,
+      approval_method: approvalMethod,
+      approval_reason: approvalReason,
+      is_early_approval: Boolean(isEarly),
+      registry_match_status: targetRole?.registry_match_status || null,
+      matched_registry_id: targetRole?.matched_registry_id || null,
+      email_confirmed_at: targetUser.user.email_confirmed_at,
     },
   });
 
@@ -259,7 +395,7 @@ export async function approveUser(userId: string, schoolId: string, role: string
   return { success: true };
 }
 
-export async function declineUser(userId: string) {
+export async function declineUser(userId: string, declineReason: string) {
   const serverClient = await createServerClient();
   const { data: { user } } = await serverClient.auth.getUser();
   
@@ -273,6 +409,10 @@ export async function declineUser(userId: string) {
 
   if (roleRow?.role !== "admin" || roleRow?.account_status !== "Approved") {
     return { error: "Forbidden: Only an approved administrator can decline registrations." };
+  }
+
+  if (!declineReason || !declineReason.trim()) {
+    return { error: "A specific decline reason is required to reject a registration." };
   }
 
   const adminClient = getAdminClient();
@@ -296,12 +436,22 @@ export async function declineUser(userId: string) {
   }
 
   const operationId = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+
+  // Unlink any matched registry entry
+  await adminClient
+    .from("school_teacher_registry")
+    .update({ linked_user_id: null, updated_at: nowIso })
+    .eq("linked_user_id", userId);
 
   // Update authoritative status in database table public.user_roles
   await adminClient
     .from("user_roles")
     .update({ 
       account_status: "Declined",
+      decline_reason: declineReason.trim(),
+      declined_by: user.id,
+      declined_at: nowIso,
       updated_by: user.id,
       last_operation_id: operationId,
     })
@@ -319,10 +469,11 @@ export async function declineUser(userId: string) {
     targetType: "user",
     targetId: userId,
     targetLabel: `${targetUser.user.user_metadata?.first_name || ""} ${targetUser.user.user_metadata?.last_name || ""}`.trim() || targetUser.user.email,
-    reason: "Administrator declined staff account registration",
+    reason: `Administrator declined staff account registration: ${declineReason.trim()}`,
     details: {
       previous_status: currentMetadata.account_status || "Pending",
       new_status: "Declined",
+      decline_reason: declineReason.trim(),
     },
   });
 

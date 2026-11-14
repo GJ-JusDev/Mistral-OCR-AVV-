@@ -40,7 +40,7 @@ test("AVV Senior High School Only Scope Refinement Verification Suite", async (t
     assert.strictEqual(getGradeLevelShortLabel("Grade 12"), "Grade 12");
   });
 
-  await t.test("2. Active Document Types: SF9, SF10, and PSA Certificate of Live Birth only", () => {
+  await t.test("2. Active Document Types: SF9 and SF10 only (PSA removed)", () => {
     assert.strictEqual(shouldShowGradeLevelSelector("sf9"), true);
     assert.strictEqual(shouldShowGradeLevelSelector("sf10"), true);
     assert.strictEqual(shouldShowGradeLevelSelector("birth_cert"), false);
@@ -53,7 +53,7 @@ test("AVV Senior High School Only Scope Refinement Verification Suite", async (t
     // Assert UI document buttons
     assert.ok(uploadPageSrc.includes('handleCategoryChange("sf9")'), "SF9 must be present");
     assert.ok(uploadPageSrc.includes('handleCategoryChange("sf10")'), "SF10 must be present");
-    assert.ok(uploadPageSrc.includes('handleCategoryChange("birth_cert")'), "PSA Birth Certificate must be present");
+    assert.strictEqual(uploadPageSrc.includes('handleCategoryChange("birth_cert")'), false, "PSA Birth Certificate must be removed");
     assert.strictEqual(uploadPageSrc.includes('handleCategoryChange("school_id")'), false, "school_id must be removed");
     assert.strictEqual(uploadPageSrc.includes('handleCategoryChange("other")'), false, "other must be removed");
   });
@@ -125,30 +125,22 @@ test("AVV Senior High School Only Scope Refinement Verification Suite", async (t
     assert.strictEqual(sf10Payload.combinedFields.grading_period_scheme, "quarterly_semestral");
   });
 
-  await t.test("5. PSA Birth Certificate Payload Builder completely isolates from academic grade level", () => {
-    const psaPayload = buildDocumentSubmissionPayload({
-      docCategory: "birth_cert",
-      gradeLevel: "Grade 11",
-      ocrFields: {
-        document_type: "birth_cert",
-        name: "Dela Cruz, Carlos",
-        birth_date: "2007-08-14",
-        sex: "M",
-        academic_level: "Senior High School", // Must be sanitized
-        selected_grade_level: "Grade 11",     // Must be sanitized
-        grading_period_scheme: "quarterly_semestral", // Must be sanitized
-      },
-      ocrText: "CERTIFICATE OF LIVE BIRTH",
-      finalPrimaryUrl: "https://storage.example/psa.png",
-      originalFilename: "psa.png",
-    });
-
-    assert.strictEqual(psaPayload.docType, "birth_cert");
-    assert.strictEqual("selected_grade_level" in psaPayload.requestBody, false);
-    assert.strictEqual(psaPayload.combinedFields.academic_level, undefined);
-    assert.strictEqual(psaPayload.combinedFields.selected_grade_level, undefined);
-    assert.strictEqual(psaPayload.combinedFields.grading_period_scheme, undefined);
-    assert.deepStrictEqual(psaPayload.combinedFields.grades, []);
+  await t.test("5. PSA Birth Certificate is rejected by payload builder", () => {
+    assert.throws(() => {
+      buildDocumentSubmissionPayload({
+        docCategory: "birth_cert",
+        gradeLevel: "Grade 11",
+        ocrFields: {
+          document_type: "birth_cert",
+          name: "Dela Cruz, Carlos",
+          birth_date: "2007-08-14",
+          sex: "M",
+        },
+        ocrText: "CERTIFICATE OF LIVE BIRTH",
+        finalPrimaryUrl: "https://storage.example/psa.png",
+        originalFilename: "psa.png",
+      });
+    }, /Unsupported document category/);
   });
 
   await t.test("6. SHS Grade Pattern Validation strictly verifies Grade 11 & Grade 12 and rejects Grades 1-10", () => {
@@ -202,8 +194,8 @@ test("AVV Senior High School Only Scope Refinement Verification Suite", async (t
       "API route must contain explicit rejection logic for unsupported document types"
     );
     assert.ok(
-      routeSrc.includes("validDocTypes = ['sf9', 'sf10', 'birth_cert']"),
-      "validDocTypes must be strictly limited to sf9, sf10, and birth_cert"
+      routeSrc.includes("validDocTypes = ['sf9', 'sf10']"),
+      "validDocTypes must be strictly limited to sf9 and sf10"
     );
     assert.ok(
       routeSrc.includes("isExplicitlyUnsupported"),

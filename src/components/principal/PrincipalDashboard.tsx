@@ -58,7 +58,6 @@ interface PrincipalDashboardData {
   documentStats: {
     sf9Count: number;
     sf10Count: number;
-    psaCount: number;
     pendingDocCount: number;
     approvedDocCount: number;
     rejectedDocCount: number;
@@ -135,21 +134,21 @@ export default function PrincipalDashboard({
           <StatCard
             title="Total Scanned Documents"
             value={summaryCards.totalDocuments}
-            subtitle="Across SF9, SF10 & PSA"
+            subtitle="Across SF9 & SF10"
             icon={<FileText className="h-5 w-5 text-slate-700" />}
             variant="default"
           />
           <StatCard
             title="Complete Document Sets"
             value={summaryCards.completeDocumentSetsCount ?? 0}
-            subtitle="All 3 records on file"
+            subtitle="Both SF9 & SF10 on file"
             icon={<CheckCircle2 className="h-5 w-5 text-emerald-600" />}
             variant="success"
           />
           <StatCard
             title="Missing Required Forms"
             value={summaryCards.missingDocumentsCount ?? 0}
-            subtitle="Pending PSA / SF9 / SF10"
+            subtitle="Pending SF9 / SF10"
             icon={<Clock className="h-5 w-5 text-amber-600" />}
             variant={summaryCards.missingDocumentsCount ? "warning" : "default"}
           />
@@ -293,7 +292,7 @@ export default function PrincipalDashboard({
                 </span>
               }
             >
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50">
                   <span className="text-[11px] font-bold text-slate-600 uppercase">Old SHS SF9</span>
                   <div className="text-2xl font-bold text-[#0B1F33] mt-1">{documentStats.sf9Count}</div>
@@ -304,12 +303,6 @@ export default function PrincipalDashboard({
                   <span className="text-[11px] font-bold text-slate-600 uppercase">Old SHS SF10</span>
                   <div className="text-2xl font-bold text-[#0B1F33] mt-1">{documentStats.sf10Count}</div>
                   <span className="text-[11px] text-slate-500 mt-0.5 block">Permanent academic records</span>
-                </div>
-
-                <div className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50">
-                  <span className="text-[11px] font-bold text-slate-600 uppercase">PSA Birth Certificate</span>
-                  <div className="text-2xl font-bold text-[#0B1F33] mt-1">{documentStats.psaCount}</div>
-                  <span className="text-[11px] text-slate-500 mt-0.5 block">Civil registry & identity</span>
                 </div>
               </div>
 

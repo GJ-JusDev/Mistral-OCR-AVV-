@@ -1,7 +1,7 @@
 /**
  * DepEd Senior High School Academic Eligibility Evaluator.
  *
- * Scoped to Taysan Resettlement Integrated School (TRIS), DepEd School ID 300792.
+ * Scoped to Taysan Resettlement Integrated School (TRIS), DepEd School ID 500169.
  * Grades 11 and 12 only.
  *
  * Implements strict DepEd criteria (DO 8, s. 2015 & DO 55, s. 2016):
@@ -49,7 +49,6 @@ export type DocumentMonitoringCategory =
   | "Complete"
   | "Missing SF9"
   | "Missing SF10"
-  | "Missing PSA"
   | "Identity Review Required";
 
 export interface EvaluatedSubject {
@@ -87,7 +86,7 @@ export interface EligibilityEvaluationInput {
     isComplete: boolean;
     hasSf9: boolean;
     hasSf10: boolean;
-    hasPsa: boolean;
+    hasPsa?: boolean;
     identityStatus?: "MATCH" | "IDENTITY_REVIEW_REQUIRED" | "MISSING_DATA";
   };
   existingApproval?: {
@@ -136,7 +135,7 @@ export interface EligibilityEvaluationResult {
  * - Grade 12: Graduation (kailangang maipasa ang lahat ng G11 & G12 curriculum requirements at Work Immersion)
  *
  * Mahahalagang Proteksyon:
- * 1. Ang kakulangan sa dokumento (hal. missing PSA) ay HINDI academic failure (Needs Review lang).
+ * 1. Ang kakulangan sa dokumento (hal. missing SF9/SF10) ay HINDI academic failure (Needs Review lang).
  * 2. Ang bagsak na subject na naipasa sa remedial class at na-verify ng guro ay ganap na nalilinis.
  * 3. Ang mataas na absences ay naglalabas ng review hold (ATTENDANCE_REVIEW_PENDING) pero HINDI automatic failure.
  * 4. Tanging ang authorized Principal lamang ang may kapangyarihang mag-apruba sa opisyal na desisyon.
@@ -244,7 +243,7 @@ export function evaluateShsStudentEligibility(
   const hasIncompleteGrades = subjects.length === 0 || missingCount > 0;
   const isAcademicallyPassing = !hasAcademicFailure && !hasIncompleteGrades && passedCount > 0;
 
-  // 4. Document completeness assessment: kumpleto ba ang SF9, SF10, at PSA?
+  // 4. Document completeness assessment: kumpleto ba ang SF9 at SF10?
   const docs = input.documentCompleteness;
   let documentCategory: DocumentMonitoringCategory = "Complete";
   if (!docs.hasSf9) {
@@ -253,9 +252,6 @@ export function evaluateShsStudentEligibility(
   } else if (!docs.hasSf10) {
     documentCategory = "Missing SF10";
     blockingFactors.push("Missing SF10 Permanent Record.");
-  } else if (!docs.hasPsa) {
-    documentCategory = "Missing PSA";
-    blockingFactors.push("Missing PSA Birth Certificate.");
   } else if (docs.identityStatus === "IDENTITY_REVIEW_REQUIRED") {
     documentCategory = "Identity Review Required";
     blockingFactors.push("Identity Review Required: Document name or LRN discrepancies detected.");
@@ -333,7 +329,7 @@ export function evaluateShsStudentEligibility(
     status = "Eligible";
     detailedStatus = isG12 ? "ELIGIBLE_FOR_GRADUATION" : "ELIGIBLE_FOR_PROGRESSION";
     taglishAdvisory = isG12
-      ? "Lahat ng academic requirements, Work Immersion, SF9/SF10, at PSA records ay kumpleto at verified. Maaari nang aprubahan ng Principal ang graduation eligibility."
+      ? "Lahat ng academic requirements, Work Immersion, at SF9/SF10 records ay kumpleto at verified. Maaari nang aprubahan ng Principal ang graduation eligibility."
       : "Lahat ng Grade 11 subject requirements at document records ay kumpleto at verified. Maaari nang aprubahan ng Principal ang Grade 11 progression.";
     reasons.push(
       gradeLevel === "Grade 11"

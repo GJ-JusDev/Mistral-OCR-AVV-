@@ -1,7 +1,7 @@
 /**
  * REMEDIAL CLASS DETECTION & MANAGEMENT MODULE
  * 
- * Bakit ito kailangan para sa Taysan Resettlement Integrated School (School ID 300792):
+ * Bakit ito kailangan para sa Taysan Resettlement Integrated School (School ID 500169):
  * Sa DepEd K-12 Senior High School Curriculum (DO 8, s. 2015):
  * 1. Kapag ang isang mag-aaral ay nakakuha ng final grade na mas mababa sa 75 sa anumang subject,
  *    hindi ito nangangahulugan na agad-agad siyang permanenteng bagsak o hindi na makakatapos.

@@ -32,7 +32,7 @@
 2. **Parser Over-expectation:** `src/lib/ocr/parser.ts` searched for "School ID" via regular expression and returned empty string / undefined.
 3. **Validation Penalty:** `src/lib/validation/rules.ts` evaluated `school_id_present`. When empty, it generated a `warning` forcing overall status to `needs_review` or an `error` forcing `invalid`.
 4. **Client Impersonation Risk:** `src/app/api/documents/route.ts` line 147 trusted `body.school_id` from client payloads before falling back to `user_roles.school_id`, creating a multi-tenant vulnerability.
-5. **Database State:** Authoritative institution TRIS exists in `schools` table with internal UUID `a0000000-0000-0000-0000-000000000001` and DepEd School ID `300792`, but all existing user accounts in `user_roles` currently have `school_id = NULL`.
+5. **Database State:** Authoritative institution TRIS exists in `schools` table with internal UUID `a0000000-0000-0000-0000-000000000001` and DepEd School ID `500169`, but all existing user accounts in `user_roles` currently have `school_id = NULL`.
 
 ### Defect B & C — Review Queue Grade Status Stale & Field Discrepancies
 1. **UI Disconnect:** In `src/components/ocr/OcrResultCard.tsx`, editing a grade cell synchronized values but intentionally left `status` and `needsVerification` untouched, leaving status stale as `"Missing"`.
@@ -90,10 +90,10 @@ Created three pure, deterministic functions:
 ### B. Server-Enforced Institutional Identity (`src/app/api/documents/route.ts`)
 - Removed vulnerability `let userSchoolId = body.school_id || null`.
 - Queries `user_roles` for the authenticated user.
-- If `roleRow.school_id` is null, retrieves single authoritative institutional record for TRIS (`school_id = '300792'`, `id = 'a0000000-0000-0000-0000-000000000001'`).
+- If `roleRow.school_id` is null, retrieves single authoritative institutional record for TRIS (`school_id = '500169'`, `id = 'a0000000-0000-0000-0000-000000000001'`).
 - Detects and rejects client spoofing attempts where `body.school_id` conflicts with the authorized school UUID (HTTP 403 Forbidden).
 - Annotates `extracted_fields` with:
-  - `school_id: "300792"`
+  - `school_id: "500169"`
   - `school_name: "Taysan Resettlement Integrated School"`
   - `school_id_source: "school_configuration"`
   - `trusted_school_verified: true`
@@ -105,8 +105,8 @@ Created three pure, deterministic functions:
 
 | Condition | Old System Behavior | Corrected Behavior |
 | :--- | :--- | :--- |
-| **Old SHS SF9 Upload** | Failed `school_id_present`; flagged `needs_review` or `invalid`. | Passes validation; resolves TRIS `300792` server-side; status = `valid`. |
-| **Review Queue Display** | Empty editable text input with amber outline demanding manual entry. | Read-only field with blue badge: **"School Configuration"** displaying TRIS and 300792. |
+| **Old SHS SF9 Upload** | Failed `school_id_present`; flagged `needs_review` or `invalid`. | Passes validation; resolves TRIS `500169` server-side; status = `valid`. |
+| **Review Queue Display** | Empty editable text input with amber outline demanding manual entry. | Read-only field with blue badge: **"School Configuration"** displaying TRIS and 500169. |
 | **Client Spoof Attempt** | Injected client `body.school_id` into database. | Server rejects conflicting `body.school_id` with HTTP 403 Forbidden. |
 | **Different Document School ID** | Overwritten silently. | Detected as `ocr_extracted_school_id`; flagged with `school_id_discrepancy` error. |
 | **Database Foreign Keys** | `documents.school_id` was NULL. | `documents.school_id` assigned authoritative UUID `a0000000-0000-0000-0000-000000000001`. |
@@ -205,7 +205,7 @@ END;
 
 | Scenario | Target Workflow | Result | Classification |
 | :--- | :--- | :--- | :--- |
-| **Scenario A — Existing Final Grades** | SF9 upload with printed/handwritten final grades (Doc `0a3536c9` pattern). | School resolved as 300792 read-only; Q1, Q2, and Final grades populated; status = `Passed`. | **PASS** |
+| **Scenario A — Existing Final Grades** | SF9 upload with printed/handwritten final grades (Doc `0a3536c9` pattern). | School resolved as 500169 read-only; Q1, Q2, and Final grades populated; status = `Passed`. | **PASS** |
 | **Scenario B — Blank Final Grades** | SF9 upload with blank semester final grade cells (Doc `04ed137a` pattern). | Final grade remains blank; status = `Missing`; no grades fabricated. | **PASS** |
 | **Scenario C — Manual Grade Correction** | Review Queue grade editing (entering 85 or 74). | Live status updates to `Passed` (85) or `Failed` (74); saved corrections persist. | **PASS** |
 | **Scenario D — Approval and Persistence** | Official document approval workflow. | `process_approved_document()` receives clean numeric grades and status; audit log recorded. | **PASS** |
@@ -224,7 +224,7 @@ Query of live Cloud Supabase database identified 3 existing staged documents:
 - **Zero Paid OCR API Calls:** Re-process `extracted_fields` locally from cached `raw_ocr_response`.
 - **Targeted Transformation:**
   1. Set `documents.school_id = 'a0000000-0000-0000-0000-000000000001'`.
-  2. Populate `extracted_fields.school_id = '300792'`, `school_id_source = 'school_configuration'`, `trusted_school_verified = true`.
+  2. Populate `extracted_fields.school_id = '500169'`, `school_id_source = 'school_configuration'`, `trusted_school_verified = true`.
   3. Execute `normalizeGradeRecords(extracted_fields.grades)` to synchronize `final` with `sem1_final_grade` on Doc `0a3536c9`.
   4. Retain genuine blank status on Doc `04ed137a`.
   5. Re-run `validateFields` in-place.
@@ -235,7 +235,7 @@ Query of live Cloud Supabase database identified 3 existing staged documents:
 ## 14. REMAINING ISSUES
 
 1. **User Role School Assignments:** Live `user_roles` records currently have `school_id = NULL`. While our application layer now safely falls back to TRIS configuration, a future administrative migration to populate `user_roles.school_id = 'a0000000-0000-0000-0000-000000000001'` for approved staff will harden database-level RLS.
-2. **SF9 Document Form Diversity:** Newer DepEd SF9 revisions that include printed School IDs will naturally pass OCR extraction and be cross-validated against TRIS `300792`.
+2. **SF9 Document Form Diversity:** Newer DepEd SF9 revisions that include printed School IDs will naturally pass OCR extraction and be cross-validated against TRIS `500169`.
 
 ---
 

@@ -236,7 +236,7 @@ export default function AdminAuditLogsPage() {
           <ShieldCheck className="w-4 h-4 text-[#174EA6]" />
           <span className="font-semibold text-[#0B1F33] dark:text-white">Taysan Resettlement Integrated School (TRIS)</span>
           <span className="text-zinc-400">•</span>
-          <span>School ID: <strong>300792</strong></span>
+          <span>School ID: <strong>500169</strong></span>
         </div>
         <div className="flex items-center gap-2 text-zinc-500">
           <Lock className="w-3.5 h-3.5 text-emerald-600" />
@@ -635,7 +635,7 @@ export default function AdminAuditLogsPage() {
               <div>
                 <span className="text-zinc-400 uppercase font-bold text-[10px] block">School Scope</span>
                 <span className="text-zinc-800 dark:text-zinc-200">
-                  {selectedEvent.actor_school_name || "TRIS (300792)"}
+                  {selectedEvent.actor_school_name || "TRIS (500169)"}
                 </span>
               </div>
               <div>

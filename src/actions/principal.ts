@@ -10,7 +10,7 @@ import { logAuditEvent } from "@/lib/audit/auditLogger";
 
 // Default single institution scope (TRIS)
 const TRIS_UUID = "a0000000-0000-0000-0000-000000000001";
-const TRIS_SCHOOL_ID = "300792";
+const TRIS_SCHOOL_ID = "500169";
 
 /**
  * PRINCIPAL AT ADMIN ROLE SECURITY CONTEXT
@@ -18,7 +18,7 @@ const TRIS_SCHOOL_ID = "300792";
  * Bakit ito kailangan:
  * Lahat ng data para sa School Head (mga grado, signed image URLs, student records)
  * ay protektado. Sinisiguro nitong lehitimong Principal o Administrator lang na
- * may "Approved" status ang makakakita sa dashboard ng TRIS (DepEd School ID 300792).
+ * may "Approved" status ang makakakita sa dashboard ng TRIS (DepEd School ID 500169).
  */
 async function getAuthorizedPrincipalContext() {
   const supabase = await createServerClient();
@@ -70,7 +70,7 @@ function normalizeShsGrade(gradeRaw?: string | null): string {
  * PRIVATE STORAGE SIGNED URL GENERATOR (1-HOUR TTL)
  *
  * Bakit kailangan ng Signed URL:
- * Ang kumpletong original scans ng SF9, SF10, at PSA ay nakatago sa isang private
+ * Ang kumpletong original scans ng SF9 at SF10 ay nakatago sa isang private
  * Supabase Storage bucket ('documents'). Hindi ito pwedeng gawing public sa internet
  * dahil sa Data Privacy Act (naglalalaman ng PII ng estudyante).
  * Gumagawa tayo ng pansamantalang 1-hour signed URL para ma-inspect ito ng Principal.
@@ -232,7 +232,6 @@ export async function getPrincipalDashboardData() {
     // --- DOCUMENT STATISTICS ---
     let sf9Count = 0;
     let sf10Count = 0;
-    let psaCount = 0;
     let pendingDocCount = 0;
     let approvedDocCount = 0;
     let rejectedDocCount = 0;
@@ -244,7 +243,6 @@ export async function getPrincipalDashboardData() {
       const type = String(d.document_type || "").toLowerCase();
       if (type === "sf9") sf9Count++;
       else if (type === "sf10") sf10Count++;
-      else if (type === "birth_cert" || type === "psa") psaCount++;
 
       const status = String(d.status || "").toLowerCase();
       if (["needs_review", "submitted", "extracted", "corrected"].includes(status)) {
@@ -280,9 +278,8 @@ export async function getPrincipalDashboardData() {
       const studentDocs = allDocs.filter(d => d.student_id === st.id);
       const hasSf9 = studentDocs.some(d => d.document_type === "sf9" && d.status === "approved");
       const hasSf10 = studentDocs.some(d => d.document_type === "sf10" && d.status === "approved");
-      const hasPsa = studentDocs.some(d => ["birth_cert", "psa"].includes(d.document_type) && d.status === "approved");
 
-      if (hasSf9 && hasSf10 && hasPsa) {
+      if (hasSf9 && hasSf10) {
         completeDocumentSetsCount++;
       } else {
         missingDocumentsCount++;
@@ -305,10 +302,9 @@ export async function getPrincipalDashboardData() {
         subjects: studentGrades,
         attendanceSummary,
         documentCompleteness: {
-          isComplete: hasSf9 && hasSf10 && hasPsa,
+          isComplete: hasSf9 && hasSf10,
           hasSf9,
           hasSf10,
-          hasPsa,
         },
         existingApproval: eligibilityMap.get(st.id) || null,
       });
@@ -378,7 +374,6 @@ export async function getPrincipalDashboardData() {
       documentStats: {
         sf9Count,
         sf10Count,
-        psaCount,
         pendingDocCount,
         approvedDocCount,
         rejectedDocCount,
@@ -495,19 +490,13 @@ export async function getPrincipalStudentRecords(filters?: {
       // Document availability check
       const sf9Doc = docs.find((d: any) => String(d.document_type).toLowerCase() === "sf9");
       const sf10Doc = docs.find((d: any) => String(d.document_type).toLowerCase() === "sf10");
-      const psaDoc = docs.find((d: any) => {
-        const t = String(d.document_type).toLowerCase();
-        return t === "birth_cert" || t === "psa";
-      });
 
       const hasSf9 = sf9Doc ? sf9Doc.status === "approved" : false;
       const hasSf10 = sf10Doc ? sf10Doc.status === "approved" : false;
-      const hasPsa = psaDoc ? psaDoc.status === "approved" : false;
 
-      // Extract raw names for Cross-Document Comparison
+      // Extract raw names for Cross-Document Comparison (SF9 vs SF10)
       const sf9Fields = (sf9Doc?.extracted_fields as any) || {};
       const sf10Fields = (sf10Doc?.extracted_fields as any) || {};
-      const psaFields = (psaDoc?.extracted_fields as any) || {};
 
       const identityComparison = compareUnifiedStudentDocuments({
         sf9: sf9Doc ? {
@@ -526,14 +515,6 @@ export async function getPrincipalStudentRecords(filters?: {
           fullName: sf10Fields.name,
           lrn: sf10Fields.lrn,
         } : null,
-        psa: psaDoc ? {
-          firstName: psaFields.first_name,
-          middleName: psaFields.middle_name,
-          lastName: psaFields.last_name,
-          suffix: psaFields.suffix,
-          fullName: psaFields.name,
-          birthDate: psaFields.birth_date,
-        } : null,
       });
 
       // Phase 6: Document Completeness Indicators
@@ -543,17 +524,17 @@ export async function getPrincipalStudentRecords(filters?: {
       if (identityComparison.overallStatus === "IDENTITY_REVIEW_REQUIRED") {
         completenessStatus = "IDENTITY_REVIEW_REQUIRED";
         completenessLabel = "Identity Review Required";
-      } else if (hasSf9 && hasSf10 && hasPsa) {
+      } else if (hasSf9 && hasSf10) {
         completenessStatus = "COMPLETE";
-        completenessLabel = "Complete (SF9, SF10, PSA)";
+        completenessLabel = "Complete (SF9, SF10)";
       } else {
         completenessStatus = "INCOMPLETE";
-        if (!hasPsa && hasSf9 && hasSf10) {
-          completenessLabel = "Missing PSA Birth Certificate";
-        } else if (!hasSf9 && !hasSf10 && !hasPsa) {
+        if (!hasSf9 && !hasSf10) {
           completenessLabel = "Missing All Official Documents";
+        } else if (!hasSf9) {
+          completenessLabel = "Missing SF9 (Report Card)";
         } else {
-          completenessLabel = "Incomplete Document Set";
+          completenessLabel = "Missing SF10 (Permanent Record)";
         }
       }
 
@@ -579,7 +560,6 @@ export async function getPrincipalStudentRecords(filters?: {
           isComplete: completenessStatus === "COMPLETE",
           hasSf9,
           hasSf10,
-          hasPsa,
           identityStatus: identityComparison.overallStatus,
         },
         existingApproval,
@@ -616,14 +596,12 @@ export async function getPrincipalStudentRecords(filters?: {
         availableDocuments: {
           sf9: sf9Doc ? { id: sf9Doc.id, status: sf9Doc.status, storagePath: sf9Doc.storage_path || sf9Doc.image_url } : null,
           sf10: sf10Doc ? { id: sf10Doc.id, status: sf10Doc.status, storagePath: sf10Doc.storage_path || sf10Doc.image_url } : null,
-          psa: psaDoc ? { id: psaDoc.id, status: psaDoc.status, storagePath: psaDoc.storage_path || psaDoc.image_url } : null,
         },
         completeness: {
           status: completenessStatus,
           label: completenessLabel,
           hasSf9,
           hasSf10,
-          hasPsa,
         },
         eligibility,
         academicStatus: eligibility.academicCategory,
@@ -659,7 +637,6 @@ export async function getPrincipalStudentRecords(filters?: {
           const docTypeLower = String(d.document_type).toLowerCase();
           const hasSf9 = docTypeLower === "sf9";
           const hasSf10 = docTypeLower === "sf10";
-          const hasPsa = ["birth_cert", "psa"].includes(docTypeLower);
 
           candidateMap.set(lrn, {
             id: d.id,
@@ -680,14 +657,12 @@ export async function getPrincipalStudentRecords(filters?: {
             availableDocuments: {
               sf9: hasSf9 ? { id: d.id, status: d.status, storagePath: d.storage_path || d.image_url } : null,
               sf10: hasSf10 ? { id: d.id, status: d.status, storagePath: d.storage_path || d.image_url } : null,
-              psa: hasPsa ? { id: d.id, status: d.status, storagePath: d.storage_path || d.image_url } : null,
             },
             completeness: {
               status: "INCOMPLETE",
-              label: hasPsa ? "Missing SF9/SF10" : "Missing PSA Birth Certificate",
+              label: hasSf9 ? "Missing SF10 (Permanent Record)" : "Missing SF9 (Report Card)",
               hasSf9,
               hasSf10,
-              hasPsa,
             },
             eligibility: {
               gradeLevel: grade,
@@ -747,8 +722,7 @@ export async function getPrincipalStudentRecords(filters?: {
         filtered = filtered.filter(st => st.completeness.status === "COMPLETE");
       } else if (filters.completeness === "Incomplete") {
         filtered = filtered.filter(st => st.completeness.status === "INCOMPLETE");
-      } else if (filters.completeness === "Missing PSA") {
-        filtered = filtered.filter(st => !st.completeness.hasPsa);
+
       } else if (filters.completeness === "Missing SF9") {
         filtered = filtered.filter(st => !st.completeness.hasSf9);
       } else if (filters.completeness === "Missing SF10") {
@@ -848,11 +822,9 @@ export async function getPrincipalStudentDetails(identifier: string) {
       // Identity documents for cross-comparison
       const sf9Doc = documentsWithSignedUrls.find(d => d.rawType === "sf9");
       const sf10Doc = documentsWithSignedUrls.find(d => d.rawType === "sf10");
-      const psaDoc = documentsWithSignedUrls.find(d => ["birth_cert", "psa"].includes(d.rawType));
 
       const hasSf9 = sf9Doc ? sf9Doc.status === "approved" : false;
       const hasSf10 = sf10Doc ? sf10Doc.status === "approved" : false;
-      const hasPsa = psaDoc ? psaDoc.status === "approved" : false;
 
       const identityComparison = compareUnifiedStudentDocuments({
         sf9: sf9Doc ? {
@@ -871,14 +843,6 @@ export async function getPrincipalStudentDetails(identifier: string) {
           fullName: sf10Doc.extractedFields?.name,
           lrn: sf10Doc.extractedFields?.lrn,
         } : null,
-        psa: psaDoc ? {
-          firstName: psaDoc.extractedFields?.first_name,
-          middleName: psaDoc.extractedFields?.middle_name,
-          lastName: psaDoc.extractedFields?.last_name,
-          suffix: psaDoc.extractedFields?.suffix,
-          fullName: psaDoc.extractedFields?.name,
-          birthDate: psaDoc.extractedFields?.birth_date,
-        } : null,
       });
 
       // Completeness status
@@ -887,11 +851,15 @@ export async function getPrincipalStudentDetails(identifier: string) {
       if (identityComparison.overallStatus === "IDENTITY_REVIEW_REQUIRED") {
         completenessStatus = "IDENTITY_REVIEW_REQUIRED";
         completenessLabel = "Identity Review Required";
-      } else if (hasSf9 && hasSf10 && hasPsa) {
+      } else if (hasSf9 && hasSf10) {
         completenessStatus = "COMPLETE";
-        completenessLabel = "Complete (SF9, SF10, PSA)";
-      } else if (!hasPsa && hasSf9 && hasSf10) {
-        completenessLabel = "Missing PSA Birth Certificate";
+        completenessLabel = "Complete (SF9, SF10)";
+      } else if (!hasSf9 && !hasSf10) {
+        completenessLabel = "Missing All Official Documents";
+      } else if (!hasSf9) {
+        completenessLabel = "Missing SF9 (Report Card)";
+      } else {
+        completenessLabel = "Missing SF10 (Permanent Record)";
       }
 
       // Grade formatting
@@ -936,7 +904,6 @@ export async function getPrincipalStudentDetails(identifier: string) {
           isComplete: completenessStatus === "COMPLETE",
           hasSf9,
           hasSf10,
-          hasPsa,
           identityStatus: identityComparison.overallStatus,
         },
         existingApproval,
@@ -968,7 +935,6 @@ export async function getPrincipalStudentDetails(identifier: string) {
           label: completenessLabel,
           hasSf9,
           hasSf10,
-          hasPsa,
         },
         identityComparison,
         eligibility,
@@ -1012,7 +978,6 @@ export async function getPrincipalStudentDetails(identifier: string) {
       const lastName = fields.last_name || fields.candidate_student?.last_name || "";
       const fullName = fields.name || [lastName, firstName].filter(Boolean).join(", ") || "Candidate Learner";
       const gradeLevel = normalizeShsGrade(doc.grade_level || fields.grade_level);
-      const isPsa = ["birth_cert", "psa"].includes(String(doc.document_type).toLowerCase());
 
       return {
         student: {
@@ -1048,10 +1013,9 @@ export async function getPrincipalStudentDetails(identifier: string) {
         grades,
         completeness: {
           status: "INCOMPLETE",
-          label: isPsa ? "Missing SF9/SF10 Records" : "Missing PSA Birth Certificate",
+          label: String(doc.document_type).toLowerCase() === "sf9" ? "Missing SF10 (Permanent Record)" : "Missing SF9 (Report Card)",
           hasSf9: String(doc.document_type).toLowerCase() === "sf9",
           hasSf10: String(doc.document_type).toLowerCase() === "sf10",
-          hasPsa: isPsa,
         },
         identityComparison: {
           overallStatus: "MATCH",
@@ -1090,7 +1054,7 @@ export async function getPrincipalStudentDetails(identifier: string) {
  *
  * Mga Mahahalagang Patakaran:
  * - Mahigpit na Server-Side Gate:
- *   Hindi pinapayagan ang Principal na mag-apruba kapag kulang ang dokumento (hal. walang PSA)
+ *   Hindi pinapayagan ang Principal na mag-apruba kapag kulang ang dokumento (hal. walang SF9 o SF10)
  *   o kapag may bagsak na grado. Ang `canPrincipalApprove` ay dapat `true`.
  * - Immutable Audit Trail:
  *   Bawat desisyon (Approved o Not Approved) kasama ang timestamp, remarks, at user ID ng Principal
@@ -1350,7 +1314,6 @@ export async function getPrincipalDocumentSummary(filters?: {
     const totalCount = transformedDocs.length;
     const sf9Count = transformedDocs.filter(d => d.rawType === "sf9").length;
     const sf10Count = transformedDocs.filter(d => d.rawType === "sf10").length;
-    const psaCount = transformedDocs.filter(d => ["birth_cert", "psa"].includes(d.rawType)).length;
     const flaggedCount = transformedDocs.filter(d => d.missingFlags.length > 0).length;
 
     // Apply filters
@@ -1387,7 +1350,6 @@ export async function getPrincipalDocumentSummary(filters?: {
       filteredCount: filtered.length,
       sf9Count,
       sf10Count,
-      psaCount,
       flaggedCount,
       availableSections: Array.from(distinctSections).sort(),
       availableSchoolYears: Array.from(distinctSchoolYears).sort(),

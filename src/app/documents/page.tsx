@@ -59,9 +59,9 @@ export default function DocumentsPage() {
     <PageContainer>
       <Header 
         title="Document Registry" 
-        description="Comprehensive repository of scanned and extracted SF9, SF10, and PSA records."
+        description="Comprehensive repository of scanned and extracted SF9 and SF10 records."
         roleBadge={{ role: "teacher", label: "Faculty Validator" }}
-        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
           <div className="flex items-center gap-2">
             <Button
@@ -110,7 +110,6 @@ export default function DocumentsPage() {
               <option value="all">All Document Types</option>
               <option value="sf9">SF9 Progress Report</option>
               <option value="sf10">SF10 Permanent Record</option>
-              <option value="psa">PSA Birth Certificate</option>
             </select>
           }
         >

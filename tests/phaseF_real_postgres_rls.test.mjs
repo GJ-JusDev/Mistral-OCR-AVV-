@@ -111,7 +111,7 @@ test("Phase F: Real PostgreSQL Engine Database Constraints & Anti-Corruption Tri
   // Seed Institutional Data
   db.public.none(`
     INSERT INTO schools (id, school_id, name) VALUES 
-      ('a0000000-0000-0000-0000-000000000001', '300792', 'Taysan Resettlement Integrated School'),
+      ('a0000000-0000-0000-0000-000000000001', '500169', 'Taysan Resettlement Integrated School'),
       ('a0000000-0000-0000-0000-000000000002', '300999', 'Other High School');
 
     INSERT INTO students (id, school_id, lrn, first_name, last_name) VALUES

@@ -1,6 +1,6 @@
 import type { ExtractedFields } from "@/types/documents";
 
-export type UploadDocCategory = "sf9" | "sf10" | "birth_cert";
+export type UploadDocCategory = "sf9" | "sf10";
 export type UploadWorkflowType = "two_sided" | "single";
 export type ShsGradeLevel = "Grade 11" | "Grade 12";
 export type AcademicGradeLevel = ShsGradeLevel;
@@ -51,14 +51,13 @@ export interface UploadSessionSnapshot<TOcrResult = unknown> {
   backImage: string | null;
   ocrResult: TOcrResult | null;
   previewRotation: PreviewRotation;
-  hasPsaArtifacts: boolean;
 }
 
 /**
- * Pure state transition when switching between SF9, SF10, and PSA.
+ * Pure state transition when switching between SF9 and SF10.
  * - Clicking the already-active category is a no-op.
  * - Switching categories preserves `gradeLevel` (academic selection) while clearing
- *   incompatible previews, captured sides, preview rotation, PSA crops, and stale OCR output.
+ *   incompatible previews, captured sides, preview rotation, and stale OCR output.
  */
 export function transitionUploadCategory<TOcrResult = unknown>(
   current: UploadSessionSnapshot<TOcrResult>,
@@ -80,7 +79,6 @@ export function transitionUploadCategory<TOcrResult = unknown>(
       backImage: null,
       ocrResult: null,
       previewRotation: 0,
-      hasPsaArtifacts: false,
     },
   };
 }
@@ -90,8 +88,8 @@ export type ResolvedOcrRequest =
       kind: "single";
       image: string;
       extractFields: true;
-      gradeLevel: AcademicGradeLevel | "PSA";
-      documentType: "sf10" | "birth_cert";
+      gradeLevel: AcademicGradeLevel;
+      documentType: "sf10";
     }
   | {
       kind: "two_sided";
@@ -104,17 +102,17 @@ export type ResolvedOcrRequest =
 
 /**
  * Resolves the exact OCR request arguments for the active upload workflow,
- * guaranteeing that PSA never inherits the academic `gradeLevel` and that
- * SF10 forwards both the selected `gradeLevel` and `documentType: "sf10"`.
+ * ensuring SF10 forwards both the selected `gradeLevel` and `documentType: "sf10"`,
+ * and SF9 forwards two-sided captures with `documentType: "sf9"`.
  */
 export function resolveOcrExtractionRequest(params: {
   docCategory: UploadDocCategory;
   workflowType: UploadWorkflowType;
-  gradeLevel: AcademicGradeLevel;
+  gradeLevel: AcademicGradeLevel | string;
   singleImage: string | null;
-  frontImage: string | null;
-  backImage: string | null;
-  psaImage: string | null;
+  frontImage?: string | null;
+  backImage?: string | null;
+  psaImage?: string | null;
 }): ResolvedOcrRequest | null {
   const {
     docCategory,
@@ -123,18 +121,10 @@ export function resolveOcrExtractionRequest(params: {
     singleImage,
     frontImage,
     backImage,
-    psaImage,
   } = params;
 
-  if (docCategory === "birth_cert") {
-    if (!psaImage) return null;
-    return {
-      kind: "single",
-      image: psaImage,
-      extractFields: true,
-      gradeLevel: "PSA",
-      documentType: "birth_cert",
-    };
+  if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
+    return null;
   }
 
   if (workflowType === "two_sided") {
@@ -144,7 +134,7 @@ export function resolveOcrExtractionRequest(params: {
       frontImage,
       backImage,
       extractFields: true,
-      gradeLevel,
+      gradeLevel: gradeLevel as AcademicGradeLevel,
       documentType: "sf9",
     };
   }
@@ -154,14 +144,14 @@ export function resolveOcrExtractionRequest(params: {
     kind: "single",
     image: singleImage,
     extractFields: true,
-    gradeLevel,
+    gradeLevel: gradeLevel as AcademicGradeLevel,
     documentType: "sf10",
   };
 }
 
 export interface BuildDocumentSubmissionParams {
   docCategory: UploadDocCategory;
-  gradeLevel: AcademicGradeLevel;
+  gradeLevel: AcademicGradeLevel | string;
   ocrFields: ExtractedFields;
   ocrText?: string;
   ocrModel?: string;
@@ -169,19 +159,12 @@ export interface BuildDocumentSubmissionParams {
   finalPrimaryUrl: string;
   backStorageUrl?: string;
   originalFilename: string;
-  psaMetadata?: {
-    originalPsaStorageUrl?: string;
-    fullPsaStorageUrl?: string;
-    identityCropPsaStorageUrl?: string;
-    processedPsaStorageUrl?: string;
-    ocrCandidateType?: string;
-    cropScaleFactor?: number;
-    identityCropBox?: unknown;
-  };
+  status?: string;
+  documentId?: string;
 }
 
 export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionParams): {
-  docType: "sf9" | "sf10" | "birth_cert";
+  docType: "sf9" | "sf10";
   combinedFields: ExtractedFields;
   requestBody: Record<string, unknown>;
 } {
@@ -195,63 +178,34 @@ export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionPa
     finalPrimaryUrl,
     backStorageUrl,
     originalFilename,
-    psaMetadata,
   } = params;
 
-  const docType: "sf9" | "sf10" | "birth_cert" =
-    docCategory === "birth_cert"
-      ? "birth_cert"
-      : docCategory === "sf10" || ocrFields?.document_type?.toLowerCase() === "sf10"
+  if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
+    throw new Error(
+      "Unsupported document category: PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."
+    );
+  }
+
+  const docType: "sf9" | "sf10" =
+    docCategory === "sf10" || ocrFields?.document_type?.toLowerCase() === "sf10"
       ? "sf10"
       : "sf9";
 
   const sanitizedBaseFields: ExtractedFields = { ...ocrFields };
-  if (docType === "birth_cert") {
-    delete sanitizedBaseFields.academic_level;
-    delete sanitizedBaseFields.selected_grade_level;
-    delete sanitizedBaseFields.grading_period_scheme;
-  }
-
   const academicScheme =
     sanitizedBaseFields.grading_period_scheme || "quarterly_semestral";
 
   const combinedFields: ExtractedFields = {
     ...sanitizedBaseFields,
     document_type: docType,
-    ...(docType !== "birth_cert"
-      ? {
-          academic_level: "Senior High School",
-          selected_grade_level: gradeLevel,
-          grade_level: sanitizedBaseFields.grade_level || gradeLevel,
-          grading_period_scheme: academicScheme,
-        }
-      : {}),
+    academic_level: "Senior High School",
+    selected_grade_level: gradeLevel,
+    grade_level: sanitizedBaseFields.grade_level || gradeLevel,
+    grading_period_scheme: academicScheme,
     ...(backStorageUrl
       ? {
           back_image_url: backStorageUrl,
           images: { front: finalPrimaryUrl, back: backStorageUrl },
-        }
-      : {}),
-    ...(docType === "birth_cert"
-      ? {
-          original_image_url: psaMetadata?.originalPsaStorageUrl || finalPrimaryUrl,
-          full_corrected_image_url: psaMetadata?.fullPsaStorageUrl || finalPrimaryUrl,
-          identity_crop_image_url:
-            psaMetadata?.identityCropPsaStorageUrl ||
-            psaMetadata?.processedPsaStorageUrl ||
-            finalPrimaryUrl,
-          processed_image_url:
-            psaMetadata?.identityCropPsaStorageUrl ||
-            psaMetadata?.processedPsaStorageUrl ||
-            finalPrimaryUrl,
-          ocr_candidate_type: psaMetadata?.ocrCandidateType || "bw",
-          crop_scale_factor: psaMetadata?.cropScaleFactor || 2.0,
-          identity_crop_box: psaMetadata?.identityCropBox,
-          images: {
-            front: psaMetadata?.originalPsaStorageUrl || finalPrimaryUrl,
-            back: backStorageUrl || undefined,
-          },
-          grades: [],
         }
       : {}),
   };
@@ -270,8 +224,9 @@ export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionPa
     original_filename: originalFilename,
     extracted_text: ocrText || "Extracted Text",
     extracted_fields: combinedFields,
-    status: "submitted",
-    ...(docType !== "birth_cert" ? { selected_grade_level: gradeLevel } : {}),
+    status: params.status || "needs_review",
+    selected_grade_level: gradeLevel,
+    ...(params.documentId ? { document_id: params.documentId } : {}),
     ...(resolvedModel ? { ocr_model: resolvedModel } : {}),
     ...(typeof resolvedConfidence === "number" ? { ocr_confidence: resolvedConfidence } : {}),
   };
@@ -293,17 +248,6 @@ export function getUploadUiCopy(params: {
 } {
   const { docCategory, workflowType, currentStep, gradeLevel } = params;
   const shortLevel = getGradeLevelShortLabel(gradeLevel);
-
-  if (docCategory === "birth_cert") {
-    return {
-      captureHeading: "Capture PSA / Birth Certificate",
-      previewHeading: "PSA / Birth Certificate Preview",
-      emptyHeading: "Capture or upload a PSA / Birth Certificate",
-      emptyDescription:
-        "Ensure registry number, child's full name, sex, and date of birth are clearly legible.",
-      modalSummaryLabel: "PSA / Birth Certificate",
-    };
-  }
 
   if (docCategory === "sf10") {
     const levelInstruction =

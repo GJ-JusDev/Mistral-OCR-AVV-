@@ -23,7 +23,6 @@ export default async function PrincipalDocumentsPage() {
       totalCount={result.totalCount}
       sf9Count={result.sf9Count}
       sf10Count={result.sf10Count}
-      psaCount={result.psaCount}
       flaggedCount={result.flaggedCount}
       availableSections={result.availableSections}
       availableSchoolYears={result.availableSchoolYears}

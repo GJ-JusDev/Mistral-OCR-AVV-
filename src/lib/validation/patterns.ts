@@ -32,16 +32,25 @@ export const SEX_PATTERN = /^(?:M(?:ale)?|F(?:emale)?)$/i;
 export const SCHOOL_ID_PATTERN = /^\d{6}$/;
 
 /**
- * Normalize an LRN string by stripping spaces and dashes, keeping only digits.
+ * Normalize an LRN string by:
+ * - Trimming leading/trailing whitespace
+ * - Removing common label prefixes (e.g. "LRN:", "LRN -", "Learner Reference Number:", "No.")
+ * - Stripping permitted formatting characters (spaces, hyphens, en/em dashes, dots)
+ * - Preserving raw characters without inventing, truncating, or padding digits
  */
-export function normalizeLrn(raw: string): string {
-  return raw.replace(/[\s\-]/g, "");
+export function normalizeLrn(raw: string | undefined | null): string {
+  if (!raw || typeof raw !== "string") return "";
+  let clean = raw.trim();
+  clean = clean.replace(/^(?:LRN|Learner\s+Reference\s+Number|No\.?)[\s:\-–—\.]+/i, "");
+  clean = clean.replace(/[\s\-–—\.]/g, "");
+  return clean;
 }
 
 /**
- * Check if a raw LRN string (possibly with spaces/dashes) is valid.
+ * Check if an LRN string (possibly with permitted formatting characters) is exactly 12 numeric digits.
  */
-export function isValidLrn(raw: string): boolean {
+export function isValidLrn(raw: string | undefined | null): boolean {
+  if (!raw) return false;
   return LRN_PATTERN.test(normalizeLrn(raw));
 }
 

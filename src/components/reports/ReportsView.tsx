@@ -78,8 +78,7 @@ export default function ReportsView({
       "Academic Standing",
       "Review Status",
       "Has SF9",
-      "Has SF10",
-      "Has PSA"
+      "Has SF10"
     ];
 
     const rows = students.map(s => [
@@ -92,7 +91,6 @@ export default function ReportsView({
       s.reviewStatus,
       s.availableDocuments?.sf9 ? "Yes" : "No",
       s.availableDocuments?.sf10 ? "Yes" : "No",
-      s.availableDocuments?.psa ? "Yes" : "No",
     ]);
 
     triggerCsvDownload(`TRIS_SHS_Student_Directory_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
@@ -197,7 +195,7 @@ export default function ReportsView({
         <Card padding="md" className="bg-white border-l-4 border-l-blue-600">
           <span className="text-[0.65rem] font-bold text-zinc-500 uppercase">Archived Documents</span>
           <p className="text-2xl font-bold text-zinc-900 mt-1">{summary.totalDocuments}</p>
-          <p className="text-[0.65rem] text-zinc-500 mt-1.5">SF9, SF10, PSA</p>
+          <p className="text-[0.65rem] text-zinc-500 mt-1.5">SF9, SF10</p>
         </Card>
 
         <Card padding="md" className="bg-white border-l-4 border-l-emerald-600">
@@ -225,7 +223,7 @@ export default function ReportsView({
               <h3 className="text-sm font-bold text-zinc-900">Student Directory Report</h3>
             </div>
             <p className="text-xs text-zinc-600 leading-relaxed mt-2">
-              Complete roster of Grade 11 and 12 learners, including LRNs, assigned sections, school years, attached document badges (SF9, SF10, PSA), and academic review statuses.
+              Complete roster of Grade 11 and 12 learners, including LRNs, assigned sections, school years, attached document badges (SF9, SF10), and academic review statuses.
             </p>
             <div className="mt-4 p-2.5 bg-zinc-50 rounded-md border border-zinc-200 text-xs text-zinc-500 flex justify-between">
               <span>Ready for Export:</span>
@@ -253,7 +251,7 @@ export default function ReportsView({
               <h3 className="text-sm font-bold text-zinc-900">Document Monitoring Report</h3>
             </div>
             <p className="text-xs text-zinc-600 leading-relaxed mt-2">
-              Detailed audit summary of all uploaded SF9, SF10, and PSA documents with OCR confidence scores, validation rule counts, missing school year flags, and approval statuses.
+              Detailed audit summary of all uploaded SF9 and SF10 documents with OCR confidence scores, validation rule counts, missing school year flags, and approval statuses.
             </p>
             <div className="mt-4 p-2.5 bg-zinc-50 rounded-md border border-zinc-200 text-xs text-zinc-500 flex justify-between">
               <span>Ready for Export:</span>
@@ -306,7 +304,7 @@ export default function ReportsView({
           <ShieldCheck className="h-5 w-5 text-[#174EA6]" />
           <div>
             <p className="text-xs font-semibold text-zinc-900">Department of Education Regional Office V &bull; Division of Legazpi City</p>
-            <p className="text-[0.7rem] text-zinc-500">Taysan Resettlement Integrated School &bull; School ID 300792 &bull; Automated Visual Validation System (AVV)</p>
+            <p className="text-[0.7rem] text-zinc-500">Taysan Resettlement Integrated School &bull; School ID 500169 &bull; Automated Visual Validation System (AVV)</p>
           </div>
         </div>
         <span className="text-[0.7rem] text-zinc-400 font-mono">

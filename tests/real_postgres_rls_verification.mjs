@@ -220,7 +220,7 @@ export async function runRealPostgresVerification() {
 
   await db.exec(`
     INSERT INTO public.schools (id, school_id, name) VALUES
-      ('${schoolTrisId}', '300792', 'Taysan Resettlement Integrated School'),
+      ('${schoolTrisId}', '500169', 'Taysan Resettlement Integrated School'),
       ('${schoolOtherId}', '300999', 'Other Secondary School');
 
     INSERT INTO auth.users (id, email) VALUES

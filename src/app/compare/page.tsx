@@ -79,15 +79,6 @@ export default function ComparePage() {
   ]);
   const [unifiedSf10, setUnifiedSf10] = useState<ExtractedFields | null>(null);
 
-  // ---------------------------------------------------------------------------
-  // State: Optional PSA Birth Certificate
-  // ---------------------------------------------------------------------------
-  const [psaImage, setPsaImage] = useState<string | null>(null);
-  const [psaMode, setPsaMode] = useState<"upload" | "camera">("upload");
-  const [psaResult, setPsaResult] = useState<ExtractedFields | null>(null);
-  const [showPsaSlot, setShowPsaSlot] = useState(false);
-
-  // ---------------------------------------------------------------------------
   // State: Workflow, Modals & Filters
   // ---------------------------------------------------------------------------
   const [extractionStep, setExtractionStep] = useState<string>("");
@@ -247,13 +238,6 @@ export default function ComparePage() {
       );
       setUnifiedSf10(consolidated10.unifiedFields);
 
-      // 5. Optional PSA Birth Certificate Extraction
-      if (psaImage && !psaResult) {
-        setExtractionStep("Extracting PSA Certificate of Live Birth...");
-        const resPsa = await extract(psaImage, true, "PSA", "birth_cert");
-        setPsaResult(resPsa.fields || null);
-      }
-
       setExtractionStep("");
     } catch (err) {
       console.error("[compare] Extraction sequence failed:", err);
@@ -273,7 +257,7 @@ export default function ComparePage() {
     return compareDocuments(
       effectiveSf9 || {},
       effectiveSf10 || {},
-      psaResult || undefined,
+      undefined,
       {
         targetGradeLevel: effectiveSf9?.grade_level || "Grade 11",
         sf9Meta: {
@@ -283,7 +267,7 @@ export default function ComparePage() {
         },
       }
     );
-  }, [effectiveSf9, effectiveSf10, psaResult, sf9Merged, sf9FrontImage, sf9BackImage]);
+  }, [effectiveSf9, effectiveSf10, sf9Merged, sf9FrontImage, sf9BackImage]);
 
   // Record audit event for comparison execution
   const loggedComparisonRef = React.useRef<string | null>(null);
@@ -448,7 +432,7 @@ export default function ComparePage() {
           <ShieldCheck className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
           <span className="font-semibold">Taysan Resettlement Integrated School (TRIS)</span>
           <span className="text-zinc-400">•</span>
-          <span>DepEd School ID: <strong>300792</strong></span>
+          <span>DepEd School ID: <strong>500169</strong></span>
         </div>
         <div className="flex items-center gap-2 text-zinc-500">
           <Sparkles className="w-3.5 h-3.5 text-amber-500" />
@@ -762,88 +746,7 @@ export default function ComparePage() {
         </Card>
       </div>
 
-      {/* =================================================================== */}
-      {/* Panel 3: Optional PSA Birth Certificate Slot                        */}
-      {/* =================================================================== */}
-      {showPsaSlot ? (
-        <div className="mt-6">
-          <Card padding="md" className="flex flex-col gap-4 border-slate-200 dark:border-zinc-800">
-            <div className="flex justify-between items-center border-b pb-2">
-              <div>
-                <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-purple-600" />
-                  Document 3: PSA Certificate of Live Birth (Optional 3-Way Identity Match)
-                </h3>
-                <p className="text-xs text-zinc-500 mt-0.5">
-                  Authoritative birth name, birth date, and sex verification anchor
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {!psaImage && (
-                  <>
-                    <button
-                      onClick={() => setPsaMode("upload")}
-                      className={`p-1 rounded ${psaMode === "upload" ? "bg-purple-100 text-purple-700" : "text-zinc-500 hover:bg-zinc-100"}`}
-                      title="Upload PSA"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => setPsaMode("camera")}
-                      className={`p-1 rounded ${psaMode === "camera" ? "bg-purple-100 text-purple-700" : "text-zinc-500 hover:bg-zinc-100"}`}
-                      title="Camera PSA"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                    </button>
-                  </>
-                )}
-                <button
-                  onClick={() => { setShowPsaSlot(false); setPsaImage(null); setPsaResult(null); }}
-                  className="p-1 text-zinc-400 hover:text-rose-600 rounded"
-                  title="Close PSA Slot"
-                >
-                  <XCircle className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
 
-            {!psaImage ? (
-              psaMode === "camera" ? (
-                <CameraCaptureView
-                  onCapture={(img) => { setPsaImage(img); setPsaMode("upload"); }}
-                  onCancel={() => setPsaMode("upload")}
-                />
-              ) : (
-                <ImageUploader onImageSelected={(img) => { setPsaImage(img); setPsaResult(null); }} />
-              )
-            ) : (
-              <div className="relative group max-w-sm mx-auto">
-                <img
-                  src={psaImage}
-                  alt="PSA Birth Certificate"
-                  className="w-full h-40 object-contain rounded border bg-black/5"
-                />
-                <button
-                  onClick={() => { setPsaImage(null); setPsaResult(null); }}
-                  className="absolute top-2 right-2 bg-rose-600 text-white rounded px-2 py-1 text-xs shadow hover:bg-rose-700 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  Remove
-                </button>
-              </div>
-            )}
-          </Card>
-        </div>
-      ) : (
-        <div className="mt-4 flex justify-center">
-          <button
-            type="button"
-            onClick={() => setShowPsaSlot(true)}
-            className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 hover:underline inline-flex items-center gap-1.5"
-          >
-            <Plus className="w-3.5 h-3.5" /> Add PSA / Birth Certificate for 3-Way Identity Verification
-          </button>
-        </div>
-      )}
 
       {/* =================================================================== */}
       {/* Verify & Compare Action Button                                      */}
@@ -1000,7 +903,6 @@ export default function ComparePage() {
                     <th className="py-2.5 px-3 font-semibold">Identity Field</th>
                     <th className="py-2.5 px-3 font-semibold">SF9 (Report Card)</th>
                     <th className="py-2.5 px-3 font-semibold">SF10 (Permanent Record)</th>
-                    {showPsaSlot && <th className="py-2.5 px-3 font-semibold">PSA Birth Cert</th>}
                     <th className="py-2.5 px-3 font-semibold text-right">Status</th>
                   </tr>
                 </thead>
@@ -1015,7 +917,6 @@ export default function ComparePage() {
                       </td>
                       <td className="py-2.5 px-3 font-mono text-xs">{item.doc1Value ?? "-"}</td>
                       <td className="py-2.5 px-3 font-mono text-xs">{item.doc2Value ?? "-"}</td>
-                      {showPsaSlot && <td className="py-2.5 px-3 font-mono text-xs">{item.doc3Value ?? "N/A"}</td>}
                       <td className="py-2.5 px-3 text-right">{renderStatusBadge(item.status)}</td>
                     </tr>
                   ))}
@@ -1215,7 +1116,7 @@ export default function ComparePage() {
 
               <div>
                 <span className="text-xs font-semibold text-zinc-500 uppercase">Academic Scope</span>
-                <p>{effectiveSf9?.grade_level || "Grade 11"} • Taysan Resettlement Integrated School (300792)</p>
+                <p>{effectiveSf9?.grade_level || "Grade 11"} • Taysan Resettlement Integrated School (500169)</p>
               </div>
             </div>
 

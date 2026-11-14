@@ -55,7 +55,7 @@ test("AVV Complete Admin Audit Logs & Activity Monitoring Suite", async (t) => {
       actorUserId: "d3b07384-d113-40e1-a2bb-000000000001",
       actorEmail: "teacher@example.com",
       actorRole: "teacher",
-      actorSchoolId: "30079200-0000-0000-0000-000000000000",
+      actorSchoolId: "50016900-0000-0000-0000-000000000000",
       actorSchoolName: "Taysan Resettlement Integrated School",
       reason: "User signed in successfully",
     });
@@ -151,7 +151,7 @@ test("AVV Complete Admin Audit Logs & Activity Monitoring Suite", async (t) => {
       actorUserId: "admin-uuid-1",
       actorEmail: "admin@deped.gov.ph",
       actorRole: "admin",
-      actorSchoolId: "30079200-0000-0000-0000-000000000000",
+      actorSchoolId: "50016900-0000-0000-0000-000000000000",
       actorSchoolName: "Taysan Resettlement Integrated School",
       targetType: "user",
       targetId: "target-teacher-uuid",
@@ -161,7 +161,7 @@ test("AVV Complete Admin Audit Logs & Activity Monitoring Suite", async (t) => {
         previous_status: "Pending",
         new_status: "Approved",
         assigned_role: "teacher",
-        assigned_school_id: "30079200-0000-0000-0000-000000000000",
+        assigned_school_id: "50016900-0000-0000-0000-000000000000",
       },
     });
 
@@ -351,7 +351,7 @@ test("AVV Complete Admin Audit Logs & Activity Monitoring Suite", async (t) => {
       actorRole: "principal",
       targetType: "student",
       targetId: "student-uuid-99",
-      targetLabel: "Learner: Juan Dela Cruz (300792)",
+      targetLabel: "Learner: Juan Dela Cruz (500169)",
       reason: "Principal recorded attendance standing review",
       details: {
         risk_status: "NORMAL",

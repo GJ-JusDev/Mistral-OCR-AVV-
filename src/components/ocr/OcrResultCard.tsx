@@ -5,7 +5,15 @@ import { Card } from "@/components/ui/Card";
 import FieldEditor from "./FieldEditor";
 import { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
 import { AlertTriangle, CheckCircle, FileText, User, Users, Award, ShieldCheck } from "lucide-react";
-import { recalculateSubjectGradeStatus } from "@/lib/validation/gradeUtils";
+import {
+  recalculateSubjectGradeStatus,
+  computeSemesterGeneralAverage,
+  updateExtractedFieldsAverages,
+  normalizeGradeRecords,
+  normalizeSemesterContext,
+  parseQuarterNumeric,
+  isBlankOrMissingFinal,
+} from "@/lib/validation/gradeUtils";
 
 export interface OcrResultCardProps {
   fields: ExtractedFields | null;
@@ -128,26 +136,43 @@ export default function OcrResultCard({
 
       (target as any)[key] = parsedVal;
 
-      // Sync semester final grades with candidate final grade
+      // When editing quarterly grades: if final was auto-computed or blank, clear it so candidate recalculates
+      if (key === "q1" || key === "q2" || key === "q3" || key === "q4") {
+        if (target.is_auto_computed || isBlankOrMissingFinal(target.final)) {
+          target.final = undefined;
+          target.sem1_final_grade = undefined;
+          target.sem2_final_grade = undefined;
+        }
+      }
+
+      // Sync semester final grades with candidate final grade when explicitly edited
       if (key === "final") {
-        if (target.semester === "1st Semester") {
+        target.is_auto_computed = false;
+        target.grade_source = "manual_edit";
+        const normSem = normalizeSemesterContext(target.semester || fields.semester);
+        if (normSem === "1st Semester") {
           target.sem1_final_grade = parsedVal;
-        } else if (target.semester === "2nd Semester") {
+        } else if (normSem === "2nd Semester") {
           target.sem2_final_grade = parsedVal;
         }
       } else if (key === "sem1_final_grade") {
+        target.is_auto_computed = false;
+        target.grade_source = "manual_edit";
         target.sem1_final_grade = parsedVal;
         target.final = parsedVal;
       } else if (key === "sem2_final_grade") {
+        target.is_auto_computed = false;
+        target.grade_source = "manual_edit";
         target.sem2_final_grade = parsedVal;
         target.final = parsedVal;
       }
     }
 
     // Recalculate subject status and verification flags on any grade edit
-    const normalizedTarget = recalculateSubjectGradeStatus(target);
+    const normalizedTarget = recalculateSubjectGradeStatus(target, target.semester || fields.semester);
     updatedGrades[index] = normalizedTarget;
-    onFieldChange("grades", updatedGrades);
+    const finalNormalizedGrades = normalizeGradeRecords(updatedGrades, fields.semester);
+    onFieldChange("grades", finalNormalizedGrades);
   };
 
   const handleAttendanceCellChange = (
@@ -206,243 +231,10 @@ export default function OcrResultCard({
       ) : (
         <div className="space-y-6">
           {/* Section 1: Student Information Header Fields */}
-          {fields.document_type === "birth_cert" ? (
-            <div className="space-y-6">
-              {/* Notice Banner */}
-              <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 rounded-lg p-3 text-xs text-emerald-800 dark:text-emerald-300 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-                  <span><strong>Philippine Statistics Authority (PSA)</strong> &bull; Certificate of Live Birth</span>
-                </div>
-                <span className="font-medium bg-emerald-100 dark:bg-emerald-900/60 px-2 py-0.5 rounded text-[11px]">
-                  Civil Registry Record
-                </span>
-              </div>
-
-              {/* 1. Child Information */}
-              <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3 border-b border-zinc-100 dark:border-zinc-800 pb-2">
-                  <h4 className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                    <User className="w-4 h-4 text-blue-600" />
-                    Child Information
-                  </h4>
-                  <span className="text-[11px] text-zinc-400">Box 1, 2, 3 &amp; 4</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {[
-                    { key: "last_name", label: "Last Name" },
-                    { key: "first_name", label: "First Name" },
-                    { key: "middle_name", label: "Middle Name" },
-                    { key: "sex", label: "Sex" },
-                    { key: "birth_date", label: "Date of Birth" },
-                    { key: "birth_place", label: "Place of Birth" },
-                  ].map(({ key, label }) => {
-                    const val = (fields as any)[key] ?? "";
-                    const meta = fields.field_metadata?.[key];
-                    const isMissing = !val || String(val).trim() === "";
-                    const isUncertain = meta?.needsVerification || isMissing;
-                    const isHigh = meta?.confidence === "HIGH" && !isMissing && !meta?.needsVerification;
-
-                    const badge = isMissing ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Needs Verification
-                      </span>
-                    ) : isUncertain ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Uncertain
-                      </span>
-                    ) : isHigh ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 px-1.5 py-0.5 rounded">
-                        <CheckCircle className="w-3 h-3 text-emerald-600" />
-                        High Conf.
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
-                        Extracted
-                      </span>
-                    );
-
-                    if (onFieldChange) {
-                      return (
-                        <FieldEditor
-                          key={key}
-                          label={label}
-                          value={String(val)}
-                          onChange={(newVal) => onFieldChange(key, newVal)}
-                          badge={badge}
-                        />
-                      );
-                    }
-
-                    return (
-                      <div key={key} className="flex flex-col gap-1">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-xs font-medium text-zinc-500">{label}</span>
-                          {badge}
-                        </div>
-                        <div className={`px-3 py-2 rounded-md border text-sm font-medium ${
-                          isMissing
-                            ? "bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50 text-amber-700 dark:text-amber-400 italic"
-                            : "bg-zinc-50 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100"
-                        }`}>
-                          {val || "Could not reliably extract"}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 2. Parent Information */}
-              <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3 border-b border-zinc-100 dark:border-zinc-800 pb-2">
-                  <h4 className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                    <Users className="w-4 h-4 text-purple-600" />
-                    Parent Information
-                  </h4>
-                  <span className="text-[11px] text-zinc-400">Box 6 &amp; 13</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {[
-                    { key: "mother_name", label: "Mother's Maiden Name" },
-                    { key: "father_name", label: "Father's Name" },
-                  ].map(({ key, label }) => {
-                    const val = (fields as any)[key] ?? "";
-                    const meta = fields.field_metadata?.[key];
-                    const isMissing = !val || String(val).trim() === "";
-                    const isUncertain = meta?.needsVerification || isMissing;
-                    const isHigh = meta?.confidence === "HIGH" && !isMissing && !meta?.needsVerification;
-
-                    const badge = isMissing ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Needs Verification
-                      </span>
-                    ) : isUncertain ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Uncertain
-                      </span>
-                    ) : isHigh ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 px-1.5 py-0.5 rounded">
-                        <CheckCircle className="w-3 h-3 text-emerald-600" />
-                        High Conf.
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
-                        Extracted
-                      </span>
-                    );
-
-                    if (onFieldChange) {
-                      return (
-                        <FieldEditor
-                          key={key}
-                          label={label}
-                          value={String(val)}
-                          onChange={(newVal) => onFieldChange(key, newVal)}
-                          badge={badge}
-                        />
-                      );
-                    }
-
-                    return (
-                      <div key={key} className="flex flex-col gap-1">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-xs font-medium text-zinc-500">{label}</span>
-                          {badge}
-                        </div>
-                        <div className={`px-3 py-2 rounded-md border text-sm font-medium ${
-                          isMissing
-                            ? "bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50 text-amber-700 dark:text-amber-400 italic"
-                            : "bg-zinc-50 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100"
-                        }`}>
-                          {val || "Could not reliably extract"}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 3. Registry Information */}
-              <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3 border-b border-zinc-100 dark:border-zinc-800 pb-2">
-                  <h4 className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-emerald-600" />
-                    Registry Information
-                  </h4>
-                  <span className="text-[11px] text-zinc-400">Civil Registry Office Record</span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {[
-                    { key: "registry_number", label: "Civil Registry Number" },
-                  ].map(({ key, label }) => {
-                    const val = (fields as any)[key] ?? "";
-                    const meta = fields.field_metadata?.[key];
-                    const isMissing = !val || String(val).trim() === "";
-                    const isUncertain = meta?.needsVerification || isMissing;
-                    const isHigh = meta?.confidence === "HIGH" && !isMissing && !meta?.needsVerification;
-
-                    const badge = isMissing ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Needs Verification
-                      </span>
-                    ) : isUncertain ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 px-1.5 py-0.5 rounded">
-                        <AlertTriangle className="w-3 h-3 text-amber-600" />
-                        Uncertain
-                      </span>
-                    ) : isHigh ? (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 px-1.5 py-0.5 rounded">
-                        <CheckCircle className="w-3 h-3 text-emerald-600" />
-                        High Conf.
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded">
-                        Extracted
-                      </span>
-                    );
-
-                    if (onFieldChange) {
-                      return (
-                        <FieldEditor
-                          key={key}
-                          label={label}
-                          value={String(val)}
-                          onChange={(newVal) => onFieldChange(key, newVal)}
-                          badge={badge}
-                        />
-                      );
-                    }
-
-                    return (
-                      <div key={key} className="flex flex-col gap-1">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-xs font-medium text-zinc-500">{label}</span>
-                          {badge}
-                        </div>
-                        <div className={`px-3 py-2 rounded-md border text-sm font-medium ${
-                          isMissing
-                            ? "bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900/50 text-amber-700 dark:text-amber-400 italic"
-                            : "bg-zinc-50 dark:bg-zinc-800 border-zinc-200 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100"
-                        }`}>
-                          {val || "Could not reliably extract"}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3">
-                Learner Identity &amp; Form Details
-              </h4>
+          <div>
+            <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3">
+              Learner Identity &amp; Form Details
+            </h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {[
                   { key: "lrn", label: "Learner Reference No. (LRN)" },
@@ -460,16 +252,19 @@ export default function OcrResultCard({
                 ].map(({ key, label }) => {
                   const val = (fields as any)[key] ?? "";
                   const isSchoolConfig =
-                    (key === "school_id" || key === "school_name") &&
-                    ((fields as any).school_id_source === "school_configuration" ||
-                     fields.school_id === "300792" ||
-                     (fields as any).trusted_school_verified === true);
+                    (fields as any).trusted_school_verified === true &&
+                    ((fields as any).school_id_source === "school_configuration" || fields.school_id === "500169" || fields.school_id === "300792") &&
+                    (key === "school_id" ||
+                     (key === "school_name" &&
+                      (!fields.school_name ||
+                       fields.school_name.trim() === "" ||
+                       fields.school_name.toLowerCase().includes("taysan"))));
 
                   if (isSchoolConfig) {
                     const displayLabel = key === "school_id" ? "DepEd School ID" : "School";
                     const displayVal =
                       key === "school_id"
-                        ? (fields.school_id || "300792")
+                        ? (fields.school_id === "300792" ? "500169" : (fields.school_id || "500169"))
                         : (fields.school_name || "Taysan Resettlement Integrated School");
 
                     return (
@@ -508,25 +303,47 @@ export default function OcrResultCard({
                 })}
               </div>
             </div>
-          )}
 
           {/* Section 2: Subject Grades Tables */}
           {Array.isArray(fields.grades) && fields.grades.length > 0 && (() => {
-            const isShsSemestral = fields.grades.some(
-              (g) => g.semester === "1st Semester" || g.semester === "2nd Semester" || g.grading_period_scheme === "quarterly_semestral"
-            );
+            const normAllGrades = normalizeGradeRecords(fields.grades, fields.semester);
+            const isShsSemestral =
+              normalizeSemesterContext(fields.semester) !== undefined ||
+              normAllGrades.some(
+                (g) =>
+                  normalizeSemesterContext(g.semester) !== undefined ||
+                  g.grading_period_scheme === "quarterly_semestral" ||
+                  parseQuarterNumeric(g.q3) !== undefined ||
+                  parseQuarterNumeric(g.q4) !== undefined
+              );
 
             if (isShsSemestral) {
-              const indexedGrades = fields.grades.map((g, idx) => ({ ...g, origIndex: idx }));
-              const sem1Grades = indexedGrades.filter(
-                (g) => g.semester === "1st Semester" || (!g.semester && (g.q1 !== undefined || g.q2 !== undefined))
-              );
-              const sem2Grades = indexedGrades.filter(
-                (g) => g.semester === "2nd Semester" || (!g.semester && (g.q3 !== undefined || g.q4 !== undefined) && g.q1 === undefined && g.q2 === undefined)
-              );
+              const indexedGrades = normAllGrades.map((g, idx) => ({ ...g, origIndex: idx }));
+              const sem1Grades = indexedGrades.filter((g) => {
+                const s = normalizeSemesterContext(g.semester);
+                if (s === "1st Semester") return true;
+                if (s === "2nd Semester") return false;
+                if (normalizeSemesterContext(fields.semester) === "1st Semester") return true;
+                if (normalizeSemesterContext(fields.semester) === "2nd Semester") return false;
+                const hasQ1Q2 = parseQuarterNumeric(g.q1) !== undefined || parseQuarterNumeric(g.q2) !== undefined;
+                const hasQ3Q4 = parseQuarterNumeric(g.q3) !== undefined || parseQuarterNumeric(g.q4) !== undefined;
+                return hasQ1Q2 && !hasQ3Q4;
+              });
+              const sem2Grades = indexedGrades.filter((g) => {
+                const s = normalizeSemesterContext(g.semester);
+                if (s === "2nd Semester") return true;
+                if (s === "1st Semester") return false;
+                if (normalizeSemesterContext(fields.semester) === "2nd Semester") return true;
+                if (normalizeSemesterContext(fields.semester) === "1st Semester") return false;
+                const hasQ3Q4 = parseQuarterNumeric(g.q3) !== undefined || parseQuarterNumeric(g.q4) !== undefined;
+                return hasQ3Q4;
+              });
               const unassignedGrades = indexedGrades.filter(
                 (g) => !sem1Grades.includes(g) && !sem2Grades.includes(g)
               );
+
+              const sem1AvgResult = computeSemesterGeneralAverage(normAllGrades, "1st Semester");
+              const sem2AvgResult = computeSemesterGeneralAverage(normAllGrades, "2nd Semester");
 
               return (
                 <div className="flex flex-col gap-6">
@@ -552,14 +369,15 @@ export default function OcrResultCard({
                             <th className="py-2.5 px-3">Subject / Learning Area</th>
                             <th className="py-2.5 px-2 text-center w-20">Quarter 1</th>
                             <th className="py-2.5 px-2 text-center w-20">Quarter 2</th>
+                            <th className="py-2.5 px-2 text-center w-20" title="Exact arithmetic average of quarterly marks">Raw Calc.</th>
                             <th className="py-2.5 px-2 text-center w-32">Sem. Final Grade</th>
-                            <th className="py-2.5 px-3 text-right w-24">Status</th>
+                            <th className="py-2.5 px-3 text-right w-28">Status</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
                           {sem1Grades.length === 0 ? (
                             <tr>
-                              <td colSpan={5} className="py-4 px-3 text-center text-xs text-zinc-400 italic">
+                              <td colSpan={6} className="py-4 px-3 text-center text-xs text-zinc-400 italic">
                                 No First Semester subjects recorded.
                               </td>
                             </tr>
@@ -574,7 +392,7 @@ export default function OcrResultCard({
                                   {showCat && (
                                     <tr className="bg-zinc-100/60 dark:bg-zinc-800/40">
                                       <td
-                                        colSpan={5}
+                                        colSpan={6}
                                         className="py-1 px-3 text-[11px] font-bold text-zinc-600 dark:text-zinc-300 uppercase tracking-wider"
                                       >
                                         {item.category}
@@ -631,45 +449,93 @@ export default function OcrResultCard({
                                       )}
                                     </td>
                                     <td className="py-2 px-2 text-center">
-                                      {onFieldChange ? (
-                                        <input
-                                          type="text"
-                                          inputMode="text"
-                                          value={
-                                            item.sem1_final_grade !== undefined
-                                              ? String(item.sem1_final_grade)
-                                              : item.final !== undefined
-                                              ? String(item.final)
-                                              : ""
-                                          }
-                                          onChange={(e) =>
-                                            handleGradeCellChange(item.origIndex, "sem1_final_grade", e.target.value)
-                                          }
-                                          className="w-16 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                                        />
+                                      <span className="text-zinc-600 dark:text-zinc-400 text-xs font-mono font-medium">
+                                        {item.raw_calculated_final !== undefined ? item.raw_calculated_final : "—"}
+                                      </span>
+                                    </td>
+                                    <td className="py-2 px-2 text-center">
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        {onFieldChange ? (
+                                          <input
+                                            type="text"
+                                            inputMode="text"
+                                            value={
+                                              item.sem1_final_grade !== undefined
+                                                ? String(item.sem1_final_grade)
+                                                : item.final !== undefined
+                                                ? String(item.final)
+                                                : ""
+                                            }
+                                            onChange={(e) =>
+                                              handleGradeCellChange(item.origIndex, "sem1_final_grade", e.target.value)
+                                            }
+                                            className="w-16 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                                          />
+                                        ) : (
+                                          <span className="font-bold text-zinc-900 dark:text-zinc-100 text-xs font-mono">
+                                            {item.sem1_final_grade ?? item.final ?? "-"}
+                                          </span>
+                                        )}
+                                        {item.is_auto_computed && (
+                                          <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-semibold bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-300 dark:border-sky-800">
+                                            Auto-Computed
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-2 px-3 text-right">
+                                      {item.has_calculation_discrepancy ? (
+                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold text-amber-800 bg-amber-100 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                                          Discrepancy (Review)
+                                        </span>
                                       ) : (
-                                        <span className="font-bold text-zinc-900 dark:text-zinc-100 text-xs font-mono">
-                                          {item.sem1_final_grade ?? item.final ?? "-"}
+                                        <span
+                                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                            item.status === "Passed"
+                                              ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                              : item.status === "Failed"
+                                              ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
+                                              : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
+                                          }`}
+                                        >
+                                          {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
                                         </span>
                                       )}
                                     </td>
-                                    <td className="py-2 px-3 text-right">
-                                      <span
-                                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                          item.status === "Passed"
-                                            ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                            : item.status === "Failed"
-                                            ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
-                                            : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
-                                        }`}
-                                      >
-                                        {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
-                                      </span>
-                                    </td>
                                   </tr>
+                                  {item.has_calculation_discrepancy && (
+                                    <tr className="bg-amber-50 dark:bg-amber-950/30 text-xs border-b border-amber-200 dark:border-amber-900/50">
+                                      <td colSpan={6} className="py-2 px-3">
+                                        <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 text-xs">
+                                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                          <span>
+                                            <strong>Grade Discrepancy:</strong> Printed Final is{" "}
+                                            <span className="font-bold font-mono underline">{String(item.final)}</span>, but Quarter Average computes to{" "}
+                                            <span className="font-bold font-mono underline">{item.computed_final_grade}</span>
+                                            {item.raw_calculated_final !== undefined && (
+                                              <span className="text-zinc-500 dark:text-zinc-400"> (Raw: {item.raw_calculated_final})</span>
+                                            )}. Preserved printed mark without silent overwrite. Requires human verification before approval.
+                                          </span>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                  {item.is_auto_computed && !item.has_calculation_discrepancy && (
+                                    <tr className="bg-sky-50/50 dark:bg-sky-950/20 text-xs border-b border-sky-100 dark:border-sky-900/30">
+                                      <td colSpan={6} className="py-1 px-3">
+                                        <div className="flex items-center gap-2 text-[11px] text-sky-800 dark:text-sky-300">
+                                          <span className="font-medium">ℹ Candidate Grade:</span>
+                                          <span>
+                                            Automatically calculated from quarters ({String(item.q1)} &amp; {String(item.q2)}) as official{" "}
+                                            <strong>{String(item.final)}</strong> (Raw arithmetic: {item.raw_calculated_final}). Pending review.
+                                          </span>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
                                   {(item.status === "Failed" || item.remedial_class_mark !== undefined || item.recomputed_final_grade !== undefined) && (
                                     <tr className="bg-amber-50/60 dark:bg-amber-950/20 text-xs">
-                                      <td colSpan={5} className="py-1.5 px-3">
+                                      <td colSpan={6} className="py-1.5 px-3">
                                         <div className="flex flex-wrap items-center gap-3 text-[11px]">
                                           <span className="font-semibold text-amber-900 dark:text-amber-300">
                                             Remedial Record:
@@ -710,6 +576,59 @@ export default function OcrResultCard({
                         </tbody>
                       </table>
                     </div>
+
+                    {/* First Semester General Average Card */}
+                    <div className="p-3.5 bg-zinc-50 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold uppercase tracking-wider text-zinc-800 dark:text-zinc-200">
+                            First Semester General Average
+                          </span>
+                          <span className="text-xs font-mono text-zinc-500">
+                            ({sem1AvgResult.subjectCount} {sem1AvgResult.subjectCount === 1 ? "subject" : "subjects"} evaluated)
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              sem1AvgResult.completeness === "COMPLETE"
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                                : sem1AvgResult.completeness === "INCOMPLETE"
+                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                                : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                            }`}
+                          >
+                            {sem1AvgResult.completeness === "COMPLETE"
+                              ? "Complete"
+                              : sem1AvgResult.completeness === "INCOMPLETE"
+                              ? `Incomplete (${sem1AvgResult.subjectCount - (sem1AvgResult.pendingSubjects?.length || 0)} of ${sem1AvgResult.subjectCount} graded)`
+                              : "No Subjects"}
+                          </span>
+                        </div>
+                        <span className="text-[11px] text-zinc-500 dark:text-zinc-400 italic">
+                          {sem1AvgResult.completeness === "COMPLETE"
+                            ? `Official DepEd General Average: ${sem1AvgResult.officialAverage?.toFixed(2)} • Raw Arithmetic Average: ${sem1AvgResult.rawAverage?.toFixed(2)}`
+                            : sem1AvgResult.completeness === "INCOMPLETE"
+                            ? `Pending missing final grades in: ${sem1AvgResult.pendingSubjects?.join(", ")}. DepEd policy requires all subjects complete before official general average.`
+                            : "No First Semester records available."}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        {sem1AvgResult.completeness === "COMPLETE" ? (
+                          <div className="flex items-baseline gap-2 bg-white dark:bg-zinc-900 px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-600 shadow-sm">
+                            <span className="text-xs text-zinc-500">General Average:</span>
+                            <span className="font-mono font-bold text-base text-zinc-900 dark:text-zinc-100">
+                              {sem1AvgResult.officialAverage?.toFixed(2)}
+                            </span>
+                            <span className={`text-xs font-semibold ${Number(sem1AvgResult.officialAverage) >= 75 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                              ({Number(sem1AvgResult.officialAverage) >= 75 ? "Passed" : "Failed"})
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="px-3 py-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs font-medium text-zinc-500 italic">
+                            Pending / Incomplete
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
 
                   {/* Second Semester Table */}
@@ -722,9 +641,14 @@ export default function OcrResultCard({
                         <span className="text-xs text-zinc-500 font-mono">
                           ({sem2Grades.length} {sem2Grades.length === 1 ? "subject" : "subjects"})
                         </span>
+                        {sem2Grades.length === 0 && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                            NOT YET AVAILABLE
+                          </span>
+                        )}
                       </div>
                       <span className="text-xs text-zinc-500 dark:text-zinc-400 italic">
-                        Quarter 3 &bull; Quarter 4 &bull; Semester Final Grade
+                        Quarter 3 &bull; Quarter 4 (mapped to 2nd Sem Q1 &bull; Q2) &bull; Semester Final Grade
                       </span>
                     </div>
                     <div className="overflow-x-auto rounded-b-lg border border-zinc-200 dark:border-zinc-700 shadow-sm">
@@ -732,17 +656,25 @@ export default function OcrResultCard({
                         <thead className="bg-zinc-50 dark:bg-zinc-800 text-xs font-semibold text-zinc-700 dark:text-zinc-300 border-b border-zinc-200 dark:border-zinc-700">
                           <tr>
                             <th className="py-2.5 px-3">Subject / Learning Area</th>
-                            <th className="py-2.5 px-2 text-center w-20">Quarter 3</th>
-                            <th className="py-2.5 px-2 text-center w-20">Quarter 4</th>
+                            <th className="py-2.5 px-2 text-center w-20" title="Second Semester Quarter 1 (stored internally as Quarter 3)">Quarter 3 (Q1)</th>
+                            <th className="py-2.5 px-2 text-center w-20" title="Second Semester Quarter 2 (stored internally as Quarter 4)">Quarter 4 (Q2)</th>
+                            <th className="py-2.5 px-2 text-center w-20" title="Exact arithmetic average of quarterly marks">Raw Calc.</th>
                             <th className="py-2.5 px-2 text-center w-32">Sem. Final Grade</th>
-                            <th className="py-2.5 px-3 text-right w-24">Status</th>
+                            <th className="py-2.5 px-3 text-right w-28">Status</th>
                           </tr>
                         </thead>
                         <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
                           {sem2Grades.length === 0 ? (
                             <tr>
-                              <td colSpan={5} className="py-4 px-3 text-center text-xs text-zinc-400 italic">
-                                No Second Semester subjects recorded (not yet enrolled or unscanned).
+                              <td colSpan={6} className="py-6 px-4 text-center">
+                                <div className="inline-flex flex-col items-center gap-1.5">
+                                  <span className="px-2.5 py-1 rounded text-xs font-bold uppercase bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                                    NOT YET AVAILABLE
+                                  </span>
+                                  <span className="text-xs text-zinc-500 dark:text-zinc-400 italic">
+                                    Second Semester records are NOT YET AVAILABLE (pending submission of 2nd semester SF9 report card).
+                                  </span>
+                                </div>
                               </td>
                             </tr>
                           ) : (
@@ -756,7 +688,7 @@ export default function OcrResultCard({
                                   {showCat && (
                                     <tr className="bg-zinc-100/60 dark:bg-zinc-800/40">
                                       <td
-                                        colSpan={5}
+                                        colSpan={6}
                                         className="py-1 px-3 text-[11px] font-bold text-zinc-600 dark:text-zinc-300 uppercase tracking-wider"
                                       >
                                         {item.category}
@@ -813,45 +745,93 @@ export default function OcrResultCard({
                                       )}
                                     </td>
                                     <td className="py-2 px-2 text-center">
-                                      {onFieldChange ? (
-                                        <input
-                                          type="text"
-                                          inputMode="text"
-                                          value={
-                                            item.sem2_final_grade !== undefined
-                                              ? String(item.sem2_final_grade)
-                                              : item.final !== undefined
-                                              ? String(item.final)
-                                              : ""
-                                          }
-                                          onChange={(e) =>
-                                            handleGradeCellChange(item.origIndex, "sem2_final_grade", e.target.value)
-                                          }
-                                          className="w-16 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
-                                        />
+                                      <span className="text-zinc-600 dark:text-zinc-400 text-xs font-mono font-medium">
+                                        {item.raw_calculated_final !== undefined ? item.raw_calculated_final : "—"}
+                                      </span>
+                                    </td>
+                                    <td className="py-2 px-2 text-center">
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        {onFieldChange ? (
+                                          <input
+                                            type="text"
+                                            inputMode="text"
+                                            value={
+                                              item.sem2_final_grade !== undefined
+                                                ? String(item.sem2_final_grade)
+                                                : item.final !== undefined
+                                                ? String(item.final)
+                                                : ""
+                                            }
+                                            onChange={(e) =>
+                                              handleGradeCellChange(item.origIndex, "sem2_final_grade", e.target.value)
+                                            }
+                                            className="w-16 text-center bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-600 rounded px-1 py-0.5 text-xs font-bold text-zinc-900 dark:text-zinc-100 focus:border-blue-500 focus:outline-none"
+                                          />
+                                        ) : (
+                                          <span className="font-bold text-zinc-900 dark:text-zinc-100 text-xs font-mono">
+                                            {item.sem2_final_grade ?? item.final ?? "-"}
+                                          </span>
+                                        )}
+                                        {item.is_auto_computed && (
+                                          <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[10px] font-semibold bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-300 dark:border-sky-800">
+                                            Auto-Computed
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-2 px-3 text-right">
+                                      {item.has_calculation_discrepancy ? (
+                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold text-amber-800 bg-amber-100 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                                          Discrepancy (Review)
+                                        </span>
                                       ) : (
-                                        <span className="font-bold text-zinc-900 dark:text-zinc-100 text-xs font-mono">
-                                          {item.sem2_final_grade ?? item.final ?? "-"}
+                                        <span
+                                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
+                                            item.status === "Passed"
+                                              ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                              : item.status === "Failed"
+                                              ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
+                                              : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
+                                          }`}
+                                        >
+                                          {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
                                         </span>
                                       )}
                                     </td>
-                                    <td className="py-2 px-3 text-right">
-                                      <span
-                                        className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                          item.status === "Passed"
-                                            ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                            : item.status === "Failed"
-                                            ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
-                                            : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
-                                        }`}
-                                      >
-                                        {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
-                                      </span>
-                                    </td>
                                   </tr>
+                                  {item.has_calculation_discrepancy && (
+                                    <tr className="bg-amber-50 dark:bg-amber-950/30 text-xs border-b border-amber-200 dark:border-amber-900/50">
+                                      <td colSpan={6} className="py-2 px-3">
+                                        <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 text-xs">
+                                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                          <span>
+                                            <strong>Grade Discrepancy:</strong> Printed Final is{" "}
+                                            <span className="font-bold font-mono underline">{String(item.final)}</span>, but Quarter Average computes to{" "}
+                                            <span className="font-bold font-mono underline">{item.computed_final_grade}</span>
+                                            {item.raw_calculated_final !== undefined && (
+                                              <span className="text-zinc-500 dark:text-zinc-400"> (Raw: {item.raw_calculated_final})</span>
+                                            )}. Preserved printed mark without silent overwrite. Requires human verification before approval.
+                                          </span>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                  {item.is_auto_computed && !item.has_calculation_discrepancy && (
+                                    <tr className="bg-sky-50/50 dark:bg-sky-950/20 text-xs border-b border-sky-100 dark:border-sky-900/30">
+                                      <td colSpan={6} className="py-1 px-3">
+                                        <div className="flex items-center gap-2 text-[11px] text-sky-800 dark:text-sky-300">
+                                          <span className="font-medium">ℹ Candidate Grade:</span>
+                                          <span>
+                                            Automatically calculated from quarters ({String(item.q3)} &amp; {String(item.q4)}) as official{" "}
+                                            <strong>{String(item.final)}</strong> (Raw arithmetic: {item.raw_calculated_final}). Pending review.
+                                          </span>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
                                   {(item.status === "Failed" || item.remedial_class_mark !== undefined || item.recomputed_final_grade !== undefined) && (
                                     <tr className="bg-amber-50/60 dark:bg-amber-950/20 text-xs">
-                                      <td colSpan={5} className="py-1.5 px-3">
+                                      <td colSpan={6} className="py-1.5 px-3">
                                         <div className="flex flex-wrap items-center gap-3 text-[11px]">
                                           <span className="font-semibold text-amber-900 dark:text-amber-300">
                                             Remedial Record:
@@ -892,6 +872,61 @@ export default function OcrResultCard({
                         </tbody>
                       </table>
                     </div>
+
+                    {/* Second Semester General Average Card */}
+                    {sem2Grades.length > 0 && (
+                      <div className="p-3.5 bg-zinc-50 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold uppercase tracking-wider text-zinc-800 dark:text-zinc-200">
+                              Second Semester General Average
+                            </span>
+                            <span className="text-xs font-mono text-zinc-500">
+                              ({sem2AvgResult.subjectCount} {sem2AvgResult.subjectCount === 1 ? "subject" : "subjects"} evaluated)
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                sem2AvgResult.completeness === "COMPLETE"
+                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                                  : sem2AvgResult.completeness === "INCOMPLETE"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                                  : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                              }`}
+                            >
+                              {sem2AvgResult.completeness === "COMPLETE"
+                                ? "Complete"
+                                : sem2AvgResult.completeness === "INCOMPLETE"
+                                ? `Incomplete (${sem2AvgResult.subjectCount - (sem2AvgResult.pendingSubjects?.length || 0)} of ${sem2AvgResult.subjectCount} graded)`
+                                : "No Subjects"}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-zinc-500 dark:text-zinc-400 italic">
+                            {sem2AvgResult.completeness === "COMPLETE"
+                              ? `Official DepEd General Average: ${sem2AvgResult.officialAverage?.toFixed(2)} • Raw Arithmetic Average: ${sem2AvgResult.rawAverage?.toFixed(2)}`
+                              : sem2AvgResult.completeness === "INCOMPLETE"
+                              ? `Pending missing final grades in: ${sem2AvgResult.pendingSubjects?.join(", ")}. DepEd policy requires all subjects complete before official general average.`
+                              : "No Second Semester records available."}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {sem2AvgResult.completeness === "COMPLETE" ? (
+                            <div className="flex items-baseline gap-2 bg-white dark:bg-zinc-900 px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-600 shadow-sm">
+                              <span className="text-xs text-zinc-500">General Average:</span>
+                              <span className="font-mono font-bold text-base text-zinc-900 dark:text-zinc-100">
+                                {sem2AvgResult.officialAverage?.toFixed(2)}
+                              </span>
+                              <span className={`text-xs font-semibold ${Number(sem2AvgResult.officialAverage) >= 75 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                                ({Number(sem2AvgResult.officialAverage) >= 75 ? "Passed" : "Failed"})
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="px-3 py-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs font-medium text-zinc-500 italic">
+                              Pending / Incomplete
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Fallback for any unassigned subjects if present */}

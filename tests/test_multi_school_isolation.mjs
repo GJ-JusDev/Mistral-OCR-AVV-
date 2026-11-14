@@ -35,7 +35,7 @@ class StagingDatabaseSimulation {
     // 1. Schools
     this.schools.set('school-tris', {
       id: 'school-tris',
-      school_id: '300792',
+      school_id: '500169',
       name: 'Taysan Resettlement Integrated School'
     });
     this.schools.set('school-sjnhs', {
@@ -334,7 +334,7 @@ test('AVV Multi-School Isolation & Staging Authorization Verification', async (t
   sim.seedSchoolsAndUsers();
 
   await t.test('1. Verified Data Model: schools table and school_id foreign key', () => {
-    assert.equal(sim.schools.get('school-tris').school_id, '300792');
+    assert.equal(sim.schools.get('school-tris').school_id, '500169');
     assert.equal(sim.schools.get('school-tris').name, 'Taysan Resettlement Integrated School');
     assert.equal(sim.schools.get('school-sjnhs').school_id, '300793');
 

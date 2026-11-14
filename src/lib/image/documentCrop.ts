@@ -9,7 +9,7 @@
  * 1. If 4 reliable quadrilateral corners cannot be detected with sufficient confidence,
  *    the pipeline safely preserves the ORIGINAL image without destructive cropping.
  * 2. Original image is never mutated in place; originalDataUrl always preserves the unmodified capture.
- * 3. Rotated documents (e.g. 90° landscape scan of a portrait PSA certificate) can be normalized
+ * 3. Rotated documents (e.g. 90° landscape scan of a portrait school form) can be normalized
  *    upright before OCR while preserving raw evidence.
  */
 
@@ -204,7 +204,7 @@ export async function autoCropDocument(
       };
     }
 
-    // Aspect ratio check (DepEd forms & PSA birth certs are portrait 0.4–0.9 or landscape 1.1–2.5)
+    // Aspect ratio check (DepEd forms are portrait 0.4–0.9 or landscape 1.1–2.5)
     const aspect = boxW / boxH;
     if (aspect < 0.4 || aspect > 2.5) {
       return {

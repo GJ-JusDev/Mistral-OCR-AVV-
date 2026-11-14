@@ -60,7 +60,7 @@ export default function LoginPage() {
           </Link>
 
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#F4C542]/15 text-[#F4C542] border border-[#F4C542]/30">
-            School ID: 300792
+            School ID: 500169
           </span>
         </div>
 
@@ -94,7 +94,7 @@ export default function LoginPage() {
             Automated Visual Validation & Academic Monitoring
           </h2>
           <p className="text-sm text-slate-300 leading-relaxed mb-6">
-            Secure, verified evaluation of Senior High School SF9, SF10, and PSA records with automated grade recalculation, attendance monitoring, and graduation eligibility verification.
+            Secure, verified evaluation of Senior High School SF9 and SF10 records with automated grade recalculation, attendance monitoring, and graduation eligibility verification.
           </p>
 
           {/* Key Feature Badges (Desktop Only) */}
@@ -240,7 +240,7 @@ export default function LoginPage() {
 
         {/* Mobile footer notice */}
         <p className="mt-6 text-center text-xs text-slate-500 lg:hidden">
-          &copy; {new Date().getFullYear()} Taysan Resettlement IS &bull; DepEd School ID: 300792
+          &copy; {new Date().getFullYear()} Taysan Resettlement IS &bull; DepEd School ID: 500169
         </p>
       </div>
     </div>

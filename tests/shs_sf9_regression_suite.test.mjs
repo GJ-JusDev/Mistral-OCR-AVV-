@@ -13,7 +13,7 @@ import { compareDocuments } from "../src/lib/validation/documentComparator.ts";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TRIS_SCHOOL_UUID = "a0000000-0000-0000-0000-000000000001";
-const TRIS_DEPED_ID = "300792";
+const TRIS_DEPED_ID = "500169";
 const TRIS_SCHOOL_NAME = "Taysan Resettlement Integrated School";
 
 const BASE_STUDENT_IDENTITY = {
@@ -53,7 +53,7 @@ test("School ID 1: Older SHS SF9 without printed School ID passes when instituti
   assert.equal(presentRule.passed, true, "school_id_present must pass for verified institutional config");
 
   assert.ok(formatRule, "school_id_format must execute");
-  assert.equal(formatRule.passed, true, "300792 is a valid 6-digit DepEd School ID");
+  assert.equal(formatRule.passed, true, "500169 is a valid 6-digit DepEd School ID");
 
   assert.ok(institutionRule, "school_id_match_institution must execute");
   assert.equal(institutionRule.passed, true, "Institutional match must pass for TRIS");
@@ -94,7 +94,7 @@ test("School ID 3: Explicitly conflicting OCR School ID fails institutional matc
   assert.equal(report.status, "invalid", "Document with conflicting school identity must be rejected");
 });
 
-test("School ID 4: DepEd 6-digit ID (300792) is kept separate from DB internal UUID (a0000000-...)", () => {
+test("School ID 4: DepEd 6-digit ID (500169) is kept separate from DB internal UUID (a0000000-...)", () => {
   assert.match(TRIS_DEPED_ID, /^\d{6}$/, "DepEd School ID must be a 6-digit string");
   assert.match(
     TRIS_SCHOOL_UUID,
@@ -144,7 +144,7 @@ test("Grade Norm 2: Second-semester final grade present populates sem2_final_gra
   assert.equal(normalized.needsVerification, false);
 });
 
-test("Grade Norm 3: Source final grade genuinely blank remains Missing and does not fabricate grades", () => {
+test("Grade Norm 3: Blank final grade with valid quarterly marks auto-computes candidate grade with provenance", () => {
   const blankDocRecord = {
     subject: "General Mathematics",
     semester: "1st Semester",
@@ -157,10 +157,14 @@ test("Grade Norm 3: Source final grade genuinely blank remains Missing and does 
 
   const normalized = recalculateSubjectGradeStatus(blankDocRecord);
 
-  assert.equal(normalized.sem1_final_grade, undefined, "Must NOT auto-calculate 81 average");
-  assert.equal(normalized.final, undefined, "Must NOT invent final grade");
-  assert.equal(normalized.status, "Missing");
-  assert.equal(normalized.needsVerification, true);
+  assert.equal(normalized.sem1_final_grade, 81, "Auto-calculates candidate 81 from (80+82)/2");
+  assert.equal(normalized.final, 81, "Sets final candidate to 81");
+  assert.equal(normalized.official_computed_final, 81);
+  assert.equal(normalized.raw_calculated_final, 81);
+  assert.equal(normalized.is_auto_computed, true, "Candidate flagged as auto-computed");
+  assert.equal(normalized.grade_source, "auto_computed");
+  assert.equal(normalized.status, "Passed");
+  assert.equal(normalized.needsVerification, true, "Requires human verification");
 });
 
 test("Grade Norm 4: Decimal final grade (74.5) is preserved exactly without rounding", () => {

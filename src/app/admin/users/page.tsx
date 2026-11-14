@@ -3,7 +3,6 @@
 import { useEffect, useState, useMemo } from "react";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
-import { Card } from "@/components/ui/Card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
 import { getUsers, getSchools } from "@/actions/users";
 import { 
@@ -17,7 +16,11 @@ import {
   School,
   Search,
   Filter,
-  RefreshCw
+  RefreshCw,
+  Mail,
+  GraduationCap,
+  ShieldCheck,
+  AlertTriangle
 } from "lucide-react";
 import { UserActions } from "@/components/admin/UserActions";
 import { StatCard } from "@/components/ui/StatCard";
@@ -25,6 +28,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DataTableContainer } from "@/components/ui/DataTableContainer";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { Button } from "@/components/ui/Button";
+import Link from "next/link";
 
 export default function UsersPage() {
   const [users, setUsers] = useState<any[]>([]);
@@ -35,6 +39,8 @@ export default function UsersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "declined">("all");
   const [roleFilter, setRoleFilter] = useState<string>("all");
+  const [matchFilter, setMatchFilter] = useState<string>("all");
+  const [emailFilter, setEmailFilter] = useState<string>("all");
 
   async function fetchUsers() {
     setLoading(true);
@@ -70,6 +76,8 @@ export default function UsersPage() {
       const email = (u.email || "").toLowerCase();
       const status = (u.db_account_status || meta.account_status || "Pending").toLowerCase();
       const role = (u.db_role || meta.role || "Teacher").toLowerCase();
+      const matchStatus = u.registry_match_status || "NOT_EVALUATED";
+      const isEmailConfirmed = Boolean(u.email_confirmed);
 
       // Search match
       const q = searchQuery.toLowerCase().trim();
@@ -85,9 +93,18 @@ export default function UsersPage() {
       // Role filter
       const matchesRole = roleFilter === "all" || role === roleFilter.toLowerCase();
 
-      return matchesSearch && matchesStatus && matchesRole;
+      // Registry match filter
+      const matchesRegistry = matchFilter === "all" || matchStatus === matchFilter;
+
+      // Email confirmation filter
+      const matchesEmail = 
+        emailFilter === "all" ||
+        (emailFilter === "confirmed" && isEmailConfirmed) ||
+        (emailFilter === "unconfirmed" && !isEmailConfirmed);
+
+      return matchesSearch && matchesStatus && matchesRole && matchesRegistry && matchesEmail;
     });
-  }, [users, searchQuery, statusFilter, roleFilter]);
+  }, [users, searchQuery, statusFilter, roleFilter, matchFilter, emailFilter]);
 
   // Statistics
   const pendingCount = users.filter((u) => {
@@ -105,22 +122,38 @@ export default function UsersPage() {
     return s === "Declined";
   }).length;
 
+  const matchedPendingCount = users.filter((u) => {
+    const s = u.db_account_status || u.user_metadata?.account_status || "Pending";
+    return s === "Pending" && u.registry_match_status === "MATCHED";
+  }).length;
+
   return (
     <PageContainer>
       <Header
-        title="User & Account Management"
-        description="Review and authorize faculty registrations, assign school scope, and manage administrative role permissions."
+        title="User & Faculty Management"
+        description="Authorize faculty registrations, monitor 24-hour verification review windows, and evaluate registry matching."
         roleBadge={{ role: "admin", label: "System Administrator" }}
-        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchUsers}
-            leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-          >
-            Refresh List
-          </Button>
+          <div className="flex items-center gap-2">
+            <Link href="/admin/teacher-registry">
+              <Button
+                variant="outline"
+                size="sm"
+                leftIcon={<GraduationCap className="h-3.5 w-3.5 text-[#174EA6]" />}
+              >
+                Teacher Registry
+              </Button>
+            </Link>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={fetchUsers}
+              leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+            >
+              Refresh List
+            </Button>
+          </div>
         }
       />
 
@@ -134,9 +167,9 @@ export default function UsersPage() {
             variant="default"
           />
           <StatCard
-            title="Pending Verification"
+            title="Pending Review"
             value={pendingCount}
-            subtitle={pendingCount > 0 ? "Requires admin action" : "All caught up"}
+            subtitle={matchedPendingCount > 0 ? `${matchedPendingCount} matched with registry` : "Awaiting review"}
             icon={<Clock className="h-5 w-5 text-amber-700" />}
             variant={pendingCount > 0 ? "warning" : "default"}
           />
@@ -164,21 +197,23 @@ export default function UsersPage() {
               </div>
               <div>
                 <h2 className="text-sm font-bold text-amber-950">
-                  {pendingCount} Teacher Registration{pendingCount > 1 ? "s" : ""} Awaiting Review
+                  {pendingCount} Faculty Registration{pendingCount > 1 ? "s" : ""} in Review Window
                 </h2>
                 <p className="text-xs text-amber-800">
-                  New faculty cannot log in until approved and assigned to an institutional school scope.
+                  Accounts matching verified registry entries auto-approve after 24 hours (with confirmed email). Early approval available with administrator re-authentication.
                 </p>
               </div>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setStatusFilter("pending")}
-              className="border-amber-300 text-amber-900 hover:bg-amber-100/70"
-            >
-              Filter Pending Only
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setStatusFilter("pending")}
+                className="border-amber-300 text-amber-900 hover:bg-amber-100/70"
+              >
+                Filter Pending Only
+              </Button>
+            </div>
           </div>
         )}
 
@@ -204,11 +239,11 @@ export default function UsersPage() {
 
         {/* Data Table Container with Filters (colSpan={6} grid alignment) */}
         <DataTableContainer
-          title="Registered Personnel"
-          description="View and verify teachers, principals, and administrative staff."
+          title="Personnel & Prospective Faculty Directory"
+          description="View, audit, and approve faculty registrations against official TRIS records."
           searchValue={searchQuery}
           onSearchChange={setSearchQuery}
-          searchPlaceholder="Search by name or email..."
+          searchPlaceholder="Search by name or Gmail..."
           itemCount={filteredUsers.length}
           totalCount={users.length}
           filters={
@@ -224,6 +259,34 @@ export default function UsersPage() {
                 <option value="pending">Pending ({pendingCount})</option>
                 <option value="approved">Approved ({approvedCount})</option>
                 <option value="declined">Declined ({declinedCount})</option>
+              </select>
+
+              {/* Registry Match Status Filter */}
+              <select
+                value={matchFilter}
+                onChange={(e) => setMatchFilter(e.target.value)}
+                aria-label="Filter users by registry match status"
+                className="px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:bg-white"
+              >
+                <option value="all">All Match Outcomes</option>
+                <option value="MATCHED">Matched</option>
+                <option value="NOT_FOUND">Not Found</option>
+                <option value="AMBIGUOUS">Ambiguous</option>
+                <option value="REVIEW_REQUIRED">Review Required</option>
+                <option value="DUPLICATE_CLAIM">Duplicate Claim</option>
+                <option value="INACTIVE_REGISTRY_ENTRY">Inactive Entry</option>
+              </select>
+
+              {/* Email Verification Filter */}
+              <select
+                value={emailFilter}
+                onChange={(e) => setEmailFilter(e.target.value)}
+                aria-label="Filter users by email confirmation"
+                className="px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:bg-white"
+              >
+                <option value="all">All Email Statuses</option>
+                <option value="confirmed">Email Confirmed</option>
+                <option value="unconfirmed">Email Unconfirmed</option>
               </select>
 
               {/* Role Filter */}
@@ -258,6 +321,8 @@ export default function UsersPage() {
                   <TableHead>User / Faculty Member</TableHead>
                   <TableHead>Role</TableHead>
                   <TableHead>Institutional Scope</TableHead>
+                  <TableHead>Registry Match</TableHead>
+                  <TableHead>Review Window</TableHead>
                   <TableHead>Account Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -270,8 +335,15 @@ export default function UsersPage() {
                     .join(" ");
                   const isPending = user.db_account_status === "Pending" || meta.account_status === "Pending";
                   const isDeclined = user.db_account_status === "Declined" || meta.account_status === "Declined";
+                  const isApproved = user.db_account_status === "Approved" || meta.account_status === "Approved";
                   const role = user.db_role || meta.role || "Teacher";
                   const schoolDisplay = user.school_name || (user.school_id ? "Assigned School" : "Unassigned");
+                  const isEmailConfirmed = Boolean(user.email_confirmed);
+
+                  // Countdown calculation
+                  const eligibilityTime = user.review_eligibility_time ? new Date(user.review_eligibility_time).getTime() : 0;
+                  const isEarly = eligibilityTime > Date.now();
+                  const remainingHours = isEarly ? Math.ceil((eligibilityTime - Date.now()) / (1000 * 60 * 60)) : 0;
 
                   return (
                     <TableRow key={user.id} className={isPending ? "bg-amber-50/40" : ""}>
@@ -280,9 +352,20 @@ export default function UsersPage() {
                           <span className="font-semibold text-slate-900 text-xs sm:text-sm">
                             {fullName || "Unnamed User"}
                           </span>
-                          <span className="text-xs text-slate-500 font-mono">
-                            {user.email}
-                          </span>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <span className="text-xs text-slate-500 font-mono">
+                              {user.email}
+                            </span>
+                            {isEmailConfirmed ? (
+                              <span className="inline-flex items-center text-[10px] text-emerald-600 font-medium" title="Supabase Email Confirmed">
+                                <CheckCircle2 className="h-3 w-3 mr-0.5" /> Confirmed
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center text-[10px] text-red-600 font-medium" title="Email verification pending">
+                                <AlertTriangle className="h-3 w-3 mr-0.5" /> Unconfirmed
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </TableCell>
 
@@ -295,8 +378,51 @@ export default function UsersPage() {
                       <TableCell>
                         <span className="text-xs text-slate-600 flex items-center gap-1">
                           <School className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                          <span className="truncate max-w-[180px]">{schoolDisplay}</span>
+                          <span className="truncate max-w-[150px]">{schoolDisplay}</span>
                         </span>
+                      </TableCell>
+
+                      <TableCell>
+                        {user.registry_match_status ? (
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase w-fit ${
+                              user.registry_match_status === "MATCHED"
+                                ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                : user.registry_match_status === "NOT_FOUND"
+                                ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                : "bg-red-100 text-red-800 border border-red-200"
+                            }`}>
+                              {user.registry_match_status}
+                            </span>
+                            {user.matched_teacher_name && (
+                              <span className="text-[11px] text-slate-500 truncate max-w-[130px]">
+                                {user.matched_teacher_name}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-400 italic">—</span>
+                        )}
+                      </TableCell>
+
+                      <TableCell>
+                        {isPending ? (
+                          isEarly ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 bg-amber-100/70 px-2 py-0.5 rounded-full border border-amber-200">
+                              <Clock className="h-3 w-3" />
+                              {remainingHours}h remaining
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-full border border-emerald-200">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Eligible (24h+)
+                            </span>
+                          )
+                        ) : (
+                          <span className="text-xs text-slate-400">
+                            {user.approval_method ? user.approval_method : "—"}
+                          </span>
+                        )}
                       </TableCell>
 
                       <TableCell>

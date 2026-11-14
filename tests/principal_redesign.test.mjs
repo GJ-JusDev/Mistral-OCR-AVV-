@@ -97,7 +97,7 @@ describe("AVV System — Principal Interface Redesign & Monitoring", () => {
     const dashboardContent = fs.readFileSync(principalDashboardPath, "utf-8");
 
     // Verify TRIS institution constants
-    assert.ok(actionContent.includes("300792"), "Must use TRIS DepEd School ID 300792");
+    assert.ok(actionContent.includes("500169"), "Must use TRIS DepEd School ID 500169");
     assert.ok(actionContent.includes("a0000000-0000-0000-0000-000000000001"), "Must use TRIS institution UUID");
 
     // Verify Phase 2 metrics
@@ -118,7 +118,7 @@ describe("AVV System — Principal Interface Redesign & Monitoring", () => {
     assert.ok(dashboardContent.includes("Duplicate Prevention"), "Dashboard must display Duplicate Prevention card");
     assert.ok(dashboardContent.includes("Old SHS SF9"), "Dashboard must display SF9 count");
     assert.ok(dashboardContent.includes("Old SHS SF10"), "Dashboard must display SF10 count");
-    assert.ok(dashboardContent.includes("PSA Birth Cert"), "Dashboard must display PSA count");
+    assert.strictEqual(dashboardContent.includes("PSA Birth Cert"), false, "Dashboard must not display PSA count");
   });
 
   test("Phase 3: Student records directory with details modal and LRN privacy", () => {
@@ -137,7 +137,7 @@ describe("AVV System — Principal Interface Redesign & Monitoring", () => {
     // Document badges
     assert.ok(viewContent.includes("SF9"), "Must display SF9 document availability");
     assert.ok(viewContent.includes("SF10"), "Must display SF10 document availability");
-    assert.ok(viewContent.includes("PSA"), "Must display PSA document availability");
+    assert.strictEqual(viewContent.includes("PSA"), false, "Must not display PSA document availability");
 
     // Details modal
     assert.ok(viewContent.includes("handleOpenDetails"), "Must implement student details modal handler");

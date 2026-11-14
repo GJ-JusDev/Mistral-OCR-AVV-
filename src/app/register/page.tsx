@@ -23,6 +23,9 @@ import {
 export default function RegisterPage() {
   const [isTermsOpen, setIsTermsOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [hasNoMiddleName, setHasNoMiddleName] = useState(false);
+  const [middleName, setMiddleName] = useState("");
+  const [email, setEmail] = useState("");
   const [state, formAction, isPending] = useActionState(
     async (prevState: any, formData: FormData) => {
       return await register(formData);
@@ -43,7 +46,7 @@ export default function RegisterPage() {
         </Link>
 
         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#174EA6]/10 text-[#174EA6] border border-[#174EA6]/20">
-          DepEd School ID: 300792
+          DepEd School ID: 500169
         </span>
       </div>
 
@@ -80,8 +83,8 @@ export default function RegisterPage() {
         <div className="mt-5 p-4 rounded-xl bg-amber-50/80 border border-amber-200 flex items-start gap-3">
           <Clock className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="text-xs sm:text-sm text-amber-900 leading-relaxed">
-            <strong className="font-semibold block mb-0.5">Administrator Approval Required:</strong>
-            Submitted teacher accounts are created in a <span className="font-semibold text-amber-950">Pending</span> status. Your account must be verified and approved by a School Administrator before you can sign in to the validation portal.
+            <strong className="font-semibold block mb-0.5">Faculty Registry Verification & Approval Policy:</strong>
+            Submitted teacher registrations are matched against the official TRIS faculty registry and placed in a 24-hour security review period. Verified accounts are automatically approved upon completion of the 24-hour window, or an Administrator may grant early approval.
           </div>
         </div>
 
@@ -117,18 +120,42 @@ export default function RegisterPage() {
               </div>
 
               <div>
-                <label
-                  htmlFor="middleName"
-                  className="block text-xs sm:text-sm font-semibold text-slate-700 mb-1.5"
-                >
-                  Middle Name <span className="text-slate-400 text-xs font-normal">(Optional)</span>
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label
+                    htmlFor="middleName"
+                    className="block text-xs sm:text-sm font-semibold text-slate-700"
+                  >
+                    Middle Name
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      name="hasNoMiddleName"
+                      value="true"
+                      checked={hasNoMiddleName}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setHasNoMiddleName(checked);
+                        if (checked) setMiddleName("");
+                      }}
+                      className="rounded border-slate-300 text-[#174EA6] focus:ring-[#174EA6]/20 h-3.5 w-3.5"
+                    />
+                    <span className="text-[11px] font-medium text-slate-500">I legally do not have a middle name</span>
+                  </label>
+                </div>
                 <input
                   id="middleName"
                   name="middleName"
                   type="text"
-                  placeholder="e.g. Santos"
-                  className="w-full px-3 py-2 text-sm bg-slate-50/50 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20 transition-all"
+                  disabled={hasNoMiddleName}
+                  value={middleName}
+                  onChange={(e) => setMiddleName(e.target.value)}
+                  placeholder={hasNoMiddleName ? "No middle name acknowledged" : "e.g. Santos"}
+                  className={`w-full px-3 py-2 text-sm border rounded-lg transition-all ${
+                    hasNoMiddleName
+                      ? "bg-slate-100/80 border-slate-200 text-slate-400 cursor-not-allowed italic"
+                      : "bg-slate-50/50 border-slate-300 text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20"
+                  }`}
                 />
               </div>
             </div>
@@ -176,7 +203,7 @@ export default function RegisterPage() {
                 2. Account Credentials
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Set up your official login credentials.
+                Set up your official login credentials using your personal Gmail.
               </p>
             </div>
 
@@ -185,7 +212,7 @@ export default function RegisterPage() {
                 htmlFor="reg-email"
                 className="block text-xs sm:text-sm font-semibold text-slate-700 mb-1.5"
               >
-                Official Email Address <span className="text-red-500">*</span>
+                Personal Gmail Address <span className="text-red-500">*</span>
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
@@ -198,10 +225,15 @@ export default function RegisterPage() {
                   required
                   autoComplete="username"
                   spellCheck="false"
-                  placeholder="teacher@deped.gov.ph"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. maria.santos@gmail.com"
                   className="w-full pl-9 pr-3 py-2 text-sm bg-slate-50/50 border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20 transition-all"
                 />
               </div>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Must be a personal <strong>@gmail.com</strong> address. This will be verified against the official faculty registry.
+              </p>
             </div>
 
             <div>
@@ -331,7 +363,7 @@ export default function RegisterPage() {
               <div>
                 <h4 className="font-semibold text-slate-800">1. Educational System Authorization</h4>
                 <p className="mt-1 leading-relaxed">
-                  The Automated Visual Validation System (AVV) is an institutional tool for Taysan Resettlement Integrated School (School ID: 300792). Only authorized educators and school heads may process official Senior High School student records.
+                  The Automated Visual Validation System (AVV) is an institutional tool for Taysan Resettlement Integrated School (School ID: 500169). Only authorized educators and school heads may process official Senior High School student records.
                 </p>
               </div>
 

@@ -32,6 +32,9 @@ export default function DocumentStatusBadge({ status }: DocumentStatusBadgeProps
     case "rejected":
       variant = "error";
       break;
+    case "archived":
+      variant = "default";
+      break;
     default:
       variant = "default";
   }

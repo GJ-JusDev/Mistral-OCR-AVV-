@@ -47,7 +47,7 @@ export default function ReviewQueuePage() {
         title="Review & Verification Queue" 
         description="Documents flagged with grade discrepancies, missing quarters, or name mismatches requiring teacher examination before final approval."
         roleBadge={{ role: "teacher", label: "Faculty Validator" }}
-        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "300792" }}
+        schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
           <Button
             variant="outline"
@@ -96,7 +96,12 @@ export default function ReviewQueuePage() {
               </p>
             </div>
           ) : (
-            <DocumentTable documents={documents} onRowClick={handleRowClick} />
+            <DocumentTable 
+              documents={documents} 
+              onRowClick={handleRowClick}
+              showDeleteAction={true}
+              onQueueRefresh={fetchReviewQueue}
+            />
           )}
         </DataTableContainer>
       </div>

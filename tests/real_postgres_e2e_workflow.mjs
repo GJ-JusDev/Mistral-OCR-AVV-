@@ -128,7 +128,7 @@ export async function runEndToEndPostgresWorkflow() {
   const docPsaId = "d0000000-0000-0000-0000-000000000003";
 
   await db.exec(`
-    INSERT INTO public.schools (id, school_id, name) VALUES ('${schoolTrisId}', '300792', 'Taysan Resettlement Integrated School');
+    INSERT INTO public.schools (id, school_id, name) VALUES ('${schoolTrisId}', '500169', 'Taysan Resettlement Integrated School');
     INSERT INTO auth.users (id, email) VALUES ('${teacherId}', 'teacher@tris.edu.ph'), ('${principalId}', 'principal@tris.edu.ph');
     INSERT INTO public.user_roles (user_id, role, account_status, school_id) VALUES
       ('${teacherId}', 'teacher', 'Approved', '${schoolTrisId}'),

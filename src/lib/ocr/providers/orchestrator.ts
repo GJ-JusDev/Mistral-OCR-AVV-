@@ -22,19 +22,12 @@ function resolveProvider(name: string | undefined, defaultName: OcrProviderName)
 }
 
 /**
- * OCR ORCHESTRATOR (DUAL-PROVIDER STRATEGY)
+ * OCR ORCHESTRATOR (TWO-TIER PRODUCTION STRATEGY)
  *
- * Bakit ito ginawa:
- * Ito ang "traffic controller" ng ating OCR subsystem para sa BSIT Capstone Defense.
- * Gumagamit tayo ng Dual-Provider Architecture:
- * 1. Primary Provider: Azure AI Document Intelligence
- *    - Napakagaling magbasa ng complex tables, cell coordinates, at DepEd forms (SF9, SF10, PSA).
- * 2. Fallback Provider: Mistral OCR
- *    - Nagsisilbing maaasahang backup sakaling magkaroon ng network issue, 429 rate limit, o quota limit si Azure.
- *
- * Paano gumagana:
- * Una laging tinatawag si Azure. Kung magkaproblema sa upstream connection o maabot ang rate limit,
- * kusa at awtomatikong lilipat kay Mistral nang hindi nagka-crash ang system at tuloy-tuloy ang workflow ng teacher.
+ * Tier 1 (Primary): Azure AI Document Intelligence
+ *   - Form-aware, high-precision geometry, complex tables, cell coordinates for SF9/SF10.
+ * Tier 2 (Fallback): Mistral OCR
+ *   - Highly resilient cloud backup for rate-limiting, upstream timeout, or quota exhaustion.
  */
 export class OcrOrchestrator {
   private primary: IOcrProvider;
@@ -42,7 +35,6 @@ export class OcrOrchestrator {
   private enableFallback: boolean;
 
   constructor(options?: OrchestratorOptions) {
-    // Default configuration: Azure bilang primary, Mistral bilang fallback
     const selectedPrimary = (process.env.OCR_PRIMARY_PROVIDER as OcrProviderName) || "azure";
     const selectedFallback =
       (process.env.OCR_FALLBACK_PROVIDER as OcrProviderName) ||
@@ -62,13 +54,12 @@ export class OcrOrchestrator {
       this.fallback = resolveProvider(selectedFallback, "mistral");
     }
 
-    // Fallback enabled policy: laging naka-enable sa production para sa high availability
+    // Fallback enabled policy
     if (options?.enableFallback !== undefined) {
       this.enableFallback = options.enableFallback;
     } else if (process.env.OCR_FALLBACK_ENABLED !== undefined) {
       this.enableFallback = process.env.OCR_FALLBACK_ENABLED === "true";
     } else {
-      // Enabled by default in production
       this.enableFallback = true;
     }
   }
@@ -81,6 +72,15 @@ export class OcrOrchestrator {
     return this.fallback;
   }
 
+  // Deprecated backward-compatibility accessors
+  public getFirstFallbackProvider(): IOcrProvider | undefined {
+    return this.fallback;
+  }
+
+  public getSecondFallbackProvider(): IOcrProvider | undefined {
+    return undefined;
+  }
+
   public setEnableFallback(enabled: boolean): void {
     this.enableFallback = enabled;
   }
@@ -88,11 +88,8 @@ export class OcrOrchestrator {
   /**
    * ERROR RETRIABILITY CHECK
    *
-   * Bakit kailangang suriin ang error bago mag-fallback:
-   * Hindi lahat ng error ay dapat i-retry sa secondary provider.
-   * Halimbawa: kung unreadable o corrupted ang image, pareho silang mag-e-error.
-   * Pero kung HTTP 429 (Too Many Requests), 503 (Server Unavailable), o network timeout,
-   * ibig sabihin problema lang ito sa server ng primary provider, kaya safe subukan si Fallback.
+   * Only retry retriable server errors (rate limits, upstream timeouts, 502/503/504).
+   * Unrecoverable client errors (400 Bad Request, unreadable format) fail immediately.
    */
   public isRetriableError(error: any): boolean {
     if (!error) return false;
@@ -115,31 +112,33 @@ export class OcrOrchestrator {
   }
 
   /**
-   * EXECUTE OCR PIPELINE WITH RESILIENCY
+   * EXECUTE OCR PIPELINE WITH DIRECT FAILOVER
    *
-   * Main function na nagpapatakbo ng OCR:
-   * 1. Unang susubukan i-extract ang document gamit ang Primary Provider (Azure).
-   * 2. Kapag nagkaroon ng retriable error (e.g. rate limit o service down),
-   *    sasalo agad ang Fallback Provider (Mistral).
-   * 3. Kapag nag-succeed ang fallback, may return result pa rin ang user at hindi mapuputol ang review queue.
+   * 1. Attempts Primary Provider (Azure AI Document Intelligence).
+   * 2. On retriable failure (rate limit 429, timeout, service down), falls directly
+   *    back to Mistral OCR without contacting any deleted local service.
+   * 3. Seamlessly returns extracted text and candidate fields to maintain review pipeline.
    */
   public async execute(input: OcrInput): Promise<OcrProviderResult> {
     try {
-      // Step 1: Subukan muna kay Primary (Azure)
+      // Step 1: Attempt Primary Provider (Azure AI Document Intelligence)
       return await this.primary.recognize(input);
     } catch (primaryError: any) {
-      // Step 2: Suriin kung pwedeng ilipat sa backup
       const isRetriable = this.enableFallback && this.isRetriableError(primaryError);
 
-      if (!isRetriable || !this.fallback) {
+      if (!isRetriable) {
+        throw primaryError;
+      }
+
+      // Step 2: Direct Fallback to Mistral OCR
+      if (!this.fallback) {
         throw primaryError;
       }
 
       console.warn(
-        `[OcrOrchestrator] Primary provider (${this.primary.name}) failed with ${primaryError.code || primaryError.message}. Attempting fallback to ${this.fallback.name}...`
+        `[OcrOrchestrator] Primary provider (${this.primary.name}) failed with ${primaryError.code || primaryError.message}. Attempting direct fallback to ${this.fallback.name}...`
       );
 
-      // Siguraduhing may API credentials ang fallback provider bago tawagin
       const isFallbackReady = await this.fallback.isAvailable().catch(() => false);
       if (!isFallbackReady) {
         console.warn(
@@ -149,7 +148,6 @@ export class OcrOrchestrator {
       }
 
       try {
-        // Step 3: Isagawa ang OCR gamit ang Fallback (Mistral)
         const fallbackResult = await this.fallback.recognize(input);
         console.log(
           `[OcrOrchestrator] Fallback to ${this.fallback.name} succeeded.`

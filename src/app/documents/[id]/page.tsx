@@ -7,9 +7,13 @@ import Header from "@/components/layout/Header";
 import OcrResultCard from "@/components/ocr/OcrResultCard";
 import ValidationSummary from "@/components/validation/ValidationSummary";
 import ReviewPanel from "@/components/review/ReviewPanel";
+import StudentGradeReviewSection from "@/components/review/StudentGradeReviewSection";
+import DeleteReviewDocumentModal from "@/components/review/DeleteReviewDocumentModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import { AlertTriangle } from "lucide-react";
 
 import { submitDocumentReview, saveDocumentCorrections } from "@/actions/review";
+import { normalizeGradeRecords, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
 
 export default function DocumentDetailPage() {
   const params = useParams();
@@ -25,24 +29,38 @@ export default function DocumentDetailPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isSavingCorrections, setIsSavingCorrections] = useState(false);
   const [activeSide, setActiveSide] = useState<"front" | "back">("front");
-  const [psaViewMode, setPsaViewMode] = useState<"original" | "full_corrected" | "identity_crop">("original");
+  const [isDeletionModalOpen, setIsDeletionModalOpen] = useState(false);
+
+  const fetchDocumentDetail = async () => {
+    try {
+      const res = await fetch(`/api/documents/${documentId}`);
+      if (!res.ok) throw new Error("Failed to fetch document details");
+      const data = await res.json();
+      const baseDoc = data.document || data;
+      const doc = {
+        ...baseDoc,
+        matched_student: data.matched_student || baseDoc.matched_student,
+        existing_grades: data.existing_grades || baseDoc.existing_grades || [],
+        grade_comparison: data.grade_comparison || baseDoc.grade_comparison,
+        grade_change_history: data.grade_change_history || baseDoc.grade_change_history || [],
+      };
+      if (doc?.extracted_fields?.grades && Array.isArray(doc.extracted_fields.grades)) {
+        doc.extracted_fields.grades = normalizeGradeRecords(
+          doc.extracted_fields.grades,
+          doc.extracted_fields.semester || doc.semester
+        );
+        Object.assign(doc.extracted_fields, updateExtractedFieldsAverages(doc.extracted_fields));
+      }
+      setDocument(doc);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!documentId) return;
-    
-    async function fetchDocumentDetail() {
-      try {
-        const res = await fetch(`/api/documents/${documentId}`);
-        if (!res.ok) throw new Error("Failed to fetch document details");
-        const data = await res.json();
-        const doc = data.document || data;
-        setDocument(doc);
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    }
     fetchDocumentDetail();
   }, [documentId]);
 
@@ -92,17 +110,40 @@ export default function DocumentDetailPage() {
     }
   };
 
-  const handleFieldChange = (field: any, value: string) => {
+  const handleFieldChange = (field: any, value: any) => {
+    let newExtractedFields = {
+      ...(document?.extracted_fields || {}),
+      [field]: value,
+    };
+    if (field === "grades" && Array.isArray(value)) {
+      const normalizedGrades = normalizeGradeRecords(
+        value,
+        newExtractedFields.semester || document?.semester
+      );
+      newExtractedFields.grades = normalizedGrades;
+      Object.assign(newExtractedFields, updateExtractedFieldsAverages(newExtractedFields));
+    }
     setEditedFields((prev: any) => ({
       ...prev,
       [field]: value,
+      ...(field === "grades"
+        ? {
+            grades: newExtractedFields.grades,
+            sem1_general_average: newExtractedFields.sem1_general_average,
+            sem1_raw_general_average: newExtractedFields.sem1_raw_general_average,
+            sem1_completeness: newExtractedFields.sem1_completeness,
+            sem1_subject_count: newExtractedFields.sem1_subject_count,
+            sem2_general_average: newExtractedFields.sem2_general_average,
+            sem2_raw_general_average: newExtractedFields.sem2_raw_general_average,
+            sem2_completeness: newExtractedFields.sem2_completeness,
+            sem2_subject_count: newExtractedFields.sem2_subject_count,
+            general_average: newExtractedFields.general_average,
+          }
+        : {}),
     }));
     setDocument((prev: any) => ({
       ...prev,
-      extracted_fields: {
-        ...(prev?.extracted_fields || {}),
-        [field]: value,
-      },
+      extracted_fields: newExtractedFields,
     }));
     setHasModifications(true);
     setSaveSuccess(false);
@@ -119,6 +160,8 @@ export default function DocumentDetailPage() {
     } else {
       setHasModifications(false);
       setSaveSuccess(true);
+      setEditedFields({});
+      await fetchDocumentDetail();
       setTimeout(() => setSaveSuccess(false), 3000);
     }
   };
@@ -180,43 +223,27 @@ export default function DocumentDetailPage() {
         </div>
       )}
       
+      {/* Student Identification & Controlled Grade Review Section */}
+      <div className="mt-6">
+        <StudentGradeReviewSection
+          document={document}
+          matchedStudent={document.matched_student}
+          existingGrades={document.existing_grades}
+          gradeComparison={document.grade_comparison}
+          gradeChangeHistory={document.grade_change_history}
+        />
+      </div>
+
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left Column: Image Preview with Front / Back Toggle or PSA 3-Way Toggle */}
+        {/* Left Column: Image Preview with Front / Back Toggle */}
         {(() => {
-          const isBirthCert = document.document_type === "birth_cert";
-          const originalPsaUrl = document.extracted_fields?.original_image_url || document.image_url;
-          const fullCorrectedPsaUrl = document.extracted_fields?.full_corrected_image_url;
-          const identityCropPsaUrl =
-            document.extracted_fields?.identity_crop_image_url ||
-            document.extracted_fields?.processed_image_url;
-          const hasMultiplePsaViews = Boolean(
-            isBirthCert &&
-              ((fullCorrectedPsaUrl && fullCorrectedPsaUrl !== originalPsaUrl) ||
-                (identityCropPsaUrl && identityCropPsaUrl !== originalPsaUrl))
-          );
-
           const backImageUrl = document.extracted_fields?.back_image_url || document.extracted_fields?.images?.back;
-
           let displayImageUrl = document.image_url;
-          let imageTitle = "Original Image";
+          let imageTitle = "Original Document";
 
-          if (isBirthCert && hasMultiplePsaViews) {
-            if (psaViewMode === "identity_crop" && identityCropPsaUrl) {
-              displayImageUrl = identityCropPsaUrl;
-              imageTitle = "PSA Identity Region (2× Upscaled B&W OCR)";
-            } else if (psaViewMode === "full_corrected" && fullCorrectedPsaUrl) {
-              displayImageUrl = fullCorrectedPsaUrl;
-              imageTitle = "Full Document (Auto-Cropped & Upright)";
-            } else {
-              displayImageUrl = originalPsaUrl;
-              imageTitle = "Original Document (Color)";
-            }
-          } else if (backImageUrl) {
+          if (backImageUrl) {
             displayImageUrl = activeSide === "back" ? backImageUrl : document.image_url;
             imageTitle = activeSide === "front" ? "Original Document — Front Side" : "Original Document — Back Side";
-          } else if (isBirthCert) {
-            displayImageUrl = originalPsaUrl;
-            imageTitle = "Original Document (Color)";
           }
 
           return (
@@ -225,48 +252,7 @@ export default function DocumentDetailPage() {
                 <h2 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">
                   {imageTitle}
                 </h2>
-                {isBirthCert && hasMultiplePsaViews && (
-                  <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
-                    <button
-                      type="button"
-                      onClick={() => setPsaViewMode("original")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${
-                        psaViewMode === "original"
-                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
-                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
-                      }`}
-                    >
-                      Original (Color)
-                    </button>
-                    {fullCorrectedPsaUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setPsaViewMode("full_corrected")}
-                        className={`px-3 py-1.5 rounded-md transition-colors ${
-                          psaViewMode === "full_corrected"
-                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
-                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
-                        }`}
-                      >
-                        Full Corrected
-                      </button>
-                    )}
-                    {identityCropPsaUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setPsaViewMode("identity_crop")}
-                        className={`px-3 py-1.5 rounded-md transition-colors ${
-                          psaViewMode === "identity_crop"
-                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
-                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
-                        }`}
-                      >
-                        Identity OCR Crop
-                      </button>
-                    )}
-                  </div>
-                )}
-                {!isBirthCert && backImageUrl && (
+                {backImageUrl && (
                   <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
                     <button
                       type="button"
@@ -344,6 +330,7 @@ export default function DocumentDetailPage() {
             document={document} 
             onApprove={handleApprove}
             onReject={handleReject}
+            onDelete={() => setIsDeletionModalOpen(true)}
             isSubmitting={isSubmitting}
           />
         </div>
@@ -374,6 +361,28 @@ export default function DocumentDetailPage() {
             </ul>
           </div>
         </div>
+      )}
+
+      {isDeletionModalOpen && (
+        <DeleteReviewDocumentModal
+          isOpen={isDeletionModalOpen}
+          onClose={() => setIsDeletionModalOpen(false)}
+          documentId={documentId}
+          documentName={
+            document.original_filename ||
+            (document.document_type || "Document").toUpperCase()
+          }
+          studentName={
+            document.matched_student
+              ? `${document.matched_student.last_name}, ${document.matched_student.first_name}`
+              : (document.extracted_fields as any)?.name
+          }
+          documentType={document.document_type}
+          onSuccess={() => {
+            fetchDocumentDetail();
+            setIsDeletionModalOpen(false);
+          }}
+        />
       )}
     </PageContainer>
   );

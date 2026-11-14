@@ -18,7 +18,7 @@ function sanitizeFilename(name: string): string {
 /**
  * DOCUMENT UPLOAD API ROUTE
  *
- * Dito dumadaan ang lahat ng uploaded scanned documents (SF9, SF10, PSA Birth Certificate).
+ * Dito dumadaan ang lahat ng uploaded scanned documents (SF9, SF10).
  *
  * Bakit may mga security at storage checks dito:
  * 1. Authentication Check - Sinisigurong naka-log in ang nag-a-upload.
@@ -110,6 +110,15 @@ export async function POST(request: Request) {
       originalName = filename || "document.jpg";
       if (docType) documentType = docType;
       fileBuffer = Buffer.from(match[2], "base64");
+    }
+
+    // Reject unsupported PSA birth certificate uploads
+    const normDocType = documentType.toLowerCase().trim();
+    if (normDocType === "birth_cert" || normDocType === "psa") {
+      return NextResponse.json(
+        { error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document." },
+        { status: 400 }
+      );
     }
 
     // 4. Validate MIME type: tanging valid images at PDF lang ang tinatanggap

@@ -42,7 +42,11 @@ export function evaluateStudentIdentity(fields: ExtractedFields): StudentMatchEv
   const reasons: string[] = [];
 
   // 1. LRN Validation
-  const rawLrn = fields.lrn ? String(fields.lrn) : "";
+  const rawLrn = fields.lrn
+    ? String(fields.lrn)
+    : (fields as any).learner_reference_number
+    ? String((fields as any).learner_reference_number)
+    : "";
   const normalizedLrn = rawLrn ? normalizeLrn(rawLrn) : null;
   const isLrnValid = Boolean(normalizedLrn && isValidLrn(normalizedLrn));
 

@@ -79,7 +79,7 @@ test("Phase A: Printed vs Computed Grade Discrepancy Detection & Field Preservat
     assert.ok(result.calculation_notes?.includes("Discrepancy"), "Must provide explanatory note");
   });
 
-  await t.test("3. Blank printed final grade with valid quarters preserves blank without grade invention", () => {
+  await t.test("3. Blank printed final grade with valid quarters calculates raw and official candidates with auto-computed provenance", () => {
     const record = {
       subject: "General Mathematics",
       semester: "1st Semester",
@@ -91,11 +91,15 @@ test("Phase A: Printed vs Computed Grade Discrepancy Detection & Field Preservat
     };
 
     const result = recalculateSubjectGradeStatus(record);
-    assert.strictEqual(result.final, undefined, "Must NEVER invent missing printed final grade");
-    assert.strictEqual(result.computed_final_grade, 85, "Preserves computed reference");
-    assert.strictEqual(result.status, "Missing");
-    assert.strictEqual(result.needsVerification, true);
-    assert.ok(result.calculation_notes?.includes("blank"), "Notes that printed final is blank");
+    assert.strictEqual(result.final, 85, "Candidate final grade must be auto-computed from quarters");
+    assert.strictEqual(result.sem1_final_grade, 85, "sem1_final_grade populated with candidate");
+    assert.strictEqual(result.official_computed_final, 85, "Preserves official rounded candidate");
+    assert.strictEqual(result.raw_calculated_final, 85, "Preserves raw calculated arithmetic average");
+    assert.strictEqual(result.is_auto_computed, true, "Must be tagged as auto-computed");
+    assert.strictEqual(result.grade_source, "auto_computed", "Grade source must be auto_computed");
+    assert.strictEqual(result.status, "Passed", "Candidate status evaluates to Passed (85 >= 75)");
+    assert.strictEqual(result.needsVerification, true, "Requires human review before approval");
+    assert.ok(result.calculation_notes?.includes("Auto-computed"), "Notes that candidate grade was auto-computed");
   });
 
   await t.test("4. 2nd Semester quarters (Q3, Q4) are correctly routed and computed", () => {

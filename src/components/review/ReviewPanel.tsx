@@ -3,18 +3,29 @@
 import React, { useState } from "react";
 import { Document } from "@/types/database";
 import { Button } from "@/components/ui/Button";
-import { Check, X, AlertCircle } from "lucide-react";
+import { Check, X, AlertCircle, Trash2 } from "lucide-react";
 
 interface ReviewPanelProps {
   document: Document;
   onApprove: () => void;
   onReject: (reason: string) => void;
+  onDelete?: () => void;
+  onRequestDeletion?: () => void;
   isSubmitting?: boolean;
 }
 
-export default function ReviewPanel({ document, onApprove, onReject, isSubmitting }: ReviewPanelProps) {
+export default function ReviewPanel({ 
+  document, 
+  onApprove, 
+  onReject, 
+  onDelete,
+  onRequestDeletion,
+  isSubmitting 
+}: ReviewPanelProps) {
   const [isRejecting, setIsRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+
+  const handleDeleteClick = onDelete || onRequestDeletion;
 
   const handleReject = () => {
     if (rejectReason.trim()) {
@@ -26,20 +37,24 @@ export default function ReviewPanel({ document, onApprove, onReject, isSubmittin
 
   if (!document) return null;
 
+  const isArchived = document.status === "archived";
+
   return (
     <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg p-6 shadow-sm">
-      <div className="mb-6">
-        <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Review Actions</h3>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-          Approve this document to finalize validation, or reject it if there are unresolvable errors.
-        </p>
+      <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Review Actions</h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
+            Approve this document to finalize validation, reject it, or delete it from the verification queue.
+          </p>
+        </div>
       </div>
 
       {!isRejecting ? (
-        <div className="flex flex-col sm:flex-row gap-4">
+        <div className="flex flex-col sm:flex-row gap-3">
           <Button 
             onClick={onApprove} 
-            disabled={isSubmitting || document.status === "approved" || document.status === "rejected"}
+            disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
             className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-600 dark:hover:bg-emerald-700"
           >
             <Check className="w-4 h-4 mr-2" />
@@ -48,12 +63,23 @@ export default function ReviewPanel({ document, onApprove, onReject, isSubmittin
           <Button 
             variant="outline" 
             onClick={() => setIsRejecting(true)}
-            disabled={isSubmitting || document.status === "approved" || document.status === "rejected"}
+            disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
             className="flex-1 border-red-200 text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-950/30"
           >
             <X className="w-4 h-4 mr-2" />
             Reject Document
           </Button>
+          {handleDeleteClick && (
+            <Button
+              variant="outline"
+              onClick={handleDeleteClick}
+              disabled={isSubmitting || isArchived}
+              className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 transition-colors"
+              leftIcon={<Trash2 className="w-4 h-4 text-red-500" />}
+            >
+              Delete
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-4 animate-in fade-in slide-in-from-top-2">

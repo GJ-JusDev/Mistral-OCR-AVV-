@@ -184,10 +184,10 @@ test("Test 7: reviewer-entered valid 6-digit ID -> PASS", () => {
   const initialVal = validateFields(initialFields, VALID_CONTEXT);
   assert.equal(initialVal.status, "needs_review");
 
-  // Step 2: Reviewer inspects SF9 and enters authentic 6-digit ID: "300792"
+  // Step 2: Reviewer inspects SF9 and enters authentic 6-digit ID: "500169"
   const correctedFields = {
     ...initialFields,
-    school_id: "300792",
+    school_id: "500169",
   };
   const correctedVal = validateFields(correctedFields, VALID_CONTEXT);
 

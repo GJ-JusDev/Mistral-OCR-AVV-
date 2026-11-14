@@ -327,16 +327,13 @@ export function compareIdentityPair(
 }
 
 /**
- * 3-WAY UNIFIED COMPARISON (PSA vs SF9 vs SF10)
+ * UNIFIED ACADEMIC IDENTITY COMPARISON (SF9 vs SF10)
  *
- * Bakit ito kailangan para sa Unified Student Record:
- * Tinitingnan nito ang kabuuang triad ng dokumento ng isang Senior High School student:
- * 1. PSA vs SF9 (Birth Certificate laban sa Report Card)
- * 2. PSA vs SF10 (Birth Certificate laban sa Permanent Record)
- * 3. SF9 vs SF10 (Report Card laban sa Permanent Record)
+ * Checks identity consistency across DepEd Senior High School documents:
+ * - SF9 (Learner Progress Report Card) vs SF10 (Learner Permanent Record)
  *
- * Kapag may kahit isang conflict sa pagitan ng mga ito, minamarkahan ang student record
- * bilang "IDENTITY_REVIEW_REQUIRED" at binablock ang automatic linking.
+ * If any discrepancy is detected between these academic records, the student
+ * is flagged with "IDENTITY_REVIEW_REQUIRED" and automatic linking is blocked.
  */
 export function compareUnifiedStudentDocuments(docs: {
   sf9?: RawNameFields | null;
@@ -346,23 +343,9 @@ export function compareUnifiedStudentDocuments(docs: {
   const pairwise: IdentityPairComparison[] = [];
   const allDiscrepancies: string[] = [];
 
-  // Pair 1: PSA vs SF9
-  if (docs.psa && docs.sf9) {
-    const pair = compareIdentityPair("PSA Birth Certificate", docs.psa, "Old SHS SF9", docs.sf9);
-    pairwise.push(pair);
-    allDiscrepancies.push(...pair.discrepancies);
-  }
-
-  // Pair 2: PSA vs SF10
-  if (docs.psa && docs.sf10) {
-    const pair = compareIdentityPair("PSA Birth Certificate", docs.psa, "Old SHS SF10", docs.sf10);
-    pairwise.push(pair);
-    allDiscrepancies.push(...pair.discrepancies);
-  }
-
-  // Pair 3: SF9 vs SF10
+  // Compare SF9 vs SF10
   if (docs.sf9 && docs.sf10) {
-    const pair = compareIdentityPair("Old SHS SF9", docs.sf9, "Old SHS SF10", docs.sf10);
+    const pair = compareIdentityPair("DepEd SF9 (Report Card)", docs.sf9, "DepEd SF10 (Permanent Record)", docs.sf10);
     pairwise.push(pair);
     allDiscrepancies.push(...pair.discrepancies);
   }
@@ -383,21 +366,21 @@ export function compareUnifiedStudentDocuments(docs: {
     }
   }
 
-  const docCount = [docs.sf9, docs.sf10, docs.psa].filter(Boolean).length;
+  const docCount = [docs.sf9, docs.sf10].filter(Boolean).length;
   if (docCount < 2) {
     overallStatus = "MATCH";
     canLink = true;
   }
 
-  let summaryMessage = "All verified identity fields match consistently across documents.";
+  let summaryMessage = "All verified identity fields match consistently across SF9 and SF10.";
   if (hasLrnConflict) {
-    summaryMessage = "Identity conflict: Conflicting LRNs detected across documents. Linking blocked.";
+    summaryMessage = "Identity conflict: Conflicting LRNs detected across SF9 and SF10. Linking blocked.";
   } else if (hasNameConflict) {
-    summaryMessage = "Identity discrepancy: Student names do not match across official documents. Manual review required.";
+    summaryMessage = "Identity discrepancy: Student names do not match across SF9 and SF10. Manual review required.";
   } else if (allDiscrepancies.length > 0) {
-    summaryMessage = "Identity review required: Minor discrepancies detected between document records.";
-  } else if (docCount < 3) {
-    summaryMessage = "Verified document records match, but document set is incomplete.";
+    summaryMessage = "Identity review required: Minor discrepancies detected between SF9 and SF10 records.";
+  } else if (docCount < 2) {
+    summaryMessage = "Academic record is valid, but full document set is pending (requires both SF9 and SF10).";
   }
 
   return {

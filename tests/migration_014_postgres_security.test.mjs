@@ -117,7 +117,7 @@ test("Migration 014 — Isolated Real PostgreSQL Security & RLS Verification Sui
   `);
 
   // 3. Seed Realistic Multi-School and Role Context
-  const school1Id = "a0000000-0000-0000-0000-000000000001"; // TRIS (300792)
+  const school1Id = "a0000000-0000-0000-0000-000000000001"; // TRIS (500169)
   const school2Id = "b0000000-0000-0000-0000-000000000002"; // Other School (100200)
 
   const admin1Id = "11111111-1111-1111-1111-111111111111"; // School 1 Admin
@@ -128,7 +128,7 @@ test("Migration 014 — Isolated Real PostgreSQL Security & RLS Verification Sui
 
   await db.exec(`
     INSERT INTO public.schools (id, school_id, name) VALUES
-      ('${school1Id}', '300792', 'Taysan Resettlement Integrated School'),
+      ('${school1Id}', '500169', 'Taysan Resettlement Integrated School'),
       ('${school2Id}', '100200', 'San Jose National High School');
 
     INSERT INTO auth.users (id, email) VALUES
