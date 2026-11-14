@@ -81,7 +81,8 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
 
   await t.test("5. Documents API Route preserves needs_review status for mandatory human verification", () => {
     assert.ok(
-      documentsRouteSrc.includes("let newStatus = status === 'needs_review' ? 'needs_review' : 'validated';"),
+      documentsRouteSrc.includes("newStatus = 'needs_review'") &&
+      documentsRouteSrc.includes("status === 'needs_review'"),
       "Validation engine must preserve needs_review status when document is staged for review"
     );
   });
@@ -90,6 +91,68 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
     assert.ok(
       uploadWorkflowSrc.includes('status: params.status || "needs_review"'),
       "buildDocumentSubmissionPayload must set status to needs_review by default"
+    );
+  });
+
+  await t.test("7. Security: Idempotent document_id cannot update or overwrite documents of another user or school", () => {
+    assert.ok(
+      documentsRouteSrc.includes("existingDoc.uploaded_by !== uploadedBy || existingDoc.school_id !== userSchoolId"),
+      "API route must reject modification of documents belonging to another user or school"
+    );
+    assert.ok(
+      documentsRouteSrc.includes("status: 403"),
+      "API route must return HTTP 403 Forbidden on unauthorized document overwrite attempts"
+    );
+    assert.ok(
+      documentsRouteSrc.includes("existingDoc.status === 'approved' || existingDoc.status === 'archived'"),
+      "API route must reject overwriting approved or archived documents"
+    );
+  });
+
+  await t.test("8. Safe Conflict Handling: Database unique constraint violations are safely caught", () => {
+    assert.ok(
+      documentsRouteSrc.includes("docError.code === '23505'") ||
+      documentsRouteSrc.includes("duplicate key"),
+      "API route must catch code 23505 unique constraint conflicts and resolve idempotently"
+    );
+  });
+
+  await t.test("9. Storage Idempotency: API upload route supports deterministic documentId and upsert", () => {
+    const uploadApiSrc = fs.readFileSync(path.join(rootDir, "src/app/api/upload/route.ts"), "utf8");
+    assert.ok(
+      uploadApiSrc.includes("upsert: true"),
+      "Storage upload route must enable upsert: true for idempotent writes"
+    );
+    assert.ok(
+      uploadApiSrc.includes("documentId"),
+      "Storage upload route must accept client documentId for deterministic pathing"
+    );
+    assert.ok(
+      uploadPageSrc.includes("storageCacheRef"),
+      "Upload page must cache storage URLs in storageCacheRef to avoid duplicate uploads"
+    );
+  });
+
+  await t.test("10. Reset mechanism on new upload: resetSubmissionId clears caches for new documents", () => {
+    assert.ok(
+      uploadPageSrc.includes("resetSubmissionId"),
+      "Upload page must define resetSubmissionId callback"
+    );
+    assert.ok(
+      uploadPageSrc.includes("storageCacheRef.current = null") &&
+      uploadPageSrc.includes("submissionIdRef.current = null"),
+      "resetSubmissionId must reset both submissionIdRef and storageCacheRef"
+    );
+  });
+
+  await t.test("11. Status transitions: Valid documents without review stay validated, invalid documents become rejected", () => {
+    assert.ok(
+      documentsRouteSrc.includes("report.status === 'invalid' || status === 'rejected'"),
+      "Invalid documents must be set to rejected"
+    );
+    assert.ok(
+      documentsRouteSrc.includes("newStatus = 'validated'"),
+      "Legitimately valid documents without review requirement become validated"
     );
   });
 

@@ -68,12 +68,16 @@ export async function POST(request: Request) {
     let mimeType: string;
     let originalName: string;
     let documentType: string = "sf9";
+    let documentId: string | null = null;
+    let side: string = "primary";
 
     // 3. Tanggapin ang file galing sa standard FormData (drag-and-drop o camera upload)
     if (contentType.includes("multipart/form-data")) {
       const formData = await request.formData();
       const file = formData.get("file") as File | null;
       documentType = (formData.get("documentType") as string) || "sf9";
+      documentId = (formData.get("documentId") as string) || (formData.get("document_id") as string) || null;
+      side = (formData.get("side") as string) || "primary";
 
       if (!file) {
         return NextResponse.json(
@@ -89,7 +93,9 @@ export async function POST(request: Request) {
     } else {
       // O kaya'y base64 JSON payload mula sa client-side canvas capture
       const body = await request.json();
-      const { dataUrl, filename, docType } = body;
+      const { dataUrl, filename, docType, documentId: bodyDocId, document_id: bodyDocIdAlt, side: bodySide } = body;
+      documentId = bodyDocId || bodyDocIdAlt || null;
+      side = bodySide || "primary";
 
       if (!dataUrl || typeof dataUrl !== "string") {
         return NextResponse.json(
@@ -112,11 +118,21 @@ export async function POST(request: Request) {
       fileBuffer = Buffer.from(match[2], "base64");
     }
 
-    // Reject unsupported PSA birth certificate uploads
+    // Reject unsupported document categories: strictly SF9 and SF10 only
     const normDocType = documentType.toLowerCase().trim();
     if (normDocType === "birth_cert" || normDocType === "psa") {
       return NextResponse.json(
         { error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document." },
+        { status: 400 }
+      );
+    }
+    const validUploadDocTypes = ["sf9", "sf10"];
+    if (!validUploadDocTypes.includes(normDocType)) {
+      return NextResponse.json(
+        {
+          error: `Unsupported document type: '${documentType}'. The active AVV scope supports only SF9 and SF10.`,
+          code: "DOCUMENT_TYPE_NOT_SUPPORTED",
+        },
         { status: 400 }
       );
     }
@@ -141,20 +157,22 @@ export async function POST(request: Request) {
       );
     }
 
-    // 6. Collision-Resistant Storage Path
-    // Format: {userId}/{docType}/{timestamp}_{uuid}_{filename}
-    // Bakit ganito: Kahit mag-upload ang dalawang guro ng file na may parehong pangalan (hal. "scan.jpg"),
-    // hindi kailanman mag-o-overwrite ang mga file dahil unique ang bawat path.
+    // 6. Collision-Resistant & Idempotent Storage Path
+    // Format: {userId}/{docType}/{documentId}_{side}_{filename} when documentId is provided,
+    // ensuring repeated uploads for the same attempt reuse/overwrite the same object.
     const safeName = sanitizeFilename(originalName);
     const docFolder = documentType.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const storagePath = `${user.id}/${docFolder}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeName}`;
+    const safeSide = sanitizeFilename(side);
+    const storagePath = documentId
+      ? `${user.id}/${docFolder}/${sanitizeFilename(documentId)}_${safeSide}_${safeName}`
+      : `${user.id}/${docFolder}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeName}`;
 
     // 7. I-upload ang kumpletong original file sa private Supabase Storage bucket 'documents'
     const { data: uploadData, error: uploadError } = await supabase.storage
       .from("documents")
       .upload(storagePath, fileBuffer, {
         contentType: mimeType,
-        upsert: false,
+        upsert: true,
       });
 
     if (uploadError) {

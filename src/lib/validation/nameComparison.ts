@@ -343,9 +343,21 @@ export function compareUnifiedStudentDocuments(docs: {
   const pairwise: IdentityPairComparison[] = [];
   const allDiscrepancies: string[] = [];
 
-  // Compare SF9 vs SF10
+  // Compare SF9 vs SF10 (Primary Academic Pair)
   if (docs.sf9 && docs.sf10) {
     const pair = compareIdentityPair("DepEd SF9 (Report Card)", docs.sf9, "DepEd SF10 (Permanent Record)", docs.sf10);
+    pairwise.push(pair);
+    allDiscrepancies.push(...pair.discrepancies);
+  }
+
+  // Optional defensive comparison if historical PSA record is passed
+  if (docs.psa && docs.sf9) {
+    const pair = compareIdentityPair("PSA Birth Certificate", docs.psa, "DepEd SF9 (Report Card)", docs.sf9);
+    pairwise.push(pair);
+    allDiscrepancies.push(...pair.discrepancies);
+  }
+  if (docs.psa && docs.sf10) {
+    const pair = compareIdentityPair("PSA Birth Certificate", docs.psa, "DepEd SF10 (Permanent Record)", docs.sf10);
     pairwise.push(pair);
     allDiscrepancies.push(...pair.discrepancies);
   }
@@ -366,7 +378,7 @@ export function compareUnifiedStudentDocuments(docs: {
     }
   }
 
-  const docCount = [docs.sf9, docs.sf10].filter(Boolean).length;
+  const docCount = [docs.sf9, docs.sf10, docs.psa].filter(Boolean).length;
   if (docCount < 2) {
     overallStatus = "MATCH";
     canLink = true;

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
+import { PGlite } from "@electric-sql/pglite";
 
 // Register TypeScript loader dynamically for Node 20+
 register("./tests/ts-loader.mjs", pathToFileURL("./"));
@@ -252,6 +253,10 @@ describe("PSA Removal & Rejection Verification Suite", async () => {
       uploadRouteSrc.includes("PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."),
       "Upload route must reject PSA uploads with explicit error message"
     );
+    assert.ok(
+      uploadRouteSrc.includes("validUploadDocTypes = [\"sf9\", \"sf10\"]"),
+      "Upload route validUploadDocTypes must only be sf9 and sf10"
+    );
 
     const docsRoutePath = path.join(rootDir, "src/app/api/documents/route.ts");
     const docsRouteSrc = fs.readFileSync(docsRoutePath, "utf-8");
@@ -264,5 +269,136 @@ describe("PSA Removal & Rejection Verification Suite", async () => {
       docsRouteSrc.includes("validDocTypes = ['sf9', 'sf10']"),
       "Documents route validDocTypes must only be sf9 and sf10"
     );
+  });
+
+  test("11. Direct OCR Extraction Route explicitly rejects school_id and other bypassing attempts", async () => {
+    const fakeRequestSchoolId = new Request("https://example.com/api/ocr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: "data:image/jpeg;base64,fakeimage",
+        documentType: "school_id",
+      }),
+    });
+
+    const response = await handleOcrRoute(fakeRequestSchoolId, "fake-api-key");
+    assert.strictEqual(response.status, 400);
+
+    const body = await response.json();
+    assert.ok(body.error.includes("Unsupported document type: 'school_id'"));
+    assert.strictEqual(body.code, "DOCUMENT_TYPE_NOT_SUPPORTED");
+
+    const fakeRequestOther = new Request("https://example.com/api/ocr", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image: "data:image/jpeg;base64,fakeimage",
+        documentType: "other",
+      }),
+    });
+
+    const responseOther = await handleOcrRoute(fakeRequestOther, "fake-api-key");
+    assert.strictEqual(responseOther.status, 400);
+    const bodyOther = await responseOther.json();
+    assert.ok(bodyOther.error.includes("Unsupported document type: 'other'"));
+  });
+
+  test("12. Validation Rules reject school_id and other document types", () => {
+    const invalidFields = {
+      document_type: "school_id",
+      lrn: "123456789012",
+      name: "Dela Cruz, Juan",
+    };
+
+    const report = validateFields(invalidFields);
+    const supportedRule = report.results.find((r) => r.ruleName === "supported_document_type");
+
+    assert.ok(supportedRule);
+    assert.strictEqual(supportedRule.passed, false);
+    assert.strictEqual(supportedRule.severity, "error");
+    assert.ok(supportedRule.message.includes("Unsupported document type: 'school_id'"));
+  });
+
+  test("13. Migration 019: Aborts safely without modifying schema when unsupported records exist", async () => {
+    const db = new PGlite();
+    await db.exec(`
+      CREATE SCHEMA IF NOT EXISTS auth;
+      CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT);
+      CREATE TABLE IF NOT EXISTS public.documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_type TEXT NOT NULL CHECK (document_type IN ('sf9', 'sf10', 'school_id', 'birth_cert', 'other')),
+        status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'extracted', 'validated', 'needs_review', 'corrected', 'approved', 'rejected', 'archived')),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      INSERT INTO public.documents (document_type) VALUES ('sf9'), ('birth_cert');
+    `);
+
+    const m019Sql = fs.readFileSync(path.join(rootDir, "supabase/migrations/019_remove_psa_support.sql"), "utf8");
+    let aborted = false;
+    let errorMsg = "";
+    try {
+      await db.exec(m019Sql);
+    } catch (err) {
+      aborted = true;
+      errorMsg = err.message;
+      await db.exec("ROLLBACK;");
+    }
+
+    assert.strictEqual(aborted, true, "Must abort when birth_cert is present");
+    assert.ok(errorMsg.includes("Migration 019 Aborted"));
+    assert.ok(errorMsg.includes("birth_cert"));
+
+    // Verify existing records are completely preserved
+    const res = await db.query("SELECT count(*)::int as count FROM public.documents;");
+    assert.strictEqual(res.rows[0].count, 2);
+
+    // Verify pre-existing constraint was NOT replaced or weakened
+    const con = await db.query(`
+      SELECT pg_get_constraintdef(oid) as def
+      FROM pg_constraint
+      WHERE conrelid = 'public.documents'::regclass AND conname = 'documents_document_type_check';
+    `);
+    assert.ok(con.rows[0].def.includes("birth_cert"));
+  });
+
+  test("14. Migration 019: Successfully applies strict SF9/SF10 constraint on clean database and cleans redundant constraints", async () => {
+    const db = new PGlite();
+    await db.exec(`
+      CREATE SCHEMA IF NOT EXISTS auth;
+      CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT);
+      CREATE TABLE IF NOT EXISTS public.documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_type TEXT NOT NULL CHECK (document_type IN ('sf9', 'sf10', 'school_id', 'birth_cert', 'other')),
+        status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted', 'extracted', 'validated', 'needs_review', 'corrected', 'approved', 'rejected', 'archived')),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      ALTER TABLE public.documents ADD CONSTRAINT redundant_extra_check CHECK (document_type != 'foo');
+      INSERT INTO public.documents (document_type) VALUES ('sf9'), ('sf10');
+    `);
+
+    const m019Sql = fs.readFileSync(path.join(rootDir, "supabase/migrations/019_remove_psa_support.sql"), "utf8");
+    await db.exec(m019Sql);
+
+    // Check constraints on document_type
+    const conList = await db.query(`
+      SELECT con.conname, pg_get_constraintdef(con.oid) as def
+      FROM pg_constraint con
+      JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = ANY(con.conkey)
+      WHERE con.conrelid = 'public.documents'::regclass
+        AND con.contype = 'c'
+        AND att.attname = 'document_type';
+    `);
+
+    assert.strictEqual(conList.rows.length, 1, "Must have exactly 1 check constraint on document_type");
+    assert.strictEqual(conList.rows[0].conname, "documents_document_type_check");
+    assert.ok(conList.rows[0].def.includes("'sf9'") && conList.rows[0].def.includes("'sf10'"));
+    assert.ok(!conList.rows[0].def.includes("birth_cert"));
+    assert.ok(!conList.rows[0].def.includes("school_id"));
+    assert.ok(!conList.rows[0].def.includes("other"));
+
+    // Verify insertion of unsupported records fails
+    await assert.rejects(() => db.exec("INSERT INTO public.documents (document_type) VALUES ('birth_cert');"));
+    await assert.rejects(() => db.exec("INSERT INTO public.documents (document_type) VALUES ('school_id');"));
+    await assert.rejects(() => db.exec("INSERT INTO public.documents (document_type) VALUES ('other');"));
   });
 });

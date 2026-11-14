@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
@@ -79,9 +79,19 @@ export default function UploadPage() {
   const isSubmittingRef = useRef<boolean>(false);
   // Idempotent client submission ID to update record if retried instead of duplicating
   const submissionIdRef = useRef<string | null>(null);
+  // Storage upload cache for network retry idempotency
+  const storageCacheRef = useRef<{ frontStorageUrl?: string; backStorageUrl?: string; originalFilename?: string } | null>(null);
+  // OCR result cache for retry idempotency
+  const ocrResultRef = useRef<any>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [uploadProgressStatus, setUploadProgressStatus] = useState<string>("");
   const [currentPipelineStage, setCurrentPipelineStage] = useState<UploadPipelineStage>("idle");
+
+  const resetSubmissionId = useCallback(() => {
+    submissionIdRef.current = null;
+    storageCacheRef.current = null;
+    ocrResultRef.current = null;
+  }, []);
 
   const {
     videoRef,
@@ -124,7 +134,7 @@ export default function UploadPage() {
 
   const handleCategoryChange = (nextCategory: UploadDocCategory) => {
     if (isSubmittingRef.current) return;
-    submissionIdRef.current = null;
+    resetSubmissionId();
 
     const transition = transitionUploadCategory(
       {
@@ -159,6 +169,7 @@ export default function UploadPage() {
   const handleCapture = () => {
     const frame = captureFrame();
     if (frame) {
+      resetSubmissionId();
       setPreviewRotation(0);
       resetAdjustments();
       setRawImage(frame);
@@ -173,6 +184,7 @@ export default function UploadPage() {
   };
 
   const handleImageSelected = (dataUrl: string) => {
+    resetSubmissionId();
     setPreviewRotation(0);
     resetAdjustments();
     setRawImage(dataUrl);
@@ -334,9 +346,9 @@ export default function UploadPage() {
           ? "sf10"
           : "sf9";
 
-      let frontStorageUrl = "";
-      let backStorageUrl = "";
-      let originalFilename = docType === "sf10" ? "sf10_record.jpg" : "sf9_submission.jpg";
+      let frontStorageUrl = storageCacheRef.current?.frontStorageUrl || "";
+      let backStorageUrl = storageCacheRef.current?.backStorageUrl || "";
+      let originalFilename = storageCacheRef.current?.originalFilename || (docType === "sf10" ? "sf10_record.jpg" : "sf9_submission.jpg");
 
       // ── STAGE 1: Uploading document... ────────────────────────────────────
       setCurrentPipelineStage("uploading");
@@ -346,16 +358,18 @@ export default function UploadPage() {
         const frontToUpload = effectiveFront || frontImage || processedImage || rawImage;
         const backToUpload = effectiveBack || backImage;
 
-        // 1. Upload Front Image
-        if (frontToUpload && frontToUpload.startsWith("data:")) {
+        // 1. Upload Front Image if not already uploaded in this attempt
+        if (!frontStorageUrl && frontToUpload && frontToUpload.startsWith("data:")) {
           try {
             const frontRes = await fetch('/api/upload', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: frontToUpload,
-                filename: `${docType}_front_${Date.now()}.jpg`,
+                filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'front',
               }),
             });
             if (frontRes.ok) {
@@ -368,16 +382,18 @@ export default function UploadPage() {
           }
         }
 
-        // 2. Upload Back Image
-        if (backToUpload && backToUpload.startsWith("data:")) {
+        // 2. Upload Back Image if not already uploaded in this attempt
+        if (!backStorageUrl && backToUpload && backToUpload.startsWith("data:")) {
           try {
             const backRes = await fetch('/api/upload', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: backToUpload,
-                filename: `${docType}_back_${Date.now()}.jpg`,
+                filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'back',
               }),
             });
             if (backRes.ok) {
@@ -390,7 +406,7 @@ export default function UploadPage() {
         }
       } else {
         const imageToUpload = singleImage || processedImage || rawImage;
-        if (imageToUpload && imageToUpload.startsWith("data:")) {
+        if (!frontStorageUrl && imageToUpload && imageToUpload.startsWith("data:")) {
           const ext = imageToUpload.startsWith("data:application/pdf") ? "pdf" : "jpg";
           try {
             const storageRes = await fetch('/api/upload', {
@@ -398,8 +414,10 @@ export default function UploadPage() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: imageToUpload,
-                filename: `${docType}_${Date.now()}.${ext}`,
+                filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'single',
               }),
             });
             if (storageRes.ok) {
@@ -413,16 +431,22 @@ export default function UploadPage() {
         }
       }
 
+      // Cache storage URLs for network retries of this submission
+      storageCacheRef.current = { frontStorageUrl, backStorageUrl, originalFilename };
+
       // ── STAGE 2: Processing OCR... ────────────────────────────────────────
       setCurrentPipelineStage("ocr");
       setUploadProgressStatus("Processing OCR...");
 
-      let activeOcrResult = ocrResult;
+      let activeOcrResult = ocrResultRef.current || ocrResult;
       if (!activeOcrResult || !activeOcrResult.fields) {
         if (workflowType === "two_sided") {
           const frontImg = (effectiveFront || frontImage || processedImage || rawImage) as string;
           const backImg = (effectiveBack || backImage) as string;
           const res = await extractTwoSided(frontImg, backImg, true, gradeLevel);
+          if (!res) {
+            throw new Error("OCR processing failed. No extracted result returned.");
+          }
           if (res?.fields?.grades && Array.isArray(res.fields.grades)) {
             const normGrades = normalizeGradeRecords(res.fields.grades, res.fields.semester);
             res.fields = updateExtractedFieldsAverages({
@@ -431,10 +455,14 @@ export default function UploadPage() {
             });
           }
           activeOcrResult = res;
+          ocrResultRef.current = res;
           setOcrResult(res);
         } else {
           const imgToExtract = (singleImage || processedImage || rawImage) as string;
           const res = await extract(imgToExtract, true, gradeLevel, docType);
+          if (!res) {
+            throw new Error("OCR processing failed. No extracted result returned.");
+          }
           if (res?.fields?.grades && Array.isArray(res.fields.grades)) {
             const normGrades = normalizeGradeRecords(res.fields.grades, res.fields.semester);
             res.fields = updateExtractedFieldsAverages({
@@ -443,6 +471,7 @@ export default function UploadPage() {
             });
           }
           activeOcrResult = res;
+          ocrResultRef.current = res;
           setOcrResult(res);
         }
       }
@@ -479,6 +508,11 @@ export default function UploadPage() {
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `Upload persistence failed with status ${res.status}`);
+      }
+
+      const savedDoc = await res.json();
+      if (!savedDoc || !savedDoc.id) {
+        throw new Error("Database did not confirm committed document record.");
       }
 
       // ── STAGE 4: Preparing Review Queue... ────────────────────────────────
@@ -525,9 +559,9 @@ export default function UploadPage() {
           ? "sf10"
           : "sf9";
 
-      let frontStorageUrl = "";
-      let backStorageUrl = "";
-      let originalFilename = docType === "sf10" ? "sf10_record.jpg" : "sf9_submission.jpg";
+      let frontStorageUrl = storageCacheRef.current?.frontStorageUrl || "";
+      let backStorageUrl = storageCacheRef.current?.backStorageUrl || "";
+      let originalFilename = storageCacheRef.current?.originalFilename || (docType === "sf10" ? "sf10_record.jpg" : "sf9_submission.jpg");
 
       // 1. Uploading document...
       setCurrentPipelineStage("uploading");
@@ -538,15 +572,17 @@ export default function UploadPage() {
         const backToUpload = backImage;
 
         // 1. Upload Front Image
-        if (frontToUpload && frontToUpload.startsWith("data:image/")) {
+        if (!frontStorageUrl && frontToUpload && frontToUpload.startsWith("data:image/")) {
           try {
             const frontRes = await fetch('/api/upload', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: frontToUpload,
-                filename: `${docType}_front_${Date.now()}.jpg`,
+                filename: `${docType}_front_${currentSubmissionId.slice(0, 8)}.jpg`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'front',
               }),
             });
             if (frontRes.ok) {
@@ -560,15 +596,17 @@ export default function UploadPage() {
         }
 
         // 2. Upload Back Image
-        if (backToUpload && backToUpload.startsWith("data:image/")) {
+        if (!backStorageUrl && backToUpload && backToUpload.startsWith("data:image/")) {
           try {
             const backRes = await fetch('/api/upload', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: backToUpload,
-                filename: `${docType}_back_${Date.now()}.jpg`,
+                filename: `${docType}_back_${currentSubmissionId.slice(0, 8)}.jpg`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'back',
               }),
             });
             if (backRes.ok) {
@@ -582,6 +620,7 @@ export default function UploadPage() {
       } else {
         const imageToUpload = processedImage || rawImage;
         if (
+          !frontStorageUrl &&
           imageToUpload &&
           (imageToUpload.startsWith("data:image/") ||
             imageToUpload.startsWith("data:application/pdf"))
@@ -593,8 +632,10 @@ export default function UploadPage() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 dataUrl: imageToUpload,
-                filename: `${docType}_${Date.now()}.${ext}`,
+                filename: `${docType}_${currentSubmissionId.slice(0, 8)}.${ext}`,
                 docType: docType,
+                documentId: currentSubmissionId,
+                side: 'single',
               }),
             });
             if (storageRes.ok) {
@@ -607,6 +648,8 @@ export default function UploadPage() {
           }
         }
       }
+
+      storageCacheRef.current = { frontStorageUrl, backStorageUrl, originalFilename };
 
       // 2. Saving extracted information...
       setCurrentPipelineStage("saving");
@@ -641,6 +684,11 @@ export default function UploadPage() {
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || "Upload persistence failed.");
+      }
+
+      const savedDoc = await res.json();
+      if (!savedDoc || !savedDoc.id) {
+        throw new Error("Database did not confirm committed document record.");
       }
 
       // 4. Preparing Review Queue...

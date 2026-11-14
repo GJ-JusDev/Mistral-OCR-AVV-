@@ -318,6 +318,17 @@ export async function handleOcrRoute(
       );
     }
 
+    const validOcrDocTypes = ["sf9", "sf10"];
+    if (effectiveDocType && !validOcrDocTypes.includes(effectiveDocType)) {
+      return Response.json(
+        {
+          error: `Unsupported document type: '${effectiveDocType}'. The active AVV scope supports only SF9 and SF10.`,
+          code: "DOCUMENT_TYPE_NOT_SUPPORTED",
+        },
+        { status: 400 }
+      );
+    }
+
     const ALLOWED_OCR_MIME_TYPES = new Set([
       "image/jpeg",
       "image/jpg",

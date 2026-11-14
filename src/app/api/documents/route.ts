@@ -307,15 +307,31 @@ export async function POST(request: NextRequest) {
     if (body.document_id) {
       const { data: existingDoc } = await supabase
         .from('documents')
-        .select('id')
+        .select('id, uploaded_by, school_id, status')
         .eq('id', body.document_id)
         .maybeSingle();
 
       if (existingDoc?.id) {
+        // Enforce ownership and school isolation: prevent modifying documents belonging to another user or school
+        if (existingDoc.uploaded_by !== uploadedBy || existingDoc.school_id !== userSchoolId) {
+          return NextResponse.json(
+            { error: "Forbidden: You cannot modify or overwrite a document belonging to another user or school." },
+            { status: 403 }
+          );
+        }
+        if (existingDoc.status === 'approved' || existingDoc.status === 'archived') {
+          return NextResponse.json(
+            { error: "Conflict: Cannot overwrite an approved or archived document record." },
+            { status: 409 }
+          );
+        }
+
         const updateRes = await supabase
           .from('documents')
           .update(documentPayload)
           .eq('id', body.document_id)
+          .eq('uploaded_by', uploadedBy)
+          .eq('school_id', userSchoolId)
           .select()
           .single();
         docData = updateRes.data;
@@ -328,14 +344,50 @@ export async function POST(request: NextRequest) {
           .single();
         docData = insertRes.data;
         docError = insertRes.error;
+
+        // Safe conflict handling for concurrent race condition
+        if (docError && (docError.code === '23505' || docError.message?.includes('duplicate key') || docError.message?.includes('unique constraint'))) {
+          const { data: conflictDoc } = await supabase
+            .from('documents')
+            .select('id, uploaded_by, school_id, status')
+            .eq('id', body.document_id)
+            .maybeSingle();
+
+          if (conflictDoc) {
+            if (conflictDoc.uploaded_by !== uploadedBy || conflictDoc.school_id !== userSchoolId) {
+              return NextResponse.json(
+                { error: "Forbidden: You cannot modify or overwrite a document belonging to another user or school." },
+                { status: 403 }
+              );
+            }
+            if (conflictDoc.status === 'approved' || conflictDoc.status === 'archived') {
+              return NextResponse.json(
+                { error: "Conflict: Cannot overwrite an approved or archived document record." },
+                { status: 409 }
+              );
+            }
+
+            const updateRes = await supabase
+              .from('documents')
+              .update(documentPayload)
+              .eq('id', body.document_id)
+              .eq('uploaded_by', uploadedBy)
+              .eq('school_id', userSchoolId)
+              .select()
+              .single();
+            docData = updateRes.data;
+            docError = updateRes.error;
+          }
+        }
       }
     } else {
       // Deduplication fallback: check for identical recent submission by same teacher
       if (documentPayload.image_url && documentPayload.image_url !== "uploaded-document") {
         const { data: recentDup } = await supabase
           .from('documents')
-          .select('id')
+          .select('id, uploaded_by, school_id, status')
           .eq('uploaded_by', uploadedBy)
+          .eq('school_id', userSchoolId)
           .eq('document_type', documentType)
           .eq('image_url', documentPayload.image_url)
           .in('status', ['submitted', 'extracted', 'validated', 'needs_review'])
@@ -348,6 +400,8 @@ export async function POST(request: NextRequest) {
             .from('documents')
             .update(documentPayload)
             .eq('id', recentDup.id)
+            .eq('uploaded_by', uploadedBy)
+            .eq('school_id', userSchoolId)
             .select()
             .single();
           docData = updateRes.data;
@@ -394,13 +448,17 @@ export async function POST(request: NextRequest) {
           await supabase.from('validation_results').insert(resultsToInsert);
         }
 
-        // Determine updated status from validation report
-        // If the document is staged as needs_review, preserve needs_review for mandatory human verification
-        let newStatus = status === 'needs_review' ? 'needs_review' : 'validated';
-        if (report.status === 'invalid') {
+        // Determine updated status from validation report following AVV workflow:
+        // 1. If validation has hard errors (report.status === 'invalid') or requested status is rejected, document is 'rejected'.
+        // 2. If validation found issues (report.status === 'needs_review') or document requires human review (status === 'needs_review'), document is 'needs_review'.
+        // 3. Otherwise, document is legitimately 'validated'.
+        let newStatus: string;
+        if (report.status === 'invalid' || status === 'rejected') {
           newStatus = 'rejected';
-        } else if (report.status === 'needs_review') {
+        } else if (report.status === 'needs_review' || status === 'needs_review') {
           newStatus = 'needs_review';
+        } else {
+          newStatus = 'validated';
         }
 
         await supabase

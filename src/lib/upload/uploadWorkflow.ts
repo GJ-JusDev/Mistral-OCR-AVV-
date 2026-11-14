@@ -51,6 +51,7 @@ export interface UploadSessionSnapshot<TOcrResult = unknown> {
   backImage: string | null;
   ocrResult: TOcrResult | null;
   previewRotation: PreviewRotation;
+  hasPsaArtifacts?: boolean;
 }
 
 /**
@@ -79,6 +80,7 @@ export function transitionUploadCategory<TOcrResult = unknown>(
       backImage: null,
       ocrResult: null,
       previewRotation: 0,
+      hasPsaArtifacts: false,
     },
   };
 }
@@ -88,8 +90,8 @@ export type ResolvedOcrRequest =
       kind: "single";
       image: string;
       extractFields: true;
-      gradeLevel: AcademicGradeLevel;
-      documentType: "sf10";
+      gradeLevel: AcademicGradeLevel | "PSA" | string;
+      documentType: "sf10" | "birth_cert";
     }
   | {
       kind: "two_sided";
@@ -121,9 +123,19 @@ export function resolveOcrExtractionRequest(params: {
     singleImage,
     frontImage,
     backImage,
+    psaImage,
   } = params;
 
   if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
+    if (psaImage) {
+      return {
+        kind: "single",
+        image: psaImage,
+        extractFields: true,
+        gradeLevel: "PSA",
+        documentType: "birth_cert",
+      };
+    }
     return null;
   }
 
@@ -164,7 +176,7 @@ export interface BuildDocumentSubmissionParams {
 }
 
 export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionParams): {
-  docType: "sf9" | "sf10";
+  docType: "sf9" | "sf10" | "birth_cert";
   combinedFields: ExtractedFields;
   requestBody: Record<string, unknown>;
 } {
@@ -181,9 +193,39 @@ export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionPa
   } = params;
 
   if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
-    throw new Error(
-      "Unsupported document category: PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."
-    );
+    if (
+      gradeLevel === "Grade 11" ||
+      gradeLevel === "Grade 12" ||
+      !ocrFields ||
+      (ocrFields as any).selected_grade_level === undefined
+    ) {
+      throw new Error(
+        "Unsupported document category: PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."
+      );
+    }
+
+    const combinedFields: ExtractedFields = {
+      ...ocrFields,
+      document_type: "birth_cert" as any,
+      grades: [],
+    };
+    delete (combinedFields as any).selected_grade_level;
+    delete (combinedFields as any).academic_level;
+    delete (combinedFields as any).grading_period_scheme;
+
+    const requestBody: Record<string, unknown> = {
+      document_type: "birth_cert",
+      image_url: finalPrimaryUrl,
+      original_filename: originalFilename,
+      extracted_text: ocrText || "CERTIFICATE OF LIVE BIRTH",
+      extracted_fields: combinedFields,
+      status: params.status || "needs_review",
+      ...(params.documentId ? { document_id: params.documentId } : {}),
+      ...(ocrModel ? { ocr_model: ocrModel } : {}),
+      ...(typeof ocrConfidence === "number" ? { ocr_confidence: ocrConfidence } : {}),
+    };
+
+    return { docType: "birth_cert", combinedFields, requestBody };
   }
 
   const docType: "sf9" | "sf10" =

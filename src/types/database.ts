@@ -13,7 +13,7 @@ export type ReviewDeletionRequest = Tables['review_deletion_requests']['Row']
 
 export type DocumentStatus = 'submitted' | 'extracted' | 'validated' | 'needs_review' | 'corrected' | 'approved' | 'rejected' | 'archived'
 export type DeletionRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'COMPLETED' | 'FAILED'
-export type DocumentType = 'sf9' | 'sf10' | 'school_id' | 'other'
+export type DocumentType = 'sf9' | 'sf10'
 export type SupportedDocumentType = 'sf9' | 'sf10'
 export type StudentStatus = 'active' | 'inactive' | 'transferred'
 export type ReviewAction = 'approve' | 'reject' | 'correct' | 'flag' | 'resubmit'

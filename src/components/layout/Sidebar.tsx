@@ -17,7 +17,6 @@ import {
   X,
   UserCheck,
   ShieldCheck,
-  ExternalLink,
   School
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
@@ -164,18 +163,6 @@ export default function Sidebar({ role = "teacher" }: { role?: string }) {
               </Link>
             );
           })}
-
-          {/* Quick link back to landing page */}
-          <div className="pt-4 mt-4 border-t border-white/10">
-            <Link
-              href="/?view=landing"
-              onClick={() => setIsOpen(false)}
-              className="flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-medium text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors"
-            >
-              <ExternalLink className="h-4 w-4 shrink-0 text-slate-400" />
-              <span>Public Landing Page</span>
-            </Link>
-          </div>
         </nav>
 
         {/* Principal School Head Governance Notice */}

@@ -75,7 +75,8 @@ export async function getUsers() {
   }
 
   // Fetch authoritative user_roles records from database
-  const { data: rolesData } = await adminClient
+  let rolesData: any[] | null = null;
+  const { data: fullRolesData, error: fullRolesError } = await adminClient
     .from("user_roles")
     .select(`
       user_id,
@@ -95,12 +96,34 @@ export async function getUsers() {
       schools:school_id (name, school_id)
     `);
 
+  if (!fullRolesError && fullRolesData) {
+    rolesData = fullRolesData;
+  } else {
+    // Fall back to core columns if extended columns (e.g. approval_method) are not yet in user_roles
+    const { data: coreRolesData } = await adminClient
+      .from("user_roles")
+      .select(`
+        user_id,
+        role,
+        account_status,
+        school_id,
+        schools:school_id (name, school_id)
+      `);
+    rolesData = coreRolesData || [];
+  }
+
   const roleMap = new Map((rolesData || []).map(r => [r.user_id, r]));
 
-  // Fetch registry records to enrich matched names
-  const { data: registryList } = await adminClient
-    .from("school_teacher_registry")
-    .select("id, full_name_original, first_name, last_name, verification_status");
+  // Fetch registry records to enrich matched names (safe against missing table)
+  let registryList: any[] = [];
+  try {
+    const { data: regData } = await adminClient
+      .from("school_teacher_registry")
+      .select("id, full_name_original, first_name, last_name, verification_status");
+    if (regData) registryList = regData;
+  } catch {
+    // Registry table optional/unmigrated
+  }
   const registryMap = new Map((registryList || []).map(r => [r.id, r]));
 
   const safeUsers = usersData.users.map(u => {
@@ -253,12 +276,24 @@ export async function approveUser(
     };
   }
 
-  // Fetch target user's current user_roles record
-  const { data: targetRole } = await adminClient
+  // Fetch target user's current user_roles record (schema-resilient)
+  let targetRole: any = null;
+  const { data: extTargetRole, error: extTargetErr } = await adminClient
     .from("user_roles")
     .select("account_status, review_eligibility_time, registry_match_status, matched_registry_id")
     .eq("user_id", userId)
     .maybeSingle();
+
+  if (!extTargetErr && extTargetRole) {
+    targetRole = extTargetRole;
+  } else {
+    const { data: coreTargetRole } = await adminClient
+      .from("user_roles")
+      .select("account_status")
+      .eq("user_id", userId)
+      .maybeSingle();
+    targetRole = coreTargetRole;
+  }
 
   const isEarly = options?.isEarlyApproval || (
     targetRole?.review_eligibility_time && new Date(targetRole.review_eligibility_time) > new Date()
@@ -322,39 +357,72 @@ export async function approveUser(
   }
 
   const operationId = crypto.randomUUID();
-  const approvalMethod = isEarly ? "MANUAL_EARLY" : "MANUAL";
+  const approvalMethod = isEarly ? "MANUAL_EARLY" : "MANUAL_STANDARD";
   const approvalReason = options?.justificationReason?.trim() || "Administrator approved staff account";
   const nowIso = new Date().toISOString();
 
   // Update authoritative status, role, and school assignment in database table public.user_roles
-  const { error: roleDbErr } = await adminClient
+  const baseUpdatePayload = {
+    account_status: "Approved",
+    role: validRole,
+    school_id: schoolId,
+    updated_by: user.id,
+    last_operation_id: operationId,
+  };
+
+  const extendedUpdatePayload = {
+    ...baseUpdatePayload,
+    approval_method: approvalMethod,
+    approval_reason: approvalReason,
+    approved_by: user.id,
+    approved_at: nowIso,
+  };
+
+  let roleDbErr: any = null;
+
+  // Attempt update with extended columns first
+  const { error: fullUpdateErr } = await adminClient
     .from("user_roles")
-    .update({ 
-      account_status: "Approved",
-      role: validRole,
-      school_id: schoolId,
-      approval_method: approvalMethod,
-      approval_reason: approvalReason,
-      approved_by: user.id,
-      approved_at: nowIso,
-      updated_by: user.id,
-      last_operation_id: operationId,
-    })
+    .update(extendedUpdatePayload)
     .eq("user_id", userId);
+
+  if (fullUpdateErr) {
+    // If the schema lacks approval_method or extended columns, fall back safely to core columns
+    if (
+      fullUpdateErr.message?.includes("approval_method") ||
+      fullUpdateErr.message?.includes("schema cache") ||
+      fullUpdateErr.message?.includes("column") ||
+      fullUpdateErr.code === "42703" ||
+      fullUpdateErr.code === "PGRST204"
+    ) {
+      console.warn("[actions/users] Extended columns missing in user_roles. Falling back to core schema update.");
+      const { error: coreUpdateErr } = await adminClient
+        .from("user_roles")
+        .update(baseUpdatePayload)
+        .eq("user_id", userId);
+      roleDbErr = coreUpdateErr;
+    } else {
+      roleDbErr = fullUpdateErr;
+    }
+  }
 
   if (roleDbErr) {
     return { error: roleDbErr.message };
   }
 
-  // Link registry record if there is a matched registry entry
+  // Link registry record if there is a matched registry entry (safe against unmigrated table)
   if (targetRole?.matched_registry_id) {
-    await adminClient
-      .from("school_teacher_registry")
-      .update({
-        linked_user_id: userId,
-        updated_at: nowIso,
-      })
-      .eq("id", targetRole.matched_registry_id);
+    try {
+      await adminClient
+        .from("school_teacher_registry")
+        .update({
+          linked_user_id: userId,
+          updated_at: nowIso,
+        })
+        .eq("id", targetRole.matched_registry_id);
+    } catch {
+      // Ignored if table does not exist
+    }
   }
 
   const actionName = isEarly ? "ACCOUNT_EARLY_APPROVED" : "ACCOUNT_APPROVED";
@@ -438,24 +506,61 @@ export async function declineUser(userId: string, declineReason: string) {
   const operationId = crypto.randomUUID();
   const nowIso = new Date().toISOString();
 
-  // Unlink any matched registry entry
-  await adminClient
-    .from("school_teacher_registry")
-    .update({ linked_user_id: null, updated_at: nowIso })
-    .eq("linked_user_id", userId);
+  // Unlink any matched registry entry (safely handled if table does not exist)
+  try {
+    await adminClient
+      .from("school_teacher_registry")
+      .update({ linked_user_id: null, updated_at: nowIso })
+      .eq("linked_user_id", userId);
+  } catch {
+    // Ignored if table does not exist
+  }
 
   // Update authoritative status in database table public.user_roles
-  await adminClient
+  const baseDeclinePayload = {
+    account_status: "Declined",
+    updated_by: user.id,
+    last_operation_id: operationId,
+  };
+
+  const extendedDeclinePayload = {
+    ...baseDeclinePayload,
+    decline_reason: declineReason.trim(),
+    declined_by: user.id,
+    declined_at: nowIso,
+  };
+
+  let roleDbErr: any = null;
+
+  // Attempt update with extended columns first
+  const { error: fullDeclineErr } = await adminClient
     .from("user_roles")
-    .update({ 
-      account_status: "Declined",
-      decline_reason: declineReason.trim(),
-      declined_by: user.id,
-      declined_at: nowIso,
-      updated_by: user.id,
-      last_operation_id: operationId,
-    })
+    .update(extendedDeclinePayload)
     .eq("user_id", userId);
+
+  if (fullDeclineErr) {
+    // If the schema lacks decline_reason or extended columns, fall back safely to core columns
+    if (
+      fullDeclineErr.message?.includes("decline_reason") ||
+      fullDeclineErr.message?.includes("schema cache") ||
+      fullDeclineErr.message?.includes("column") ||
+      fullDeclineErr.code === "42703" ||
+      fullDeclineErr.code === "PGRST204"
+    ) {
+      console.warn("[actions/users] Extended decline columns missing in user_roles. Falling back to core schema update.");
+      const { error: coreDeclineErr } = await adminClient
+        .from("user_roles")
+        .update(baseDeclinePayload)
+        .eq("user_id", userId);
+      roleDbErr = coreDeclineErr;
+    } else {
+      roleDbErr = fullDeclineErr;
+    }
+  }
+
+  if (roleDbErr) {
+    return { error: roleDbErr.message };
+  }
 
   // Audit account decline
   await logAuditEvent({
