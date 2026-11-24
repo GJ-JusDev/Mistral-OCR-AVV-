@@ -101,101 +101,126 @@ export async function submitDocumentReview(
 
     let studentId = doc.student_id;
     const extractedFields = (doc.extracted_fields as ExtractedFields) || {};
+    const isRosterDoc = ["sf1", "sf2", "sf5"].includes(doc.document_type);
+    const isPsaDoc = doc.document_type === "birth_cert";
+    const isSingleLearnerAcademic = ["sf9", "sf10"].includes(doc.document_type || "sf9");
+    const schoolYear = extractedFields.school_year?.trim();
 
     // 3. Mahigpit na pagsusuri kapag "approve" ang pinili
     if (action === "approve") {
-      // 3.1 School Year Validation: Bawal mag-imbento ng S.Y. kung blangko sa OCR
-      const schoolYear = extractedFields.school_year?.trim();
-      if (!schoolYear || !isValidSchoolYear(schoolYear)) {
-        return {
-          error: "Cannot approve document: School year is missing or invalid. Please correct the school year (e.g. 2023-2024) before approval.",
-        };
-      }
+      if (isRosterDoc) {
+        // Anti-bypass safeguard: Do not approve roster documents containing FLAGGED learner entries
+        const table = doc.document_type === "sf1" ? "sf1_roster_entries" : doc.document_type === "sf2" ? "sf2_attendance_entries" : "sf5_promotion_entries";
+        const { data: flaggedEntries } = await (supabase as any)
+          .from(table)
+          .select("id")
+          .eq("document_id", documentId)
+          .eq("review_status", "FLAGGED")
+          .limit(1);
 
-      // 3.2 Learner Identity Validation: Bawal ang "Unknown Learner", mandatory ang 12-digit LRN
-      const identityEval = evaluateStudentIdentity(extractedFields);
-      if (!identityEval.isValidLrn) {
-        return {
-          error: `Cannot approve document: ${identityEval.reasons.join(" ")} Please correct the LRN before approval.`,
-        };
-      }
-
-      if (!identityEval.isValidName) {
-        return {
-          error: `Cannot approve document: ${identityEval.reasons.join(" ")} Please correct the student name before approval.`,
-        };
-      }
-
-      // 3.3 Verify at i-link ang student record gamit ang normalized 12-digit LRN
-      if (identityEval.normalizedLrn) {
-        // Query database by normalized LRN to ensure single verified student per LRN
-        const { data: existingStudent } = await supabase
-          .from("students")
-          .select("id, first_name, last_name, lrn")
-          .eq("lrn", identityEval.normalizedLrn)
-          .maybeSingle();
-
-        if (existingStudent?.id) {
-          // Collision Check: Kapag may kaparehong LRN sa database,
-          // sinusuri kung tugma ang apelyido para hindi magka-interchange ang dalawang mag-aaral
-          const collision = verifyStudentCollision(identityEval.lastName, existingStudent);
-          if (collision.hasConflict) {
-            return { error: `Cannot approve document due to identity conflict: ${collision.reason}` };
-          }
-          studentId = existingStudent.id;
-        } else if (identityEval.canAutoCreate) {
-          // Kung bagong estudyante at kumpleto ang verified identity, i-create sa students table
-          const gradeLevel = extractedFields.grade_level || null;
-          const sex = extractedFields.sex === "M" || extractedFields.sex === "F" ? extractedFields.sex : null;
-
-          const { data: newStudent, error: createError } = await supabase
-            .from("students")
-            .insert({
-              lrn: identityEval.normalizedLrn,
-              first_name: identityEval.firstName!,
-              middle_name: identityEval.middleName,
-              last_name: identityEval.lastName!,
-              suffix: identityEval.suffix,
-              grade_level: gradeLevel,
-              sex: sex,
-              school_id: doc.school_id ?? null,
-              status: "active",
-            })
-            .select("id")
-            .single();
-
-          if (createError) {
-            // Concurrent approval race condition protection:
-            // If another worker just inserted this student, fetch and reuse their student ID
-            if (
-              createError.code === "23505" ||
-              createError.message?.toLowerCase().includes("unique") ||
-              createError.message?.toLowerCase().includes("duplicate")
-            ) {
-              const { data: retryStudent } = await supabase
-                .from("students")
-                .select("id, first_name, last_name")
-                .eq("lrn", identityEval.normalizedLrn)
-                .maybeSingle();
-              if (retryStudent?.id) {
-                studentId = retryStudent.id;
-              } else {
-                return { error: `Failed to create verified student record: ${createError?.message}` };
-              }
-            } else {
-              return { error: `Failed to create verified student record: ${createError?.message}` };
-            }
-          } else if (newStudent?.id) {
-            studentId = newStudent.id;
-          }
+        if (flaggedEntries && flaggedEntries.length > 0) {
+          return {
+            error: "Cannot approve roster document: Document contains unresolved FLAGGED learner entries. All flagged records must be reviewed and resolved before approval.",
+          };
         }
       }
 
-      if (studentId && studentId !== doc.student_id) {
-        await supabase
-          .from("documents")
-          .update({ student_id: studentId })
-          .eq("id", documentId);
+      if (isSingleLearnerAcademic) {
+        // 3.1 School Year Validation: Bawal mag-imbento ng S.Y. kung blangko sa OCR
+        if (!schoolYear || !isValidSchoolYear(schoolYear)) {
+          return {
+            error: "Cannot approve document: School year is missing or invalid. Please correct the school year (e.g. 2023-2024) before approval.",
+          };
+        }
+
+        // 3.2 Learner Identity Validation: Bawal ang "Unknown Learner", mandatory ang 12-digit LRN
+        const identityEval = evaluateStudentIdentity(extractedFields);
+        if (!identityEval.isValidLrn) {
+          return {
+            error: `Cannot approve document: ${identityEval.reasons.join(" ")} Please correct the LRN before approval.`,
+          };
+        }
+
+        if (!identityEval.isValidName) {
+          return {
+            error: `Cannot approve document: ${identityEval.reasons.join(" ")} Please correct the student name before approval.`,
+          };
+        }
+
+        // 3.3 Verify at i-link ang student record gamit ang normalized 12-digit LRN
+        if (identityEval.normalizedLrn) {
+          // Query database by normalized LRN to ensure single verified student per LRN
+          const { data: existingStudent } = await supabase
+            .from("students")
+            .select("id, first_name, last_name, lrn")
+            .eq("lrn", identityEval.normalizedLrn)
+            .maybeSingle();
+
+          if (existingStudent?.id) {
+            // Collision Check: Kapag may kaparehong LRN sa database,
+            // sinusuri kung tugma ang apelyido para hindi magka-interchange ang dalawang mag-aaral
+            const collision = verifyStudentCollision(identityEval.lastName, existingStudent);
+            if (collision.hasConflict) {
+              return { error: `Cannot approve document due to identity conflict: ${collision.reason}` };
+            }
+            studentId = existingStudent.id;
+          } else if (identityEval.canAutoCreate) {
+            // Kung bagong estudyante at kumpleto ang verified identity, i-create sa students table
+            const gradeLevel = extractedFields.grade_level || null;
+            const sex = extractedFields.sex === "M" || extractedFields.sex === "F" ? extractedFields.sex : null;
+
+            const { data: newStudent, error: createError } = await supabase
+              .from("students")
+              .insert({
+                lrn: identityEval.normalizedLrn,
+                first_name: identityEval.firstName!,
+                middle_name: identityEval.middleName,
+                last_name: identityEval.lastName!,
+                suffix: identityEval.suffix,
+                grade_level: gradeLevel,
+                sex: sex,
+                school_id: doc.school_id ?? null,
+                status: "active",
+              })
+              .select("id")
+              .single();
+
+            if (createError) {
+              // Concurrent approval race condition protection:
+              // If another worker just inserted this student, fetch and reuse their student ID
+              if (
+                createError.code === "23505" ||
+                createError.message?.toLowerCase().includes("unique") ||
+                createError.message?.toLowerCase().includes("duplicate")
+              ) {
+                const { data: retryStudent } = await supabase
+                  .from("students")
+                  .select("id, first_name, last_name")
+                  .eq("lrn", identityEval.normalizedLrn)
+                  .maybeSingle();
+                if (retryStudent?.id) {
+                  studentId = retryStudent.id;
+                } else {
+                  return { error: `Failed to create verified student record: ${createError?.message}` };
+                }
+              } else {
+                return { error: `Failed to create verified student record: ${createError?.message}` };
+              }
+            } else if (newStudent?.id) {
+              studentId = newStudent.id;
+            }
+          }
+        }
+
+        if (studentId && studentId !== doc.student_id) {
+          await supabase
+            .from("documents")
+            .update({ student_id: studentId })
+            .eq("id", documentId);
+        }
+      } else if (isRosterDoc) {
+        // Roster documents (SF1, SF2, SF5) MUST have student_id = NULL on documents table
+        studentId = null;
       }
 
       // 3.4 Grade Comparison & Controlled Update Tracking (Phase 4)
@@ -301,6 +326,34 @@ export async function submitDocumentReview(
 
     if (updateError) {
       return { error: updateError.message };
+    }
+
+    // 3.0 Synchronize SHS Roster and PSA Child Entries upon document approval/rejection
+    if (isRosterDoc) {
+      if (action === "approve") {
+        if (doc.document_type === "sf1") {
+          await (supabase as any).from("sf1_roster_entries").update({ review_status: "VERIFIED" }).eq("document_id", documentId).neq("review_status", "FLAGGED");
+        } else if (doc.document_type === "sf2") {
+          await (supabase as any).from("sf2_attendance_entries").update({ review_status: "VERIFIED" }).eq("document_id", documentId).neq("review_status", "FLAGGED");
+        } else if (doc.document_type === "sf5") {
+          await (supabase as any).from("sf5_promotion_entries").update({ review_status: "VERIFIED" }).eq("document_id", documentId).neq("review_status", "FLAGGED");
+        }
+      } else {
+        if (doc.document_type === "sf1") {
+          await (supabase as any).from("sf1_roster_entries").update({ review_status: "FLAGGED" }).eq("document_id", documentId);
+        } else if (doc.document_type === "sf2") {
+          await (supabase as any).from("sf2_attendance_entries").update({ review_status: "FLAGGED" }).eq("document_id", documentId);
+        } else if (doc.document_type === "sf5") {
+          await (supabase as any).from("sf5_promotion_entries").update({ review_status: "FLAGGED" }).eq("document_id", documentId);
+        }
+      }
+    } else if (isPsaDoc) {
+      const childStatus = action === "approve" ? "VERIFIED" : "FLAGGED";
+      await (supabase as any).from("psa_identity_records").update({
+        verification_status: childStatus,
+        verified_by: user.id,
+        verified_at: new Date().toISOString(),
+      }).eq("document_id", documentId);
     }
 
     // 3.1 Synchronize attendance and remedial records if migration 013 tables exist
@@ -551,6 +604,93 @@ export async function saveDocumentCorrections(
       mergedFields.attendance_discrepancy_details = attEval.discrepancyDetails;
     }
 
+    // FIX 4: Server-side validation and stamping of Observed Values correction metadata
+    if (mergedFields.observed_values && typeof mergedFields.observed_values === "object") {
+      const ov = mergedFields.observed_values;
+      const currentOv = currentFields.observed_values;
+      const serverTimestamp = new Date().toISOString();
+
+      const prevObsMap = new Map<string, any>();
+      if (currentOv && Array.isArray(currentOv.observations)) {
+        for (const p of currentOv.observations) {
+          const key = `${p.behavior_statement}::${p.quarter}`;
+          prevObsMap.set(key, p);
+        }
+      }
+
+      if (Array.isArray(ov.observations)) {
+        for (const o of ov.observations) {
+          const key = `${o.behavior_statement}::${o.quarter}`;
+          const prevObs = prevObsMap.get(key);
+
+          // Preserve original OCR mark and provenance from database if it existed
+          if (prevObs && prevObs.original_mark !== undefined && prevObs.original_mark !== null) {
+            o.original_mark = prevObs.original_mark;
+            if (prevObs.ocr_confidence !== undefined) o.ocr_confidence = prevObs.ocr_confidence;
+            if (prevObs.bounding_box !== undefined) o.bounding_box = prevObs.bounding_box;
+            if (prevObs.location !== undefined) o.location = prevObs.location;
+            if (prevObs.source_page !== undefined) o.source_page = prevObs.source_page;
+          }
+
+          const ratingChanged = prevObs
+            ? o.normalized_rating !== prevObs.normalized_rating || o.teacher_correction !== prevObs.teacher_correction
+            : Boolean(o.teacher_correction || o.verification_status === "corrected");
+
+          if (ratingChanged) {
+            // Observation was genuinely modified in this operation: stamp with server user ID and timestamp
+            o.teacher_corrected_by = user.id;
+            o.teacher_corrected_at = serverTimestamp;
+            if (o.normalized_rating) {
+              o.verification_status = "corrected";
+              o.needs_verification = false;
+            }
+          } else if (prevObs && prevObs.teacher_corrected_by) {
+            // Untouched in this save, but was previously corrected: retain prior authoritative server metadata
+            o.teacher_corrected_by = prevObs.teacher_corrected_by;
+            o.teacher_corrected_at = prevObs.teacher_corrected_at;
+          } else {
+            // Untouched and uncorrected: remove any forged client-supplied correction metadata
+            delete o.teacher_corrected_by;
+            delete o.teacher_corrected_at;
+          }
+        }
+      }
+
+      // Synchronize statement-level quarterly records with the authoritative observations
+      if (Array.isArray(ov.statements)) {
+        for (const stmt of ov.statements) {
+          const qKeys = ["q1", "q2", "q3", "q4"] as const;
+          for (const qk of qKeys) {
+            const qRec = stmt[qk];
+            if (!qRec) continue;
+            const qUpper = qk.toUpperCase() as "Q1" | "Q2" | "Q3" | "Q4";
+            const obs = (ov.observations || []).find(
+              (o: any) => o.behavior_statement === stmt.statement && o.quarter === qUpper
+            );
+            if (obs) {
+              qRec.original_mark = obs.original_mark;
+              qRec.normalized_rating = obs.normalized_rating;
+              qRec.needs_verification = obs.needs_verification;
+              qRec.verification_status = obs.verification_status;
+              if (obs.teacher_corrected_by) {
+                qRec.corrected_by = obs.teacher_corrected_by;
+                qRec.corrected_at = obs.teacher_corrected_at;
+                qRec.corrected_mark = obs.normalized_rating || undefined;
+              } else {
+                delete qRec.corrected_by;
+                delete qRec.corrected_at;
+              }
+            }
+          }
+        }
+      }
+
+      // Refresh Observed Values verification flags upon correction
+      const anyUnreadable = (ov.observations || []).some((o: any) => o.needs_verification);
+      ov.has_unreadable_marks = anyUnreadable;
+      ov.flagged_for_verification = anyUnreadable;
+    }
+
     // Re-evaluate validation report using document's recorded OCR confidence
     const docConfidence = typeof (doc as any)?.ocr_confidence === "number" ? (doc as any).ocr_confidence : undefined;
     const validationReport = validateFields(mergedFields, { ocrConfidence: docConfidence });
@@ -558,33 +698,49 @@ export async function saveDocumentCorrections(
       ? doc.status
       : validationReport.status === "valid" ? "validated" : "needs_review";
 
-    // Re-link student_id if reviewer corrected the LRN or learner name
-    let targetStudentId = doc.student_id;
-    const identityEval = evaluateStudentIdentity(mergedFields);
-    if (identityEval.isValidLrn && identityEval.normalizedLrn) {
-      const { data: matchedStudent } = await supabase
-        .from("students")
-        .select("id, first_name, last_name")
-        .eq("lrn", identityEval.normalizedLrn)
-        .maybeSingle();
+    // Evaluate learner identity metadata on corrections without directly altering protected student_id
+    const isRosterDoc = ["sf1", "sf2", "sf5"].includes(doc.document_type);
+    if (!isRosterDoc) {
+      const identityEval = evaluateStudentIdentity(mergedFields);
+      if (identityEval.isValidLrn && identityEval.normalizedLrn) {
+        const { data: matchedStudent } = await supabase
+          .from("students")
+          .select("id, first_name, last_name, school_id")
+          .eq("lrn", identityEval.normalizedLrn)
+          .maybeSingle();
 
-      if (matchedStudent?.id) {
-        const collision = verifyStudentCollision(identityEval.lastName, matchedStudent);
-        if (!collision.hasConflict) {
-          targetStudentId = matchedStudent.id;
-          mergedFields.existing_student_id = matchedStudent.id;
-          mergedFields.existing_student_name = `${matchedStudent.last_name}, ${matchedStudent.first_name}`;
+        if (matchedStudent?.id) {
+          const collision = verifyStudentCollision(identityEval.lastName, matchedStudent);
+          if (!collision.hasConflict) {
+            mergedFields.matched_candidate_student_id = matchedStudent.id;
+            mergedFields.matched_candidate_student_name = `${matchedStudent.last_name}, ${matchedStudent.first_name}`;
+            if (doc.student_id !== matchedStudent.id) {
+              mergedFields.identity_link_pending = true;
+              mergedFields.identity_review_needed = true;
+              mergedFields.identity_conflict_details = {
+                reason: `Matched registered student ${matchedStudent.last_name}, ${matchedStudent.first_name} (LRN: ${identityEval.normalizedLrn}). Formal student linking requires authorized identity resolution workflow.`,
+                matched_student_id: matchedStudent.id,
+              };
+            }
+          } else {
+            mergedFields.identity_conflict = true;
+            mergedFields.identity_conflict_details = {
+              reason: `LRN ${identityEval.normalizedLrn} is registered to ${matchedStudent.last_name}, ${matchedStudent.first_name}, which conflicts with corrected name '${identityEval.lastName}'. Manual LRN verification required.`,
+              matched_student_id: matchedStudent.id,
+            };
+          }
+        } else if (!doc.student_id) {
+          mergedFields.unregistered_learner = true;
         }
       }
     }
 
     const operationId = crypto.randomUUID();
 
-    // Update document record
+    // Update document record without modifying protected student_id column directly
     const { error: updateError } = await supabase
       .from("documents")
       .update({
-        student_id: targetStudentId,
         extracted_fields: mergedFields,
         status: newStatus,
         reviewed_by: user.id,
@@ -635,5 +791,59 @@ export async function saveDocumentCorrections(
     return { success: true };
   } catch (err: any) {
     return { error: err.message || "Failed to save corrections." };
+  }
+}
+
+/**
+ * Individually update the review status of a roster entry (SF1, SF2, SF5)
+ */
+export async function updateRosterEntryReviewStatus(
+  documentType: "sf1" | "sf2" | "sf5",
+  entryId: string,
+  reviewStatus: "VERIFIED" | "FLAGGED" | "PENDING",
+  flagReason?: string
+): Promise<{ success?: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { error: "Unauthorized: Please log in." };
+
+    const table = documentType === "sf1" ? "sf1_roster_entries" : documentType === "sf2" ? "sf2_attendance_entries" : "sf5_promotion_entries";
+    const updatePayload: any = { review_status: reviewStatus, updated_at: new Date().toISOString() };
+    if (flagReason) {
+      updatePayload.flag_reasons = [flagReason];
+    }
+    const { error } = await (supabase as any).from(table).update(updatePayload).eq("id", entryId);
+    if (error) return { error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { error: err.message || "Failed to update roster entry status." };
+  }
+}
+
+/**
+ * Individually verify or flag a PSA Certificate of Live Birth civil identity record
+ */
+export async function verifyPsaIdentityRecord(
+  psaRecordId: string,
+  status: "VERIFIED" | "FLAGGED",
+  notes?: string
+): Promise<{ success?: boolean; error?: string }> {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return { error: "Unauthorized: Please log in." };
+
+    const { error } = await (supabase as any).from("psa_identity_records").update({
+      verification_status: status,
+      verification_notes: notes || null,
+      verified_by: user.id,
+      verified_at: new Date().toISOString(),
+    }).eq("id", psaRecordId);
+
+    if (error) return { error: error.message };
+    return { success: true };
+  } catch (err: any) {
+    return { error: err.message || "Failed to verify PSA record." };
   }
 }

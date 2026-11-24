@@ -4,6 +4,7 @@ import { createClient as createServerClient } from "@/lib/supabase/server";
 import { parseGradeNumber } from "@/lib/students/studentDirectory";
 import { compareUnifiedStudentDocuments, RawNameFields } from "@/lib/validation/nameComparison";
 import { evaluateShsStudentEligibility, EvaluatedSubject, ShsEligibilityType } from "@/lib/eligibility/evaluator";
+import { rankAwardees, StudentAwardCandidate, EvaluatedAwardee } from "@/lib/awards/awardeeEvaluator";
 import type { RemedialStatus } from "@/lib/remedial/remedialEvaluator";
 import { revalidatePath } from "next/cache";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
@@ -1442,7 +1443,8 @@ export async function getPrincipalAcademicOverview(filters?: {
 
       // Verified grades from subject_grades table OR approved document extracted_fields
       let grades: any[] = allGrades.filter(g => g.student_id === st.id);
-      let generalAverage = fields.general_average || fields.shs_general_average_printed || null;
+      let generalAverage = fields.precise_general_average || fields.general_average || fields.shs_general_average_printed || null;
+      let displayedAverage = fields.displayed_general_average || (generalAverage !== null && !isNaN(Number(generalAverage)) ? Math.round(Number(generalAverage)) : null);
 
       if (grades.length === 0 && Array.isArray(fields.grades) && fields.grades.length > 0) {
         grades = fields.grades.map((g: any) => ({
@@ -1490,6 +1492,7 @@ export async function getPrincipalAcademicOverview(filters?: {
         schoolYear,
         academicStanding: overallStatus,
         generalAverage,
+        displayedAverage,
         gradesCount: grades.length,
         grades,
         isIncomplete,
@@ -1545,7 +1548,8 @@ export async function getPrincipalAcademicOverview(filters?: {
           section,
           schoolYear,
           academicStanding: overallStatus,
-          generalAverage: fields.general_average || fields.shs_general_average_printed || null,
+          generalAverage: fields.precise_general_average || fields.general_average || fields.shs_general_average_printed || null,
+          displayedAverage: fields.displayed_general_average || (fields.general_average ? Math.round(Number(fields.general_average)) : null),
           gradesCount: grades.length,
           grades,
           isIncomplete: overallStatus === "Needs Verification" || grades.length === 0,
@@ -1593,5 +1597,97 @@ export async function getPrincipalAcademicOverview(filters?: {
   } catch (err: any) {
     console.error("[getPrincipalAcademicOverview] Error:", err.message);
     return { error: err.message || "Failed to load academic overview." };
+  }
+}
+
+/**
+ * PRINCIPAL AWARDEE EVALUATION & RANKING (DepEd Order No. 36, s. 2016)
+ *
+ * Evaluates and ranks students for DepEd Academic Excellence Awards.
+ * Uses stored precise unrounded grades and averages to prevent premature rounding
+ * and ensure uncompromised accuracy during academic ranking.
+ */
+export async function getPrincipalAwardeeEvaluation(filters?: {
+  schoolYear?: string;
+  gradeLevel?: string;
+  section?: string;
+  semester?: "1st Semester" | "2nd Semester" | "Full Year";
+  includeNonAwardees?: boolean;
+}): Promise<{
+  success: boolean;
+  awardees?: EvaluatedAwardee[];
+  summary?: {
+    totalEvaluated: number;
+    highestHonorsCount: number;
+    highHonorsCount: number;
+    honorsCount: number;
+    academicExcellenceCount?: number;
+    totalAwardeesCount: number;
+  };
+  error?: string;
+}> {
+  const authContext = await getAuthorizedPrincipalContext();
+  if ("error" in authContext && authContext.error) {
+    return { success: false, error: authContext.error };
+  }
+  const { supabase } = authContext;
+
+  try {
+    const overviewRes = await getPrincipalAcademicOverview(filters);
+    if ("error" in overviewRes && overviewRes.error) {
+      return { success: false, error: overviewRes.error };
+    }
+
+    const students = overviewRes.students || [];
+
+    const candidates: StudentAwardCandidate[] = students.map((st: any) => {
+      const mappedGrades = (st.grades || []).map((g: any) => ({
+        subject: g.subject || "Subject",
+        finalGrade: g.final_grade ?? g.final,
+        preciseComputedGrade: g.precise_computed_grade ?? g.raw_calculated_final,
+        q1: g.q1,
+        q2: g.q2,
+        q3: g.q3,
+        q4: g.q4,
+        status: g.status,
+      }));
+
+      return {
+        studentId: st.id,
+        lrn: st.lrn,
+        studentName: st.fullName,
+        gradeLevel: st.gradeLevel,
+        section: st.section,
+        schoolYear: st.schoolYear,
+        semester: filters?.semester,
+        grades: mappedGrades,
+        preciseAverage: typeof st.generalAverage === "number" ? st.generalAverage : undefined,
+      };
+    });
+
+    const ranked = rankAwardees(candidates, {
+      includeNonAwardees: filters?.includeNonAwardees ?? false,
+    });
+
+    const highestHonorsCount = ranked.filter((r) => r.award === "With Highest Honors").length;
+    const highHonorsCount = ranked.filter((r) => r.award === "With High Honors").length;
+    const honorsCount = ranked.filter((r) => r.award === "With Honors").length;
+    const academicExcellenceCount = ranked.filter((r) => r.award === "Academic Excellence Award").length;
+
+    return {
+      success: true,
+      awardees: ranked,
+      summary: {
+        totalEvaluated: candidates.length,
+        highestHonorsCount,
+        highHonorsCount,
+        honorsCount,
+        academicExcellenceCount,
+        totalAwardeesCount: highestHonorsCount + highHonorsCount + honorsCount + academicExcellenceCount,
+      },
+    };
+  } catch (err: any) {
+    console.error("[getPrincipalAwardeeEvaluation] Error:", err.message);
+    return { success: false, error: err.message || "Failed to evaluate awardees." };
   }
 }

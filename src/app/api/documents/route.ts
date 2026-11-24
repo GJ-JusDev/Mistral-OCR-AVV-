@@ -22,6 +22,7 @@ import {
   type TeacherModulePolicy,
 } from '@/lib/teacher/assignments';
 import { compareDocumentContextWithAssignment } from '@/lib/teacher/sectionScanner';
+import { ingestRosterDocument } from '@/lib/upload/rosterIngestion';
 
 export async function GET(request: NextRequest) {
   try {
@@ -64,7 +65,42 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ documents: data || [] });
+    const refreshSignedUrl = async (urlOrPath: string | undefined | null): Promise<string | undefined> => {
+      if (!urlOrPath || typeof urlOrPath !== "string" || urlOrPath.startsWith("data:") || urlOrPath.startsWith("uploaded-")) {
+        return urlOrPath || undefined;
+      }
+      try {
+        let storagePath = "";
+        if (urlOrPath.includes("/documents/")) {
+          storagePath = urlOrPath.split("/documents/")[1].split("?")[0];
+        } else if (!urlOrPath.startsWith("http")) {
+          storagePath = urlOrPath;
+        }
+        if (storagePath) {
+          const { data: signed } = await supabase.storage
+            .from("documents")
+            .createSignedUrl(storagePath, 3600); // 1 hour
+          if (signed?.signedUrl) {
+            return signed.signedUrl;
+          }
+        }
+      } catch {
+        // Retain original URL if signing cannot be completed
+      }
+      return urlOrPath;
+    };
+
+    const docs = await Promise.all(
+      (data || []).map(async (doc: any) => {
+        if (doc?.image_url) {
+          const signed = await refreshSignedUrl(doc.image_url);
+          if (signed) doc.image_url = signed;
+        }
+        return doc;
+      })
+    );
+
+    return NextResponse.json({ documents: docs });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
@@ -93,26 +129,40 @@ export async function POST(request: NextRequest) {
 
     const uploadedBy = user.id;
 
-    // 2. Enforce active document_type: strictly 'sf9' | 'sf10'
+    // 2. Enforce active document_type: Senior High School supported types
     let documentType = String(body.document_type || "sf9").toLowerCase().trim();
-    if (documentType === "birth_cert" || documentType === "psa") {
-      return NextResponse.json({
-        error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.",
-        code: "DOCUMENT_TYPE_NOT_SUPPORTED",
-      }, { status: 400 });
-    }
-    const validDocTypes = ['sf9', 'sf10'];
+    if (documentType === "psa") documentType = "birth_cert";
+    const validDocTypes = ['sf1', 'sf2', 'sf5', 'sf9', 'sf10', 'birth_cert'];
     if (!validDocTypes.includes(documentType)) {
       return NextResponse.json({
-        error: `Unsupported document type: '${documentType}'. The active AVV scope supports only SF9 and SF10.`,
+        error: `Unsupported document type: '${documentType}'. The active AVV Senior High School scope supports SF1, SF2, SF5, SF9, SF10, and PSA Birth Certificate.`,
       }, { status: 400 });
     }
 
-    if (String(roleRow.role || "").toLowerCase() === "principal") {
+    const userRole = String(roleRow.role || "").toLowerCase().trim();
+    if (userRole === "principal") {
       return NextResponse.json(
         {
           error: "Forbidden: Principal role is monitoring-only and cannot create or scan academic documents.",
           code: "PRINCIPAL_READ_ONLY",
+        },
+        { status: 403 }
+      );
+    }
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role is restricted to management and approval. Only authorized Teachers may scan or upload documents.",
+          code: "ADMIN_CANNOT_UPLOAD",
+        },
+        { status: 403 }
+      );
+    }
+    if (userRole !== "teacher") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Only authorized Teachers may scan or upload documents.",
+          code: "UNAUTHORIZED_ROLE",
         },
         { status: 403 }
       );
@@ -237,6 +287,9 @@ export async function POST(request: NextRequest) {
 
     // 4. Staging / Verification-safe student identity handling
     let studentId = body.student_id || null;
+    if (['sf1', 'sf2', 'sf5'].includes(documentType)) {
+      studentId = null;
+    }
     const extractedFields = body.extracted_fields ? { ...body.extracted_fields } : {};
     if (documentType === 'sf9' || documentType === 'sf10') {
       const candidateGrade = String(
@@ -1360,6 +1413,26 @@ export async function POST(request: NextRequest) {
 
     await persistQuarantinedConflicts(docData.id);
 
+    // Ingest multi-learner roster documents (SF1, SF2, SF5) into child tables
+    let rosterIngestionResult: any = null;
+    if (['sf1', 'sf2', 'sf5'].includes(documentType)) {
+      try {
+        rosterIngestionResult = await ingestRosterDocument({
+          db: supabase,
+          documentId: docData.id,
+          schoolId: userSchoolId,
+          documentType: documentType as 'sf1' | 'sf2' | 'sf5',
+          extractedText: body.extracted_text || '',
+          extractedFields,
+          azureTables: body.azure_tables,
+          ocrProvider: (docData.ocr_model || '').toLowerCase().includes('azure') ? 'azure' : 'mistral',
+          ocrConfidence: typeof docData.ocr_confidence === 'number' ? docData.ocr_confidence : 0.95,
+        });
+      } catch (ingestErr) {
+        console.error('[api/documents] Multi-learner roster ingestion error:', ingestErr);
+      }
+    }
+
     // Record initial scan version in document_scans table
     try {
       await (supabase as any).from("document_scans").insert({
@@ -1445,6 +1518,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       ...docData,
+      roster_ingestion: rosterIngestionResult,
       code: "ACADEMIC_RECORD_CREATED",
       message: "Academic record created. Pending verification.",
     }, { status: 201 });

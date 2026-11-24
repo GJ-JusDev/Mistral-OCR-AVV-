@@ -9,6 +9,8 @@ import {
 } from "@/lib/teacher/assignments";
 import { ShieldCheck, AlertTriangle, CheckCircle2, ClipboardCheck } from "lucide-react";
 
+import type { UploadDocCategory } from "@/lib/upload/uploadWorkflow";
+
 export interface PreScanAssignmentState {
   loaded: boolean;
   userRole: string | null;
@@ -19,7 +21,7 @@ export interface PreScanAssignmentState {
 }
 
 interface PreScanAssignmentGateProps {
-  docCategory: "sf9" | "sf10";
+  docCategory: UploadDocCategory | string;
   state: PreScanAssignmentState;
   onStateChange: (next: PreScanAssignmentState) => void;
   onAssignmentGradeSync?: (gradeLevel: string) => void;

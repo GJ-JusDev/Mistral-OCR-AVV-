@@ -10,12 +10,14 @@ import {
   computeSemesterGeneralAverage,
   updateExtractedFieldsAverages,
   getAuthoritativeSemesterFinalGrade,
+  formatDisplayedGrade,
+  formatPreciseGrade,
 } from "../src/lib/validation/gradeUtils.ts";
 
 test("TC-GRADE-01: Auto-computation of blank Semester 1 final grade with valid Q1 & Q2", async (t) => {
   const testCases = [
     { q1: 88, q2: 88, expectedRaw: 88, expectedOfficial: 88, expectedStatus: "Passed" },
-    { q1: 75, q2: 74, expectedRaw: 74.5, expectedOfficial: 75, expectedStatus: "Passed" },
+    { q1: 75, q2: 74, expectedRaw: 74.5, expectedOfficial: 75, expectedStatus: "Failed" },
     { q1: 76, q2: 94, expectedRaw: 85, expectedOfficial: 85, expectedStatus: "Passed" },
     { q1: 91, q2: 92, expectedRaw: 91.5, expectedOfficial: 92, expectedStatus: "Passed" },
     { q1: 96, q2: 79, expectedRaw: 87.5, expectedOfficial: 88, expectedStatus: "Passed" },
@@ -42,10 +44,14 @@ test("TC-GRADE-01: Auto-computation of blank Semester 1 final grade with valid Q
       };
 
       const result = recalculateSubjectGradeStatus(record);
-      assert.strictEqual(result.final, tc.expectedOfficial, "Candidate final must be auto-populated");
-      assert.strictEqual(result.sem1_final_grade, tc.expectedOfficial, "sem1_final_grade must be auto-populated");
+      // PRESERVE DECIMAL PRECISION IN STORAGE:
+      assert.strictEqual(result.final, tc.expectedRaw, "Candidate final must preserve exact decimal precision in storage");
+      assert.strictEqual(result.sem1_final_grade, tc.expectedRaw, "sem1_final_grade must preserve decimal precision");
       assert.strictEqual(result.raw_calculated_final, tc.expectedRaw, "Exact raw arithmetic average must be preserved");
+      assert.strictEqual(result.precise_computed_grade, tc.expectedRaw, "Precise computed grade must be preserved");
+      assert.strictEqual(result.displayed_grade, tc.expectedOfficial, "Displayed grade provides rounded whole number");
       assert.strictEqual(result.official_computed_final, tc.expectedOfficial, "Official rounded candidate must be recorded");
+      assert.strictEqual(formatDisplayedGrade(result.final), String(tc.expectedOfficial), "Regular SF9 grade output shows whole number");
       assert.strictEqual(result.is_auto_computed, true, "Must have is_auto_computed flag true");
       assert.strictEqual(result.grade_source, "auto_computed", "Grade source must be auto_computed");
       assert.strictEqual(result.status, tc.expectedStatus, `Status must be ${tc.expectedStatus}`);
@@ -68,10 +74,12 @@ test("TC-GRADE-02: Auto-computation of blank Semester 2 final grade with valid Q
     };
 
     const result = recalculateSubjectGradeStatus(record);
-    assert.strictEqual(result.final, 92, "Auto-computed official final is 92 (half-up from 91.5)");
-    assert.strictEqual(result.sem2_final_grade, 92, "sem2_final_grade is 92");
+    assert.strictEqual(result.final, 91.5, "Auto-computed final preserves precise decimal 91.5 in storage");
+    assert.strictEqual(result.sem2_final_grade, 91.5, "sem2_final_grade preserves 91.5");
     assert.strictEqual(result.raw_calculated_final, 91.5, "Raw arithmetic average is 91.5");
+    assert.strictEqual(result.displayed_grade, 92, "Displayed grade provides rounded 92");
     assert.strictEqual(result.official_computed_final, 92);
+    assert.strictEqual(formatDisplayedGrade(result.final), "92", "SF9 output displays whole number 92");
     assert.strictEqual(result.is_auto_computed, true);
     assert.strictEqual(result.grade_source, "auto_computed");
     assert.strictEqual(result.status, "Passed");
@@ -272,8 +280,8 @@ test("TC-GRADE-07: Semester General Average with dynamic 9 subjects (Exact promp
   assert.strictEqual(averageResult.completeness, "COMPLETE", "Must be complete");
   // Exact prompt arithmetic verification:
   assert.strictEqual(averageResult.rawAverage, 85.94, "Raw average must be exactly 85.94 (from 773.5 / 9)");
-  // Official average using DepEd whole-number rounded subject marks (88+98+78+75+85+86+92+88+85 = 775 / 9 = 86.11):
-  assert.strictEqual(averageResult.officialAverage, 86.11, "Official average must be 86.11");
+  assert.strictEqual(averageResult.officialAverage, 85.94, "Official average retains exact arithmetic precision (85.94)");
+  assert.strictEqual(averageResult.displayedAverage, 86, "Displayed average provides rounded whole number 86 for SF9");
 });
 
 test("TC-GRADE-08: Semester General Average with dynamic 8 subjects (Proving N is never hardcoded to 9)", async () => {

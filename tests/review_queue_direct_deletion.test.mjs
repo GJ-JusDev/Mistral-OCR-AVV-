@@ -31,6 +31,11 @@ import {
   clearInMemoryLogs,
 } from "../src/lib/audit/auditLogger.ts";
 import { CONFIRMATION_PHRASE } from "../src/types/reviewDeletion.ts";
+import {
+  normalizeGradeLevelKey,
+  normalizeSchoolYearKey,
+  normalizeSectionKey,
+} from "../src/lib/teacher/assignments.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -265,34 +270,36 @@ test("AVV Review Queue Direct Deletion with Confirmation Phrase & Audit Logging 
   }
 
   // ---------------------------------------------------------------------------
-  // Requirement 1: Delete button appears for authorized users (teacher/admin)
+  // Requirement 1: Delete button appears for authorized users (teacher only; admin cannot delete)
   // ---------------------------------------------------------------------------
   await t.test("Requirement 1: Delete button authorization evaluation", async () => {
     function canUserDelete(userRole, accountStatus) {
       if (accountStatus !== "Approved") return false;
       const r = (userRole || "").toLowerCase();
-      return r === "teacher" || r === "admin";
+      return r === "teacher";
     }
 
     assert.equal(canUserDelete("teacher", "Approved"), true, "Approved teacher can delete");
-    assert.equal(canUserDelete("admin", "Approved"), true, "Approved admin can delete");
+    assert.equal(canUserDelete("admin", "Approved"), false, "Admin cannot delete documents");
     assert.equal(canUserDelete("principal", "Approved"), false, "Principal cannot delete (monitoring only)");
     assert.equal(canUserDelete("teacher", "Pending"), false, "Pending teacher cannot delete");
   });
 
   // ---------------------------------------------------------------------------
-  // Requirement 2: Delete button is hidden for unauthorized users
+  // Requirement 2: Delete button is hidden for unauthorized users (admin, principal, unapproved)
   // ---------------------------------------------------------------------------
   await t.test("Requirement 2: Unauthorized users cannot access delete capabilities", async () => {
     function isDeleteActionVisible(userRole, accountStatus) {
       if (!userRole || accountStatus !== "Approved") return false;
-      return ["teacher", "admin"].includes(userRole.toLowerCase());
+      return userRole.toLowerCase() === "teacher";
     }
 
     assert.equal(isDeleteActionVisible(null, "Approved"), false);
+    assert.equal(isDeleteActionVisible("admin", "Approved"), false, "Admin cannot see delete button");
     assert.equal(isDeleteActionVisible("principal", "Approved"), false);
     assert.equal(isDeleteActionVisible("teacher", "Declined"), false);
     assert.equal(isDeleteActionVisible("teacher", "Pending"), false);
+    assert.equal(isDeleteActionVisible("teacher", "Approved"), true, "Approved teacher sees delete button");
   });
 
   // ---------------------------------------------------------------------------
@@ -520,7 +527,7 @@ test("AVV Review Queue Direct Deletion with Confirmation Phrase & Audit Logging 
   await t.test("Requirement 12: Repeated deletion attempts on archived records are rejected", async () => {
     const docId = "d0000000-0000-0000-0000-000000000002"; // Already archived in Req 5
 
-    await asUser(adminUser, "authenticated", async () => {
+    await asUser(teacherUser, "authenticated", async () => {
       await assert.rejects(
         async () => {
           await db.query(
@@ -605,5 +612,282 @@ test("AVV Review Queue Direct Deletion with Confirmation Phrase & Audit Logging 
     assert.equal(docCheck.rows.length, 1, "Document record must exist in archived state");
     assert.equal(docCheck.rows[0].status, "archived");
     assert.equal(docCheck.rows[0].image_url, "https://supabase.co/storage/v1/object/public/documents/SF9_Maria_Clara.pdf");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Requirement 16: Admin cannot upload, scan, or delete documents, but can manage users & view User Logs
+  // ---------------------------------------------------------------------------
+  await t.test("Requirement 16: Admin cannot delete documents; admin manages users and views User Logs", async () => {
+    // 1. Role capability matrix
+    function evaluateRoleCapabilities(role) {
+      const r = (role || "").toLowerCase();
+      return {
+        canManageUsers: r === "admin" || r === "administrator",
+        canUploadDocuments: r === "teacher",
+        canScanDocuments: r === "teacher",
+        canDeleteDocuments: r === "teacher",
+        canAccessUserLogs: r === "admin" || r === "administrator",
+      };
+    }
+
+    const adminCaps = evaluateRoleCapabilities("admin");
+    assert.equal(adminCaps.canManageUsers, true, "Admin can add and manage user accounts");
+    assert.equal(adminCaps.canUploadDocuments, false, "Admin cannot upload student documents");
+    assert.equal(adminCaps.canScanDocuments, false, "Admin cannot scan student documents");
+    assert.equal(adminCaps.canDeleteDocuments, false, "Admin cannot delete student documents");
+    assert.equal(adminCaps.canAccessUserLogs, true, "Admin can access the User Logs page");
+
+    const teacherCaps = evaluateRoleCapabilities("teacher");
+    assert.equal(teacherCaps.canManageUsers, false, "Teacher cannot manage user accounts");
+    assert.equal(teacherCaps.canUploadDocuments, true, "Teacher can upload student documents");
+    assert.equal(teacherCaps.canScanDocuments, true, "Teacher can scan student documents");
+    assert.equal(teacherCaps.canDeleteDocuments, true, "Teacher can delete assigned documents");
+
+    // 2. Direct deletion block check for Admin
+    function evaluateDocumentDeletionPermission({ role, accountStatus }) {
+      if (accountStatus !== "Approved") {
+        return { allowed: false, error: "Forbidden: Account is not approved." };
+      }
+      const r = (role || "").toLowerCase();
+      if (r === "admin" || r === "administrator") {
+        return {
+          allowed: false,
+          error: "Forbidden: Administrator role cannot delete student documents. Document deletion is restricted to authorized teachers.",
+          code: "ADMIN_CANNOT_DELETE",
+        };
+      }
+      if (r === "principal") {
+        return {
+          allowed: false,
+          error: "Forbidden: Principal role is monitoring-only and cannot delete review records.",
+          code: "PRINCIPAL_READ_ONLY",
+        };
+      }
+      if (r !== "teacher") {
+        return {
+          allowed: false,
+          error: "Forbidden: Only authorized teachers can delete review records.",
+          code: "UNAUTHORIZED_ROLE",
+        };
+      }
+      return { allowed: true };
+    }
+
+    const adminDeleteCheck = evaluateDocumentDeletionPermission({ role: "admin", accountStatus: "Approved" });
+    assert.equal(adminDeleteCheck.allowed, false);
+    assert.equal(adminDeleteCheck.code, "ADMIN_CANNOT_DELETE");
+    assert.match(adminDeleteCheck.error, /Administrator role cannot delete student documents/);
+
+    const principalDeleteCheck = evaluateDocumentDeletionPermission({ role: "principal", accountStatus: "Approved" });
+    assert.equal(principalDeleteCheck.allowed, false);
+    assert.equal(principalDeleteCheck.code, "PRINCIPAL_READ_ONLY");
+  });
+
+  // ---------------------------------------------------------------------------
+  // Requirement 17: Teachers may delete documents only according to assigned-section restrictions
+  // ---------------------------------------------------------------------------
+  await t.test("Requirement 17: Teacher assigned-section restriction on document deletion", async () => {
+    function authorizeTeacherDeletion({ userId, activeAssignments, doc }) {
+      const isUploader = Boolean(doc.uploaded_by && doc.uploaded_by === userId);
+
+      const docSy = normalizeSchoolYearKey(doc.school_year || (doc.extracted_fields || {}).school_year);
+      const docGl = normalizeGradeLevelKey(doc.grade_level || (doc.extracted_fields || {}).grade_level);
+      const docSec = normalizeSectionKey(doc.section || (doc.extracted_fields || {}).section);
+
+      const isAssignedAdviser = activeAssignments.some((a) => {
+        if (a.assignment_type !== "class_adviser") return false;
+        if (doc.school_id && a.school_id !== doc.school_id) return false;
+        if (doc.teacher_assignment_id && a.id === doc.teacher_assignment_id) return true;
+        const aSec = normalizeSectionKey(a.section);
+        const aSy = normalizeSchoolYearKey(a.school_year);
+        const aGl = normalizeGradeLevelKey(a.grade_level);
+        return Boolean(docSec && aSec === docSec && (!docSy || aSy === docSy) && (!docGl || aGl === docGl));
+      });
+
+      if (!isUploader && !isAssignedAdviser) {
+        return {
+          allowed: false,
+          error: "Forbidden: Teachers may only delete documents belonging to their officially assigned advisory section.",
+          code: "ASSIGNMENT_PARAMETER_MISMATCH",
+        };
+      }
+
+      return { allowed: true };
+    }
+
+    const teacherA = "teacher-adviser-einstein";
+    const teacherB = "teacher-adviser-newton";
+    const assignmentsA = [
+      {
+        id: "assign-einstein-11",
+        teacher_user_id: teacherA,
+        assignment_type: "class_adviser",
+        school_id: schoolTrisId,
+        grade_level: "Grade 11",
+        section: "Einstein",
+        school_year: "2024-2025",
+        assignment_status: "active",
+      },
+    ];
+    const assignmentsB = [
+      {
+        id: "assign-newton-12",
+        teacher_user_id: teacherB,
+        assignment_type: "class_adviser",
+        school_id: schoolTrisId,
+        grade_level: "Grade 12",
+        section: "Newton",
+        school_year: "2024-2025",
+        assignment_status: "active",
+      },
+    ];
+
+    const einsteinDoc = {
+      id: "doc-einstein-001",
+      uploaded_by: teacherA,
+      school_id: schoolTrisId,
+      document_type: "sf1",
+      school_year: "2024-2025",
+      grade_level: "Grade 11",
+      section: "Einstein",
+    };
+
+    // Teacher A (assigned to Einstein) can delete Einstein doc
+    const checkA = authorizeTeacherDeletion({ userId: teacherA, activeAssignments: assignmentsA, doc: einsteinDoc });
+    assert.equal(checkA.allowed, true, "Assigned adviser can delete section document");
+
+    // Teacher B (assigned only to Newton, not uploader) CANNOT delete Einstein doc
+    const docUploadedByOther = { ...einsteinDoc, uploaded_by: "someone-else" };
+    const checkB = authorizeTeacherDeletion({ userId: teacherB, activeAssignments: assignmentsB, doc: docUploadedByOther });
+    assert.equal(checkB.allowed, false, "Non-assigned adviser cannot delete document of another section");
+    assert.equal(checkB.code, "ASSIGNMENT_PARAMETER_MISMATCH");
+    assert.match(checkB.error, /officially assigned advisory section/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Requirement 18: Teacher document deletion creates DOCUMENT_ARCHIVED (soft deletion) in User Logs
+  // ---------------------------------------------------------------------------
+  await t.test("Requirement 18: DOCUMENT_ARCHIVED audit log records all mandatory fields and is viewable by Admin", async () => {
+    clearInMemoryLogs();
+
+    const timestamp = new Date().toISOString();
+    const targetDocId = "d0000000-0000-0000-0000-000000000077";
+    const teacherId = teacherUser;
+    const teacherName = "Maria Cruz";
+    const docType = "SF1";
+    const schoolYear = "2024-2025";
+    const section = "Einstein";
+
+    // 1. Simulate Teacher soft-deleting (archiving) document and recording in User Logs
+    const auditEvent = await logAuditEvent({
+      category: "DOCUMENT",
+      action: "DOCUMENT_ARCHIVED",
+      outcome: "SUCCESS",
+      actorUserId: teacherId,
+      actorEmail: "teacher.cruz@tris.edu.ph",
+      actorRole: "teacher",
+      actorSchoolId: schoolTrisId,
+      actorSchoolName: "Taysan Resettlement Integrated School (500169)",
+      targetType: "document",
+      targetId: targetDocId,
+      targetLabel: `${docType} - SF1_Grade11_Einstein.pdf`,
+      reason: `Teacher ${teacherName} archived document from review queue (soft deletion)`,
+      details: {
+        teacher_name: teacherName,
+        teacher_user_id: teacherId,
+        action: "DOCUMENT_ARCHIVED",
+        deletion_type: "soft_deletion (archived)",
+        document_type: docType,
+        document_id: targetDocId,
+        original_filename: "SF1_Grade11_Einstein.pdf",
+        archived_at: timestamp,
+        deleted_at: timestamp,
+        school_year: schoolYear,
+        section: section,
+        grade_level: "Grade 11",
+      },
+    });
+
+    // 2. Verify all mandatory DepEd audit fields are stored in the audit entry
+    assert.ok(auditEvent.id, "Audit event must have unique UUID");
+    assert.equal(auditEvent.category, "DOCUMENT");
+    assert.equal(auditEvent.action, "DOCUMENT_ARCHIVED");
+    assert.equal(auditEvent.outcome, "SUCCESS");
+    assert.equal(auditEvent.actor_user_id, teacherId);
+    assert.equal(auditEvent.details.teacher_name, teacherName);
+    assert.equal(auditEvent.details.teacher_user_id, teacherId);
+    assert.equal(auditEvent.details.document_type, docType);
+    assert.equal(auditEvent.details.document_id, targetDocId);
+    assert.equal(auditEvent.details.archived_at, timestamp);
+    assert.equal(auditEvent.details.school_year, schoolYear);
+    assert.equal(auditEvent.details.section, section);
+
+    // 3. Admin queries User Logs: Admin must be able to view document deletion activities
+    const adminQuery = await queryAuditLogs(
+      {
+        category: "DOCUMENT",
+        action: "DOCUMENT_ARCHIVED",
+      },
+      {
+        schoolId: schoolTrisId,
+      }
+    );
+
+    assert.equal(adminQuery.logs.length, 1, "Admin should see the archival record in User Logs");
+    const retrievedLog = adminQuery.logs[0];
+    assert.equal(retrievedLog.action, "DOCUMENT_ARCHIVED");
+    assert.equal(retrievedLog.target_id, targetDocId);
+    assert.equal(retrievedLog.details.teacher_name, teacherName);
+    assert.equal(retrievedLog.details.document_type, docType);
+    assert.equal(retrievedLog.details.school_year, schoolYear);
+    assert.equal(retrievedLog.details.section, section);
+    assert.equal(retrievedLog.details.archived_at, timestamp);
+
+    // 4. Verify Admin inspection even if the document in documents table is archived
+    await db.exec(`
+      INSERT INTO public.documents (id, document_type, status, school_id, original_filename)
+      VALUES ('${targetDocId}', 'sf1', 'archived', '${schoolTrisId}', 'SF1_Grade11_Einstein.pdf')
+      ON CONFLICT (id) DO UPDATE SET status = 'archived';
+    `);
+
+    // Verify document is archived
+    const docRow = await db.query(`SELECT status FROM public.documents WHERE id = $1`, [targetDocId]);
+    assert.equal(docRow.rows[0].status, "archived");
+
+    // Re-query User Logs: Admin can still inspect the deletion event with all metadata!
+    const adminQueryAfter = await queryAuditLogs(
+      {
+        category: "DOCUMENT",
+        action: "DOCUMENT_ARCHIVED",
+      },
+      {
+        schoolId: schoolTrisId,
+      }
+    );
+    assert.equal(adminQueryAfter.logs.length, 1, "Admin can view archival log after document is archived");
+    assert.equal(adminQueryAfter.logs[0].details.teacher_name, teacherName);
+    assert.equal(adminQueryAfter.logs[0].details.document_id, targetDocId);
+
+    // 5. Also verify that if hard deletion were to occur, DOCUMENT_DELETED is used
+    const hardDeleteEvent = await logAuditEvent({
+      category: "DOCUMENT",
+      action: "DOCUMENT_DELETED",
+      outcome: "SUCCESS",
+      actorUserId: teacherId,
+      actorRole: "teacher",
+      targetId: "hard-del-doc-id",
+      details: {
+        action: "DOCUMENT_DELETED",
+        deletion_type: "permanent_deletion",
+        teacher_name: teacherName,
+        document_id: "hard-del-doc-id",
+        document_type: "SF9",
+        deleted_at: timestamp,
+        school_year: "2024-2025",
+        section: "Einstein",
+      },
+    });
+    assert.equal(hardDeleteEvent.action, "DOCUMENT_DELETED");
+    assert.equal(hardDeleteEvent.details.deletion_type, "permanent_deletion");
   });
 });

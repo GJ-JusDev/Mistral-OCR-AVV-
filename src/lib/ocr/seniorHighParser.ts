@@ -3,6 +3,7 @@ import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
 import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
+import { parseTextObservedValuesAndAchievement } from "./observedValuesParser";
 
 /**
  * MGA KEYWORDS NA HINDI DAPAT ITURING NA ACADEMIC SUBJECT
@@ -104,9 +105,27 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   // Kunin muna ang student identity sa itaas (Name, LRN, School, Section)
   const fields = parseOcrText(text, rawLayout); 
 
+  const layoutTables = Array.isArray(rawLayout?.tables) && rawLayout.tables.length > 0
+    ? rawLayout.tables
+    : Array.isArray(rawLayout?.pages)
+    ? rawLayout.pages.flatMap((p: any) =>
+        (p.tables || []).map((t: any) => ({
+          ...t,
+          _pageNumber: p.pageNumber || p.originalPageNumber || t.boundingRegions?.[0]?.pageNumber || 1,
+        }))
+      )
+    : [];
+
   // Phase 9: Table-Aware Extraction kung available ang Azure structured layout tables
-  if (rawLayout?.tables && Array.isArray(rawLayout.tables) && rawLayout.tables.length > 0) {
-    const tableResult = parseAzureLayoutGrades(rawLayout.tables);
+  if (layoutTables.length > 0) {
+    const tableResult = parseAzureLayoutGrades(layoutTables, rawLayout);
+    if (tableResult.observed_values) {
+      fields.observed_values = tableResult.observed_values;
+    }
+    if (tableResult.learner_progress_achievement) {
+      fields.learner_progress_achievement = tableResult.learner_progress_achievement;
+      fields.grading_scale = tableResult.grading_scale || tableResult.learner_progress_achievement;
+    }
     if (tableResult.grades && tableResult.grades.length > 0) {
       fields.grades = tableResult.grades;
       if (tableResult.attendance && tableResult.attendance.length > 0) {
@@ -133,6 +152,20 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       if (tableResult.general_average !== undefined) {
         fields.general_average = tableResult.general_average;
       }
+
+      // FIX 3: Before returning early with Azure academic grades, fallback to text
+      // if Azure layout tables did not detect the Observed Values or Grading Scale tables
+      if (!fields.observed_values || !fields.learner_progress_achievement) {
+        const textOv = parseTextObservedValuesAndAchievement(text);
+        if (!fields.observed_values && textOv.observedValues) {
+          fields.observed_values = textOv.observedValues;
+        }
+        if (!fields.learner_progress_achievement && textOv.learnerProgressAchievement) {
+          fields.learner_progress_achievement = textOv.learnerProgressAchievement;
+          fields.grading_scale = textOv.learnerProgressAchievement;
+        }
+      }
+
       return fields;
     }
   }
@@ -145,12 +178,19 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
 
   let currentCategory = "";
   let currentSemester: "1st Semester" | "2nd Semester" | undefined = undefined;
+  let currentGradeLevel: "Grade 11" | "Grade 12" | undefined =
+    fields.grade_level === "Grade 12" ? "Grade 12" : fields.grade_level === "Grade 11" ? "Grade 11" : undefined;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lowerLine = line.toLowerCase();
 
-    // Check for semester markers outside or inside table rows
+    // Check for grade level and semester markers outside or inside table rows
+    if (/\bgrade\s*(?:level)?[:\s]*(?:12|xii)\b/i.test(line)) {
+      currentGradeLevel = "Grade 12";
+    } else if (/\bgrade\s*(?:level)?[:\s]*(?:11|xi)\b/i.test(line)) {
+      currentGradeLevel = "Grade 11";
+    }
     if (lowerLine.includes("first semester") || lowerLine.includes("1st semester")) {
       currentSemester = "1st Semester";
     } else if (lowerLine.includes("second semester") || lowerLine.includes("2nd semester")) {
@@ -392,6 +432,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         category: currentCategory || undefined,
         subject,
         semester: currentSemester,
+        grade_level: currentGradeLevel,
         grading_period_scheme: currentSemester ? "quarterly_semestral" : "quarterly",
         q1,
         q2,
@@ -408,14 +449,100 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         record.sem2_final_grade = final;
       }
 
-      // Scope merge by semester so different semesters NEVER merge
+      // Scope merge by grade_level + semester so different grade levels or semesters NEVER merge
       const existingIdx = grades.findIndex(
-        g => g.semester === currentSemester && g.subject.toLowerCase() === subject.toLowerCase()
+        g =>
+          g.grade_level === currentGradeLevel &&
+          g.semester === currentSemester &&
+          g.subject.toLowerCase() === subject.toLowerCase()
       );
       if (existingIdx >= 0) {
         grades[existingIdx] = record;
       } else {
         grades.push(record);
+      }
+    } else {
+      // Plain-text subject grade line support (for SF9/SF10 lines without markdown pipes)
+      // Pattern 1: "Oral Communication Q1: 88 Q2: 90 Final: 89" or "Core Subjects: Oral Communication Q1: 88 Q2: 90 Final: 89"
+      const cleanedPlain = line
+        .replace(/^(?:Core\s+Subjects?|Applied\s+(?:and|&)\s+Specialized\s+Subjects?|Applied\s+Subjects?|Specialized\s+Subjects?)[:\s]+/i, "")
+        .trim();
+
+      const q12Match = cleanedPlain.match(
+        /^([A-Za-z0-9\s\-\/\(\)&,\.]+?)\s+Q([13])[:\s]+(\d+(?:\.\d+)?)\s+Q([24])[:\s]+(\d+(?:\.\d+)?)(?:\s+Final(?:\s+Grade)?[:\s]+(\d+(?:\.\d+)?))?$/i
+      );
+      if (q12Match) {
+        const subject = q12Match[1].trim();
+        const qAIndex = q12Match[2];
+        const qAVal = parseFloat(q12Match[3]);
+        const qBVal = parseFloat(q12Match[5]);
+        const finalVal = q12Match[6] !== undefined ? parseFloat(q12Match[6]) : undefined;
+        const semForLine: "1st Semester" | "2nd Semester" =
+          qAIndex === "3" || currentSemester === "2nd Semester" ? "2nd Semester" : "1st Semester";
+
+        const record: GradeRecord = {
+          category: currentCategory || undefined,
+          subject,
+          semester: semForLine,
+          grade_level: currentGradeLevel,
+          grading_period_scheme: "quarterly_semestral",
+          q1: semForLine === "1st Semester" ? qAVal : undefined,
+          q2: semForLine === "1st Semester" ? qBVal : undefined,
+          q3: semForLine === "2nd Semester" ? qAVal : undefined,
+          q4: semForLine === "2nd Semester" ? qBVal : undefined,
+          final: finalVal,
+          sem1_final_grade: semForLine === "1st Semester" ? finalVal : undefined,
+          sem2_final_grade: semForLine === "2nd Semester" ? finalVal : undefined,
+          status: finalVal !== undefined ? (finalVal < 75 ? "Failed" : "Passed") : "Missing",
+          needsVerification: finalVal === undefined || (finalVal >= 72 && finalVal <= 77),
+        };
+        const existingIdx = grades.findIndex(
+          g =>
+            g.grade_level === currentGradeLevel &&
+            g.semester === semForLine &&
+            g.subject.toLowerCase() === subject.toLowerCase()
+        );
+        if (existingIdx >= 0) grades[existingIdx] = record;
+        else grades.push(record);
+        continue;
+      }
+
+      // Pattern 2: "Oral Communication Final: 89" (common on SF10 permanent records)
+      const finalOnlyMatch = cleanedPlain.match(
+        /^([A-Za-z0-9\s\-\/\(\)&,\.]+?)\s+Final(?:\s+Grade|\s+Rating)?[:\s]+(\d+(?:\.\d+)?|INC|DRP)$/i
+      );
+      if (
+        finalOnlyMatch &&
+        !/^(?:general\s+average|semestral\s+general\s+average|gen\.?\s*ave)/i.test(finalOnlyMatch[1].trim())
+      ) {
+        const subject = finalOnlyMatch[1].trim();
+        const rawFin = finalOnlyMatch[2].toUpperCase();
+        const finalVal: number | string =
+          rawFin === "INC" || rawFin === "DRP" ? rawFin : parseFloat(rawFin);
+        const semForLine = currentSemester || "1st Semester";
+        const isNum = typeof finalVal === "number" && !isNaN(finalVal);
+
+        const record: GradeRecord = {
+          category: currentCategory || undefined,
+          subject,
+          semester: semForLine,
+          grade_level: currentGradeLevel,
+          grading_period_scheme: "quarterly_semestral",
+          final: finalVal,
+          sem1_final_grade: semForLine === "1st Semester" ? finalVal : undefined,
+          sem2_final_grade: semForLine === "2nd Semester" ? finalVal : undefined,
+          status: isNum ? ((finalVal as number) < 75 ? "Failed" : "Passed") : "Missing",
+          needsVerification: !isNum || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
+        };
+        const existingIdx = grades.findIndex(
+          g =>
+            g.grade_level === currentGradeLevel &&
+            g.semester === semForLine &&
+            g.subject.toLowerCase() === subject.toLowerCase()
+        );
+        if (existingIdx >= 0) grades[existingIdx] = record;
+        else grades.push(record);
+        continue;
       }
     }
   }
@@ -461,5 +588,18 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       fields.attendance_discrepancy_details = evaluated.discrepancyDetails;
     }
   }
+
+  // Extract Observed Values and Achievement if not already populated via Azure tables
+  if (!fields.observed_values || !fields.learner_progress_achievement) {
+    const textOv = parseTextObservedValuesAndAchievement(text);
+    if (!fields.observed_values && textOv.observedValues) {
+      fields.observed_values = textOv.observedValues;
+    }
+    if (!fields.learner_progress_achievement && textOv.learnerProgressAchievement) {
+      fields.learner_progress_achievement = textOv.learnerProgressAchievement;
+      fields.grading_scale = textOv.learnerProgressAchievement;
+    }
+  }
+
   return fields;
 }

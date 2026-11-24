@@ -31,9 +31,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (roleRow?.role?.toLowerCase() === "principal") {
+    const userRole = (roleRow?.role || "").toLowerCase().trim();
+    if (userRole === "principal") {
       return NextResponse.json(
         { error: "Forbidden: Principal role is monitoring-only and cannot trigger document validation." },
+        { status: 403 }
+      );
+    }
+
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role cannot validate or process documents. Document processing is restricted to authorized teachers.",
+          code: "ADMIN_CANNOT_PROCESS",
+        },
         { status: 403 }
       );
     }

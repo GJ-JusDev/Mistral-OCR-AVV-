@@ -16,6 +16,7 @@ import {
   cleanSchoolName,
   isValidSchoolCandidate,
 } from "./spatialIdentityParser";
+import { buildDocumentRecognitionSummary } from "./handwritingExtractor";
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -444,9 +445,17 @@ export function parseOcrText(text: string, rawLayout?: any): ExtractedFields {
     }
   }
 
-  // Document Type detection (SF9 vs SF10)
-  let detectedDocType: "sf9" | "sf10" = "sf9";
-  if (/\b(?:SF10|SF-10|Form 137|Permanent Record)\b/i.test(text)) {
+  // Document Type detection (SHS Supported Forms: sf1, sf2, sf5, sf9, sf10, birth_cert)
+  let detectedDocType: "sf1" | "sf2" | "sf5" | "sf9" | "sf10" | "birth_cert" = "sf9";
+  if (/\b(?:SF1|SF-1|School Form 1|School Register)\b/i.test(text)) {
+    detectedDocType = "sf1";
+  } else if (/\b(?:SF2|SF-2|School Form 2|Daily Attendance)\b/i.test(text)) {
+    detectedDocType = "sf2";
+  } else if (/\b(?:SF5|SF-5|SF5A|SF5B|Report on Promotion)\b/i.test(text)) {
+    detectedDocType = "sf5";
+  } else if (/\b(?:Certificate of Live Birth|Birth Certificate|PSA|NSO)\b/i.test(text)) {
+    detectedDocType = "birth_cert";
+  } else if (/\b(?:SF10|SF-10|Form 137|Permanent Record)\b/i.test(text)) {
     detectedDocType = "sf10";
   } else if (/\b(?:SF9|SF-9|Form 138|Report Card)\b/i.test(text)) {
     detectedDocType = "sf9";
@@ -478,6 +487,8 @@ export function parseOcrText(text: string, rawLayout?: any): ExtractedFields {
     flags.push("school_id_unextracted");
   }
 
+  const recSummary = rawLayout ? buildDocumentRecognitionSummary(rawLayout, "azure", "azure/prebuilt-read") : undefined;
+
   return {
     name: composedName,
     first_name: nameParts.first_name,
@@ -500,6 +511,10 @@ export function parseOcrText(text: string, rawLayout?: any): ExtractedFields {
     age,
     document_type: detectedDocType,
     flags,
+    recognition_summary: recSummary,
+    has_handwritten_content: recSummary?.has_handwriting ?? false,
+    icr_confidence: recSummary?.handwriting_confidence,
+    handwritten_field_count: recSummary?.handwritten_word_count,
   };
 }
 

@@ -122,6 +122,8 @@ export interface Database {
           grading_policy_version: string | null
           grading_period_scheme: "quarterly_semestral" | "three_term" | "quarterly" | null
           general_average_printed: number | null
+          precise_general_average: number | null
+          displayed_general_average: number | null
           general_average_action_taken: string | null
           shs_general_average_printed: number | null
           storage_path: string | null
@@ -163,6 +165,8 @@ export interface Database {
           grading_policy_version?: string | null
           grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
           general_average_printed?: number | null
+          precise_general_average?: number | null
+          displayed_general_average?: number | null
           general_average_action_taken?: string | null
           shs_general_average_printed?: number | null
           storage_path?: string | null
@@ -204,6 +208,8 @@ export interface Database {
           grading_policy_version?: string | null
           grading_period_scheme?: "quarterly_semestral" | "three_term" | "quarterly" | null
           general_average_printed?: number | null
+          precise_general_average?: number | null
+          displayed_general_average?: number | null
           general_average_action_taken?: string | null
           shs_general_average_printed?: number | null
           storage_path?: string | null
@@ -328,6 +334,11 @@ export interface Database {
           remedial_sem1_recomputed: number | null
           remedial_sem2_recomputed: number | null
           final_grade: number | null
+          printed_final_grade: number | null
+          ocr_final_grade: number | null
+          precise_computed_grade: number | null
+          displayed_final_grade: number | null
+          computation_formula: string | null
           action_taken: string | null
           remark: string | null
           status: string | null
@@ -367,6 +378,11 @@ export interface Database {
           remedial_sem1_recomputed?: number | null
           remedial_sem2_recomputed?: number | null
           final_grade?: number | null
+          printed_final_grade?: number | null
+          ocr_final_grade?: number | null
+          precise_computed_grade?: number | null
+          displayed_final_grade?: number | null
+          computation_formula?: string | null
           action_taken?: string | null
           remark?: string | null
           status?: string | null
@@ -406,6 +422,11 @@ export interface Database {
           remedial_sem1_recomputed?: number | null
           remedial_sem2_recomputed?: number | null
           final_grade?: number | null
+          printed_final_grade?: number | null
+          ocr_final_grade?: number | null
+          precise_computed_grade?: number | null
+          displayed_final_grade?: number | null
+          computation_formula?: string | null
           action_taken?: string | null
           remark?: string | null
           status?: string | null

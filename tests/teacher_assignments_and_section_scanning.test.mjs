@@ -1346,7 +1346,7 @@ test("AVV Teacher Module (Phases 1-7): Unit, Authorization, RLS, Conflict, & Con
     assert.equal(validAdviserOcr.allowed, true);
     assert.equal(validAdviserOcr.statusCode, 200);
 
-    // 6. Principal blocked, Admin preserved
+    // 6. Principal and Admin blocked from scanning/uploading (Teacher-only upload enforcement)
     const principalOcr = evaluateOcrRouteAuthorization({
       userId: PRINCIPAL_ID,
       userRole: "principal",
@@ -1367,7 +1367,9 @@ test("AVV Teacher Module (Phases 1-7): Unit, Authorization, RLS, Conflict, & Con
       assignment: null,
       assignmentConfirmed: false,
     });
-    assert.equal(adminOcr.allowed, true);
+    assert.equal(adminOcr.allowed, false);
+    assert.equal(adminOcr.statusCode, 403);
+    assert.equal(adminOcr.code, "ADMIN_CANNOT_UPLOAD");
 
     // 7. Subject Teacher blocked from OCR reprocessing or image overwrite via PATCH /api/documents/[id] guard
     const fakeSubjSupabase = {

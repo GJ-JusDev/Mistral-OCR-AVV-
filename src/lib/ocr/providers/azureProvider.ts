@@ -337,6 +337,10 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
    * Transforms Azure analyzeResult into AVV's standard OcrProviderResult.
    * Truthful confidence: computes arithmetic mean across all recognized words having confidence.
    * Never defaults missing confidence to 1.0.
+   * 
+   * Extracts and correlates Azure Intelligent Character Recognition (ICR) styles:
+   * Maps `isHandwritten` and style confidence to words and lines based on character spans.
+   * Preserves bounding polygons, page numbers, and word-level coordinates for full traceability.
    */
   private processAnalyzeResult(analyzeResult?: any, usedModelId?: string): OcrProviderResult {
     const effectiveModel = usedModelId || this.modelId;
@@ -352,18 +356,107 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
     const text = typeof analyzeResult.content === "string" ? analyzeResult.content : "";
     const pages = Array.isArray(analyzeResult.pages) ? analyzeResult.pages : [];
     const pageCount = pages.length > 0 ? pages.length : 1;
+    const rawStyles = Array.isArray(analyzeResult.styles) ? analyzeResult.styles : [];
 
-    // Calculate truthful confidence from words
-    const confidences: number[] = [];
-    for (const page of pages) {
-      if (Array.isArray(page.words)) {
-        for (const word of page.words) {
-          if (typeof word.confidence === "number" && !isNaN(word.confidence)) {
-            confidences.push(word.confidence);
+    // Helper to test if a word or span overlaps with any handwritten span in styles
+    const checkHandwrittenSpan = (span?: { offset: number; length: number }): { isHandwritten: boolean; styleConfidence?: number } => {
+      if (!span || typeof span.offset !== "number" || typeof span.length !== "number") {
+        return { isHandwritten: false };
+      }
+      const spanStart = span.offset;
+      const spanEnd = span.offset + span.length;
+
+      for (const style of rawStyles) {
+        if (!Array.isArray(style.spans)) continue;
+        for (const s of style.spans) {
+          if (typeof s.offset !== "number" || typeof s.length !== "number") continue;
+          const sStart = s.offset;
+          const sEnd = s.offset + s.length;
+
+          // Check for character range overlap
+          if (spanStart < sEnd && spanEnd > sStart) {
+            if (style.isHandwritten === true) {
+              return {
+                isHandwritten: true,
+                styleConfidence: typeof style.confidence === "number" ? style.confidence : undefined,
+              };
+            }
           }
         }
       }
-    }
+      return { isHandwritten: false };
+    };
+
+    // Calculate truthful confidence from words & correlate handwriting styles
+    const confidences: number[] = [];
+    const handwrittenConfidences: number[] = [];
+    const printedConfidences: number[] = [];
+    const allWords: any[] = [];
+
+    const mappedPages = pages.map((p: any) => {
+      const pageNum = typeof p.pageNumber === "number" ? p.pageNumber : 1;
+
+      const words = Array.isArray(p.words)
+        ? p.words.map((w: any) => {
+            const wordConfidence = typeof w.confidence === "number" && !isNaN(w.confidence) ? w.confidence : undefined;
+            if (wordConfidence !== undefined) {
+              confidences.push(wordConfidence);
+            }
+
+            const hwInfo = checkHandwrittenSpan(w.span);
+            if (hwInfo.isHandwritten) {
+              if (wordConfidence !== undefined) handwrittenConfidences.push(wordConfidence);
+            } else {
+              if (wordConfidence !== undefined) printedConfidences.push(wordConfidence);
+            }
+
+            const mappedWord = {
+              content: typeof w.content === "string" ? w.content : "",
+              polygon: Array.isArray(w.polygon) ? w.polygon : undefined,
+              confidence: wordConfidence,
+              span: w.span,
+              isHandwritten: hwInfo.isHandwritten,
+              styleConfidence: hwInfo.styleConfidence,
+              pageNumber: pageNum,
+            };
+
+            allWords.push(mappedWord);
+            return mappedWord;
+          })
+        : [];
+
+      const lines = Array.isArray(p.lines)
+        ? p.lines.map((l: any) => {
+            let lineHandwritten = false;
+            if (Array.isArray(l.spans)) {
+              for (const sp of l.spans) {
+                if (checkHandwrittenSpan(sp).isHandwritten) {
+                  lineHandwritten = true;
+                  break;
+                }
+              }
+            }
+
+            return {
+              content: typeof l.content === "string" ? l.content : "",
+              polygon: Array.isArray(l.polygon) ? l.polygon : undefined,
+              spans: l.spans,
+              isHandwritten: lineHandwritten,
+              pageNumber: pageNum,
+            };
+          })
+        : [];
+
+      return {
+        pageNumber: pageNum,
+        width: p.width,
+        height: p.height,
+        unit: p.unit,
+        angle: p.angle,
+        lines,
+        words,
+      };
+    });
 
     let overallConfidence: number | undefined = undefined;
     if (confidences.length > 0) {
@@ -371,32 +464,34 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
       overallConfidence = Math.round((sum / confidences.length) * 10000) / 10000;
     }
 
-    // Preserve layout metadata (pages, lines, words, polygons, spans, tables)
+    let handwritingConfidence: number | undefined = undefined;
+    if (handwrittenConfidences.length > 0) {
+      const sum = handwrittenConfidences.reduce((acc, val) => acc + val, 0);
+      handwritingConfidence = Math.round((sum / handwrittenConfidences.length) * 10000) / 10000;
+    }
+
+    let printedConfidence: number | undefined = undefined;
+    if (printedConfidences.length > 0) {
+      const sum = printedConfidences.reduce((acc, val) => acc + val, 0);
+      printedConfidence = Math.round((sum / printedConfidences.length) * 10000) / 10000;
+    }
+
+    const handwrittenWordCount = allWords.filter((w) => w.isHandwritten).length;
+    const printedWordCount = allWords.filter((w) => !w.isHandwritten).length;
+    const hasHandwriting = handwrittenWordCount > 0;
+
+    // Preserve full layout and ICR metadata (pages, lines, words, polygons, spans, tables, styles)
     const rawLayout = {
-      pages: pages.map((p: any) => ({
-        pageNumber: p.pageNumber,
-        width: p.width,
-        height: p.height,
-        unit: p.unit,
-        angle: p.angle,
-        lines: Array.isArray(p.lines)
-          ? p.lines.map((l: any) => ({
-              content: l.content,
-              polygon: l.polygon,
-              spans: l.spans,
-            }))
-          : [],
-        words: Array.isArray(p.words)
-          ? p.words.map((w: any) => ({
-              content: w.content,
-              polygon: w.polygon,
-              confidence: typeof w.confidence === "number" ? w.confidence : undefined,
-              span: w.span,
-            }))
-          : [],
-      })),
+      pages: mappedPages,
+      styles: rawStyles,
       tables: Array.isArray(analyzeResult.tables) ? analyzeResult.tables : [],
       paragraphs: Array.isArray(analyzeResult.paragraphs) ? analyzeResult.paragraphs : [],
+      handwrittenWordCount,
+      printedWordCount,
+      hasHandwriting,
+      handwritingConfidence,
+      printedConfidence,
+      words: allWords,
     };
 
     return {

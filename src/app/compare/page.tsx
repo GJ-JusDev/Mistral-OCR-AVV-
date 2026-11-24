@@ -1,11 +1,14 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import ImageUploader from "@/components/camera/ImageUploader";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
+import Sf1Sf2CrossValidationView from "@/components/validation/Sf1Sf2CrossValidationView";
 import { useOcr } from "@/hooks/useOcr";
 import type { ExtractedFields, GradeRecord } from "@/types/documents";
 import { getAuthoritativeSemesterFinalGrade } from "@/lib/validation/gradeUtils";
@@ -41,6 +44,7 @@ import {
   Info,
   Layers,
   Sparkles,
+  Users,
 } from "lucide-react";
 import CameraCaptureView from "@/components/camera/CameraCaptureView";
 import { logComparisonEvent } from "@/actions/audit";
@@ -55,7 +59,16 @@ interface Sf10PageSlot {
   classification?: DocumentClassificationResult | null;
 }
 
-export default function ComparePage() {
+function ComparePageContent() {
+  const searchParams = useSearchParams();
+  const urlMode = searchParams.get("mode");
+  const initialSf1Id = searchParams.get("sf1Id") || undefined;
+  const initialSf2Id = searchParams.get("sf2Id") || undefined;
+
+  const [activeMode, setActiveMode] = useState<"sf9_sf10" | "sf1_sf2">(
+    urlMode === "sf1_sf2" ? "sf1_sf2" : "sf9_sf10"
+  );
+
   // ---------------------------------------------------------------------------
   // State: SF9 Front and Back Uploads
   // ---------------------------------------------------------------------------
@@ -440,12 +453,49 @@ export default function ComparePage() {
         </div>
       </div>
 
-      {duplicateWarning && (
-        <div className="mt-4 p-4 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 flex items-center gap-3">
-          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
-          <p className="text-sm font-medium">{duplicateWarning}</p>
+      {/* Mode Selector Tabs */}
+      <div className="mt-4 flex flex-wrap items-center gap-2 border-b border-slate-200 dark:border-zinc-800 pb-3">
+        <button
+          type="button"
+          onClick={() => setActiveMode("sf9_sf10")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+            activeMode === "sf9_sf10"
+              ? "bg-indigo-600 text-white shadow-sm"
+              : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          SF9 ↔ SF10 Individual Student Verification
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode("sf1_sf2")}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors ${
+            activeMode === "sf1_sf2"
+              ? "bg-indigo-600 text-white shadow-sm"
+              : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          }`}
+        >
+          <Users className="w-4 h-4" />
+          SF1 ↔ SF2 Section Batch Cross-Validation
+        </button>
+      </div>
+
+      {activeMode === "sf1_sf2" ? (
+        <div className="mt-6">
+          <Sf1Sf2CrossValidationView
+            initialSf1Id={initialSf1Id}
+            initialSf2Id={initialSf2Id}
+          />
         </div>
-      )}
+      ) : (
+        <>
+          {duplicateWarning && (
+            <div className="mt-4 p-4 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 flex items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+              <p className="text-sm font-medium">{duplicateWarning}</p>
+            </div>
+          )}
 
       {/* Document Upload Sections Grid */}
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1078,6 +1128,8 @@ export default function ComparePage() {
           </div>
         </div>
       )}
+        </>
+      )}
 
       {/* Confirmation Modal */}
       {showUploadModal && (
@@ -1136,5 +1188,21 @@ export default function ComparePage() {
         </div>
       )}
     </PageContainer>
+  );
+}
+
+export default function ComparePage() {
+  return (
+    <Suspense
+      fallback={
+        <PageContainer>
+          <div className="p-12 flex justify-center items-center">
+            <LoadingSpinner size="lg" />
+          </div>
+        </PageContainer>
+      }
+    >
+      <ComparePageContent />
+    </Suspense>
   );
 }

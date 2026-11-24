@@ -32,12 +32,13 @@ export async function login(formData: FormData) {
     return { error: error.message };
   }
 
-  // Authoritative check from user_roles
-  let resolvedRole = "teacher";
+  // Authoritative check from user_roles (never fall back to client-controlled user_metadata)
+  let resolvedRole: string | null = null;
   let resolvedSchoolId: string | null = null;
 
   if (data.user) {
     let accountStatus: string | null = null;
+    let roleQueryFailed = false;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (serviceKey) {
       const adminClient = createSupabaseClient(
@@ -45,35 +46,56 @@ export async function login(formData: FormData) {
         serviceKey,
         { auth: { autoRefreshToken: false, persistSession: false } }
       );
-      const { data: roleRow } = await adminClient
+      const { data: roleRow, error: roleError } = await adminClient
         .from("user_roles")
         .select("role, account_status, school_id")
         .eq("user_id", data.user.id)
         .maybeSingle();
-      if (roleRow?.account_status) {
-        accountStatus = roleRow.account_status;
-      }
-      if (roleRow?.role) {
-        resolvedRole = roleRow.role;
-      }
-      if (roleRow?.school_id) {
-        resolvedSchoolId = roleRow.school_id;
+      if (roleError) {
+        roleQueryFailed = true;
+        console.error("Failed to query user_roles via service role during login:", roleError);
+      } else if (roleRow) {
+        accountStatus = roleRow.account_status || null;
+        resolvedRole = roleRow.role || null;
+        resolvedSchoolId = roleRow.school_id || null;
       }
     }
 
-    if (!accountStatus) {
-      const { data: roleRow } = await supabase
+    if (!accountStatus || !resolvedRole) {
+      const { data: roleRow, error: roleError } = await supabase
         .from("user_roles")
         .select("role, account_status, school_id")
         .eq("user_id", data.user.id)
         .maybeSingle();
 
-      accountStatus = roleRow?.account_status || data.user.user_metadata?.account_status || "Pending";
-      if (roleRow?.role) resolvedRole = roleRow.role;
-      if (roleRow?.school_id) resolvedSchoolId = roleRow.school_id;
+      if (roleError) {
+        roleQueryFailed = true;
+        console.error("Failed to query user_roles during login:", roleError);
+      } else if (roleRow) {
+        accountStatus = accountStatus || roleRow.account_status || null;
+        resolvedRole = resolvedRole || roleRow.role || null;
+        resolvedSchoolId = resolvedSchoolId || roleRow.school_id || null;
+      }
     }
 
-    const account_status = accountStatus || data.user.user_metadata?.account_status || "Pending";
+    if (!accountStatus || !resolvedRole) {
+      await logAuditEvent({
+        category: "AUTHENTICATION",
+        action: "AUTH_LOGIN_FAILED",
+        outcome: "DENIED",
+        actorUserId: data.user.id,
+        actorEmail: email,
+        actorRole: resolvedRole || "unverified",
+        actorSchoolId: resolvedSchoolId,
+        reason: roleQueryFailed
+          ? "Access denied: Unable to verify authoritative user role record"
+          : "Access denied: Authoritative user role record is missing",
+      });
+      await supabase.auth.signOut();
+      return { error: "Your account is not authorized to access the validation portal. Please contact the school administrator." };
+    }
+
+    const account_status = accountStatus;
 
     if (account_status === 'Pending') {
       await logAuditEvent({
@@ -151,7 +173,28 @@ export async function register(formData: FormData) {
   const hasNoMiddleName = formData.get("hasNoMiddleName") === "true" || formData.get("hasNoMiddleName") === "on";
   const lastName = (formData.get("lastName") as string)?.trim();
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
-  
+
+  // Extract and validate requested advisory class fields BEFORE any auth or DB calls
+  const gradeLevel = (formData.get("gradeLevel") as string)?.trim();
+  const strand = (formData.get("strand") as string)?.trim();
+  const rawSection = (formData.get("section") as string)?.trim();
+  const section = rawSection ? rawSection.replace(/\s+/g, " ") : "";
+
+  const validGrades = ["Grade 11", "Grade 12"];
+  const validStrands = ["CSS", "HUMSS", "Tourism"];
+
+  if (!gradeLevel || !validGrades.includes(gradeLevel)) {
+    return { error: "Invalid or missing grade level. Must be 'Grade 11' or 'Grade 12'." };
+  }
+
+  if (!strand || !validStrands.includes(strand)) {
+    return { error: "Invalid or missing strand. Must be one of CSS, HUMSS, or Tourism." };
+  }
+
+  if (!section || section.length < 2 || section.length > 50 || !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(section)) {
+    return { error: "Invalid or missing section. Must be 2 to 50 characters and contain only letters, numbers, spaces, hyphens, or periods." };
+  }
+
   if (!email) {
     return { error: "Email address is required." };
   }
@@ -180,6 +223,11 @@ export async function register(formData: FormData) {
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!serviceKey) {
+    return { error: "Server configuration error: unable to process faculty registration." };
+  }
 
   // Use an isolated client with persistSession: false to avoid setting session cookies
   // or overwriting existing user/admin sessions in the caller's browser.
@@ -221,7 +269,7 @@ export async function register(formData: FormData) {
     return { error: "An account with this email address already exists. Please sign in or contact the administrator." };
   }
 
-  // Verify and ensure authoritative user_roles entry with Pending status & Registry Matching
+  // Verify and ensure authoritative user_roles entry with Pending status, Registry Matching, and Advisory Request
   const registrationTimestamp = new Date().toISOString();
   const reviewEligibilityTime = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   let matchStatus = "NOT_FOUND";
@@ -229,39 +277,85 @@ export async function register(formData: FormData) {
   let matchedTeacherName: string | null = null;
   let matchReason: string = "Registry evaluation initialized";
 
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (serviceKey) {
-    const adminClient = createSupabaseClient(supabaseUrl, serviceKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+  const adminClient = createSupabaseClient(supabaseUrl, serviceKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 
+  const createdUserId = signUpData.user.id;
+  // Track whether we confirmed that existingRole already belonged to a pre-existing user
+  let isPreExistingAccount = false;
+  let profileSaved = false;
+
+  const rollbackAuthUser = async (failureMessage: string) => {
+    if (isPreExistingAccount) {
+      return { error: failureMessage };
+    }
+    try {
+      const { error: deleteError } = await adminClient.auth.admin.deleteUser(signUpData.user.id);
+      if (deleteError) {
+        console.error("CRITICAL: Failed to roll back orphaned auth user after user_roles error:", {
+          userId: createdUserId,
+          deleteError,
+        });
+        return {
+          error: `${failureMessage} Additionally, automatic account cleanup failed. Please contact the system administrator.`,
+        };
+      }
+    } catch (cleanupErr) {
+      console.error("CRITICAL: Exception while rolling back orphaned auth user:", {
+        userId: createdUserId,
+        cleanupErr,
+      });
+      return {
+        error: `${failureMessage} Additionally, automatic account cleanup failed. Please contact the system administrator.`,
+      };
+    }
+    return { error: failureMessage };
+  };
+
+  try {
     // Fetch official registry for TRIS to evaluate deterministic match
-    const { data: registryTeachers } = await adminClient
+    const { data: registryTeachers, error: registryFetchError } = await adminClient
       .from("school_teacher_registry")
       .select("*")
       .eq("school_id", TRIS_SCHOOL_ID);
 
-    const matchResult = evaluateRegistryMatch(
-      {
-        firstName,
-        lastName,
-        middleName: hasNoMiddleName ? null : middleName,
-        hasNoMiddleName,
-        email,
-      },
-      registryTeachers || []
-    );
+    if (registryFetchError) {
+      console.error("Failed to query school_teacher_registry during registration:", registryFetchError);
+      matchStatus = "REVIEW_REQUIRED";
+      matchedRegistryId = null;
+      matchedTeacherName = null;
+      matchReason = "Teacher registry lookup failed due to a database query error; manual administrator verification is required.";
+    } else {
+      const matchResult = evaluateRegistryMatch(
+        {
+          firstName,
+          lastName,
+          middleName: hasNoMiddleName ? null : middleName,
+          hasNoMiddleName,
+          email,
+        },
+        registryTeachers || []
+      );
 
-    matchStatus = matchResult.status;
-    matchedRegistryId = matchResult.matchedRegistryEntry?.id || null;
-    matchedTeacherName = matchResult.matchedRegistryEntry?.full_name_original || null;
-    matchReason = matchResult.reasons.join("; ") || "Registry evaluation completed";
+      matchStatus = matchResult.status;
+      matchedRegistryId = matchResult.matchedRegistryEntry?.id || null;
+      matchedTeacherName = matchResult.matchedRegistryEntry?.full_name_original || null;
+      matchReason = matchResult.reasons.join("; ") || "Registry evaluation completed";
+    }
 
-    const { data: existingRole } = await adminClient
+    const { data: existingRole, error: existingRoleError } = await adminClient
       .from("user_roles")
-      .select("role, account_status")
+      .select(
+        "role, account_status, school_id, requested_grade_level, requested_strand, requested_section, request_status, request_submitted_at"
+      )
       .eq("user_id", signUpData.user.id)
       .maybeSingle();
+
+    if (existingRoleError) {
+      console.error("Failed to check existing user_roles entry:", existingRoleError);
+      return await rollbackAuthUser("Registration failed while verifying faculty profile. Please try again.");
+    }
 
     if (!existingRole) {
       const { error: insertError } = await adminClient
@@ -278,73 +372,138 @@ export async function register(formData: FormData) {
           middle_name: middleName || null,
           middle_initial: derivedMi,
           has_no_middle_name: hasNoMiddleName,
+          requested_grade_level: gradeLevel,
+          requested_strand: strand,
+          requested_section: section,
+          request_status: "Pending",
+          request_submitted_at: registrationTimestamp,
         });
 
       if (insertError) {
         console.error("Failed to initialize user_roles entry:", insertError);
-        // Partial failure cleanup: delete orphaned auth user
-        await adminClient.auth.admin.deleteUser(signUpData.user.id);
-        return { error: "Registration failed to initialize faculty profile. Please try again." };
+        return await rollbackAuthUser("Registration failed to initialize faculty profile. Please try again.");
       }
+      profileSaved = true;
     } else {
-      // Update existing role entry with registry match info
-      await adminClient
+      // Note: The on_auth_user_created database trigger inserts a skeleton user_roles row
+      // right when auth.signUp creates a new auth.users record (with requested_* = NULL and
+      // request_status = NULL).
+      // Protect against downgrading an Approved/Declined advisory request or silently mutating
+      // an already-populated advisory request on any duplicate/repeat registration flow.
+      const hasLockedAdvisoryStatus =
+        existingRole.request_status === "Approved" || existingRole.request_status === "Declined";
+      const hasExistingAdvisorySelection =
+        Boolean(existingRole.requested_grade_level) ||
+        Boolean(existingRole.requested_strand) ||
+        Boolean(existingRole.requested_section);
+      const hasLockedAccountStatus =
+        existingRole.account_status === "Approved" || existingRole.account_status === "Declined";
+
+      if (hasLockedAdvisoryStatus || hasExistingAdvisorySelection || hasLockedAccountStatus) {
+        isPreExistingAccount = true;
+        return {
+          error: "An advisory request is already recorded for this account and cannot be overwritten during registration.",
+        };
+      }
+
+      const updatePayload: Record<string, any> = {
+        role: "teacher",
+        account_status: "Pending",
+        school_id: existingRole.school_id ?? TRIS_SCHOOL_ID,
+        registration_timestamp: registrationTimestamp,
+        review_eligibility_time: reviewEligibilityTime,
+        registry_match_status: matchStatus as any,
+        matched_registry_id: matchedRegistryId,
+        middle_name: middleName || null,
+        middle_initial: derivedMi,
+        has_no_middle_name: hasNoMiddleName,
+        requested_grade_level: gradeLevel,
+        requested_strand: strand,
+        requested_section: section,
+        request_status: "Pending",
+        request_submitted_at: registrationTimestamp,
+      };
+
+      const { error: updateError } = await adminClient
         .from("user_roles")
-        .update({
-          school_id: TRIS_SCHOOL_ID,
-          registration_timestamp: registrationTimestamp,
-          review_eligibility_time: reviewEligibilityTime,
-          registry_match_status: matchStatus as any,
-          matched_registry_id: matchedRegistryId,
-          middle_name: middleName || null,
-          middle_initial: derivedMi,
-          has_no_middle_name: hasNoMiddleName,
-        })
+        .update(updatePayload)
         .eq("user_id", signUpData.user.id);
+
+      if (updateError) {
+        console.error("Failed to update user_roles entry with advisory request:", updateError);
+        return await rollbackAuthUser("Registration failed to save advisory class request. Please try again.");
+      }
+      profileSaved = true;
+    }
+
+    // Record audit log for new registration submission
+    const registrationAuditEvent = await logAuditEvent({
+      category: "REGISTRATION",
+      action: "REGISTRATION_SUBMITTED",
+      outcome: "SUCCESS",
+      actorEmail: email,
+      actorRole: "teacher",
+      actorSchoolId: TRIS_SCHOOL_ID,
+      targetType: "user",
+      targetId: signUpData.user.id,
+      targetLabel: `${firstName} ${lastName}`.trim() || email,
+      reason: "New faculty registration submitted with Pending status",
+      details: {
+        role: "Teacher",
+        account_status: "Pending",
+        school_id: TRIS_SCHOOL_ID,
+        requested_grade_level: gradeLevel,
+        requested_strand: strand,
+        requested_section: section,
+        request_status: "Pending",
+      },
+    });
+
+    if (registrationAuditEvent.persisted === false) {
+      console.error("Audit persistence failure for REGISTRATION_SUBMITTED:", {
+        userId: signUpData.user.id,
+        email,
+        dbError: registrationAuditEvent.dbError,
+      });
+    }
+
+    // Record audit log for registry match evaluation
+    const matchAuditEvent = await logAuditEvent({
+      category: "REGISTRATION",
+      action: "REGISTRATION_MATCH_EVALUATED",
+      outcome: registryFetchError ? "FAILURE" : "SUCCESS",
+      actorEmail: email,
+      actorRole: "teacher",
+      actorSchoolId: TRIS_SCHOOL_ID,
+      targetType: "user",
+      targetId: signUpData.user.id,
+      targetLabel: `${firstName} ${lastName}`.trim() || email,
+      reason: `Teacher registration evaluated against institutional registry: status ${matchStatus} (${matchReason})`,
+      details: {
+        match_status: matchStatus,
+        matched_registry_id: matchedRegistryId,
+        matched_teacher_name: matchedTeacherName,
+        registry_query_error: registryFetchError ? registryFetchError.message : null,
+        registration_timestamp: registrationTimestamp,
+        review_eligibility_time: reviewEligibilityTime,
+        middle_initial: derivedMi,
+        has_no_middle_name: hasNoMiddleName,
+      },
+    });
+
+    if (matchAuditEvent.persisted === false) {
+      console.error("Audit persistence failure for REGISTRATION_MATCH_EVALUATED:", {
+        userId: signUpData.user.id,
+        email,
+        dbError: matchAuditEvent.dbError,
+      });
+    }
+  } catch (unexpectedErr) {
+    console.error("Unexpected runtime error during post-signup registration initialization:", unexpectedErr);
+    if (!profileSaved && !isPreExistingAccount) {
+      return await rollbackAuthUser("Registration encountered an unexpected network or database failure. Please try again.");
     }
   }
-
-  // Record audit log for new registration submission
-  await logAuditEvent({
-    category: "REGISTRATION",
-    action: "REGISTRATION_SUBMITTED",
-    outcome: "SUCCESS",
-    actorEmail: email,
-    actorRole: "teacher",
-    actorSchoolId: TRIS_SCHOOL_ID,
-    targetType: "user",
-    targetId: signUpData.user.id,
-    targetLabel: `${firstName} ${lastName}`.trim() || email,
-    reason: "New faculty registration submitted with Pending status",
-    details: {
-      role: "Teacher",
-      account_status: "Pending",
-      school_id: TRIS_SCHOOL_ID,
-    },
-  });
-
-  // Record audit log for registry match evaluation
-  await logAuditEvent({
-    category: "REGISTRATION",
-    action: "REGISTRATION_MATCH_EVALUATED",
-    outcome: "SUCCESS",
-    actorEmail: email,
-    actorRole: "teacher",
-    actorSchoolId: TRIS_SCHOOL_ID,
-    targetType: "user",
-    targetId: signUpData.user.id,
-    targetLabel: `${firstName} ${lastName}`.trim() || email,
-    reason: `Teacher registration evaluated against institutional registry: status ${matchStatus} (${matchReason})`,
-    details: {
-      match_status: matchStatus,
-      matched_registry_id: matchedRegistryId,
-      matched_teacher_name: matchedTeacherName,
-      registration_timestamp: registrationTimestamp,
-      review_eligibility_time: reviewEligibilityTime,
-      middle_initial: derivedMi,
-      has_no_middle_name: hasNoMiddleName,
-    },
-  });
 
   // Safety cleanup: Ensure the caller's server session cookie does not hold this new registration session
   const serverClient = await createClient();

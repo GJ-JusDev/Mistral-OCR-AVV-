@@ -44,15 +44,25 @@ export default function ReportsView({
 }: Props) {
   const [downloading, setDownloading] = useState<string | null>(null);
 
-  // Helper to trigger browser CSV download
+  // Helper to trigger browser CSV download with OWASP CSV Formula Injection sanitization
   const triggerCsvDownload = (filename: string, headers: string[], rows: (string | number)[][]) => {
+    const sanitizeCsvCell = (value: any): string => {
+      if (value === null || value === undefined) return '""';
+      let str = String(value);
+      // OWASP CSV Formula Injection defense: neutralize leading formula triggers
+      if (/^[=+\-@\t\r]/.test(str)) {
+        str = `'${str}`;
+      }
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
     const csvContent = [
       `"TAYSAN RESETTLEMENT INTEGRATED SCHOOL - DEPED SCHOOL ID: ${school.depedSchoolId}"`,
       `"Generated on: ${new Date().toLocaleString()}"`,
       "",
-      headers.map(h => `"${h}"`).join(","),
+      headers.map(h => sanitizeCsvCell(h)).join(","),
       ...rows.map(row => 
-        row.map(val => `"${String(val ?? "").replace(/"/g, '""')}"`).join(",")
+        row.map(val => sanitizeCsvCell(val)).join(",")
       ),
     ].join("\r\n");
 

@@ -59,10 +59,22 @@ export async function POST(request: Request) {
       );
     }
 
-    // Hindi pinapayagang mag-upload ang Principal para maiwasan ang conflict of interest sa pag-apruba
-    if (roleRow?.role?.toLowerCase() === "principal") {
+    const userRole = (roleRow?.role || "").toLowerCase().trim();
+    if (userRole === "principal") {
       return NextResponse.json(
-        { error: "Forbidden: Principal role is monitoring-only and cannot upload documents." },
+        { error: "Forbidden: Principal role is monitoring-only and cannot upload documents.", code: "PRINCIPAL_READ_ONLY" },
+        { status: 403 }
+      );
+    }
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        { error: "Forbidden: Administrator role is restricted to management and approval. Only authorized Teachers may scan or upload documents.", code: "ADMIN_CANNOT_UPLOAD" },
+        { status: 403 }
+      );
+    }
+    if (userRole !== "teacher") {
+      return NextResponse.json(
+        { error: "Forbidden: Only authorized Teachers may scan or upload documents.", code: "UNAUTHORIZED_ROLE" },
         { status: 403 }
       );
     }
@@ -178,19 +190,13 @@ export async function POST(request: Request) {
       }
     }
 
-    // Reject unsupported document categories: strictly SF9 and SF10 only
+    // Validate supported Senior High School document categories
     const normDocType = documentType.toLowerCase().trim();
-    if (normDocType === "birth_cert" || normDocType === "psa") {
-      return NextResponse.json(
-        { error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document." },
-        { status: 400 }
-      );
-    }
-    const validUploadDocTypes = ["sf9", "sf10"];
+    const validUploadDocTypes = ["sf1", "sf2", "sf5", "sf9", "sf10", "birth_cert", "psa"];
     if (!validUploadDocTypes.includes(normDocType)) {
       return NextResponse.json(
         {
-          error: `Unsupported document type: '${documentType}'. The active AVV scope supports only SF9 and SF10.`,
+          error: `Unsupported document type: '${documentType}'. The active AVV Senior High School scope supports SF1, SF2, SF5, SF9, SF10, and PSA Birth Certificate.`,
           code: "DOCUMENT_TYPE_NOT_SUPPORTED",
         },
         { status: 400 }

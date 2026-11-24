@@ -236,8 +236,13 @@ export function evaluateOcrRouteAuthorization(params: {
     };
   }
 
-  if (role === "admin") {
-    return { allowed: true, statusCode: 200 };
+  if (role === "admin" || role === "administrator") {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: "ADMIN_CANNOT_UPLOAD",
+      error: "Forbidden: Administrator role is restricted to management and approval. Only authorized Teachers may scan or upload documents.",
+    };
   }
 
   if (role !== "teacher") {

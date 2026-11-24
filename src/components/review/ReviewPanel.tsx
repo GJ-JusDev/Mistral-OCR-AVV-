@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { Document } from "@/types/database";
 import { Button } from "@/components/ui/Button";
-import { Check, X, AlertCircle, Trash2 } from "lucide-react";
+import { Check, X, AlertCircle, Trash2, ShieldCheck } from "lucide-react";
 
 interface ReviewPanelProps {
   document: Document;
@@ -12,6 +12,8 @@ interface ReviewPanelProps {
   onDelete?: () => void;
   onRequestDeletion?: () => void;
   isSubmitting?: boolean;
+  userRole?: string;
+  canApprove?: boolean;
 }
 
 export default function ReviewPanel({ 
@@ -20,11 +22,14 @@ export default function ReviewPanel({
   onReject, 
   onDelete,
   onRequestDeletion,
-  isSubmitting 
+  isSubmitting,
+  userRole,
+  canApprove,
 }: ReviewPanelProps) {
   const [isRejecting, setIsRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
+  const isAuthorizedAdmin = canApprove ?? (userRole?.toLowerCase() === "admin");
   const handleDeleteClick = onDelete || onRequestDeletion;
 
   const handleReject = () => {
@@ -45,36 +50,47 @@ export default function ReviewPanel({
         <div>
           <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">Review Actions</h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-            Approve this document to finalize validation, reject it, or delete it from the verification queue.
+            {isAuthorizedAdmin
+              ? "Approve this document to finalize validation, reject it, or delete it from the verification queue."
+              : "Faculty verification panel. Correct OCR extractions or archive review queue records."}
           </p>
         </div>
       </div>
 
       {!isRejecting ? (
-        <div className="flex flex-col sm:flex-row gap-3">
-          <Button 
-            onClick={onApprove} 
-            disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
-            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-600 dark:hover:bg-emerald-700"
-          >
-            <Check className="w-4 h-4 mr-2" />
-            Approve Document
-          </Button>
-          <Button 
-            variant="outline" 
-            onClick={() => setIsRejecting(true)}
-            disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
-            className="flex-1 border-red-200 text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-950/30"
-          >
-            <X className="w-4 h-4 mr-2" />
-            Reject Document
-          </Button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          {isAuthorizedAdmin ? (
+            <>
+              <Button 
+                onClick={onApprove} 
+                disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-600 dark:hover:bg-emerald-700"
+              >
+                <Check className="w-4 h-4 mr-2" />
+                Approve Document
+              </Button>
+              <Button 
+                variant="outline" 
+                onClick={() => setIsRejecting(true)}
+                disabled={isSubmitting || document.status === "approved" || document.status === "rejected" || isArchived}
+                className="flex-1 border-red-200 text-red-600 hover:bg-red-50 dark:border-red-900/50 dark:text-red-400 dark:hover:bg-red-950/30"
+              >
+                <X className="w-4 h-4 mr-2" />
+                Reject Document
+              </Button>
+            </>
+          ) : (
+            <div className="flex items-center gap-2.5 p-3.5 bg-blue-50 dark:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/50 text-xs sm:text-sm text-blue-900 dark:text-blue-200 flex-1">
+              <ShieldCheck className="w-5 h-5 text-[#174EA6] shrink-0" />
+              <span>Verification in progress. Final approval is performed by the School Administrator.</span>
+            </div>
+          )}
           {handleDeleteClick && (
             <Button
               variant="outline"
               onClick={handleDeleteClick}
               disabled={isSubmitting || isArchived}
-              className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 transition-colors"
+              className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-700 transition-colors shrink-0"
               leftIcon={<Trash2 className="w-4 h-4 text-red-500" />}
             >
               Delete

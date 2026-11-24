@@ -4,7 +4,8 @@ import React, { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import FieldEditor from "./FieldEditor";
 import { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
-import { AlertTriangle, CheckCircle, FileText, User, Users, Award, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle, FileText, User, Users, Award, ShieldCheck, ChevronDown, ChevronRight, Heart, Sparkles, BookOpen } from "lucide-react";
+import { normalizeObservedRating } from "@/lib/ocr/observedValuesParser";
 import {
   recalculateSubjectGradeStatus,
   computeSemesterGeneralAverage,
@@ -99,6 +100,17 @@ export default function OcrResultCard({
             Field Confidence: Unmeasured
           </span>
         )}
+
+        {/* Azure ICR Handwriting Badge */}
+        {(fields.has_handwritten_content || fields.recognition_summary?.has_handwriting) && (
+          <span
+            title={`Azure ICR recognized handwritten text (${fields.handwritten_field_count ?? fields.recognition_summary?.handwritten_word_count ?? 0} words)`}
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold bg-purple-100 text-purple-800 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-300 dark:border-purple-800"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-purple-600 animate-pulse" />
+            Azure ICR: Handwriting Detected
+          </span>
+        )}
       </div>
 
       <button
@@ -190,6 +202,122 @@ export default function OcrResultCard({
     onFieldChange("attendance", updatedAttendance);
   };
 
+  const [expandedCoreValues, setExpandedCoreValues] = useState<Record<string, boolean>>({
+    "1": true,
+    "2": true,
+    "3": true,
+    "4": true,
+  });
+
+  const toggleCoreValue = (indexStr: string) => {
+    setExpandedCoreValues((prev) => ({
+      ...prev,
+      [indexStr]: !prev[indexStr],
+    }));
+  };
+
+  const handleObservedValueChange = (
+    statementId: string,
+    quarterKey: "q1" | "q2" | "q3" | "q4",
+    newVal: string
+  ) => {
+    if (!onFieldChange || !fields.observed_values) return;
+    const ov = { ...fields.observed_values };
+    const statements = [...(ov.statements || [])];
+    const stmtIdx = statements.findIndex((s) => s.statement_id === statementId);
+    if (stmtIdx === -1) return;
+
+    const stmt = { ...statements[stmtIdx] };
+    const norm = normalizeObservedRating(newVal);
+    const qUpper = quarterKey.toUpperCase() as "Q1" | "Q2" | "Q3" | "Q4";
+
+    const prevQ = stmt[quarterKey] || {
+      quarter: qUpper,
+      confidence: 1.0,
+      source_page: 2,
+    };
+
+    // Locate existing observation in observations array if present
+    const observations = [...(ov.observations || [])];
+    const obsIdx = observations.findIndex(
+      (o) => o.behavior_statement === stmt.statement && o.quarter === qUpper
+    );
+    const existingObs = obsIdx >= 0 ? observations[obsIdx] : null;
+
+    // FIX 1: Preserve original OCR mark exactly as extracted; never overwrite with teacher input
+    const originalMark =
+      existingObs?.original_mark !== undefined && existingObs?.original_mark !== null && existingObs.original_mark !== ""
+        ? existingObs.original_mark
+        : (prevQ.original_mark !== undefined && prevQ.original_mark !== null && prevQ.original_mark !== ""
+            ? prevQ.original_mark
+            : (norm.isUnreadable ? norm.originalMark : ""));
+
+    const teacherCorrection = norm.normalized || norm.originalMark || undefined;
+
+    stmt[quarterKey] = {
+      ...prevQ,
+      quarter: qUpper,
+      original_mark: originalMark,
+      normalized_rating: norm.normalized,
+      needs_verification: norm.isUnreadable,
+      verification_status: norm.isUnreadable ? "flagged" : "corrected",
+      corrected_mark: norm.normalized || undefined,
+      teacher_correction: teacherCorrection,
+      corrected_at: new Date().toISOString(),
+    } as any;
+    statements[stmtIdx] = stmt;
+    ov.statements = statements;
+
+    // Update observations array preserving original OCR marks, confidence, and bounding box
+    if (obsIdx >= 0) {
+      observations[obsIdx] = {
+        ...observations[obsIdx],
+        original_mark: originalMark,
+        normalized_rating: norm.normalized,
+        needs_verification: norm.isUnreadable,
+        verification_status: norm.isUnreadable ? "flagged" : "corrected",
+        teacher_correction: teacherCorrection,
+        teacher_corrected_at: new Date().toISOString(),
+      };
+    } else {
+      observations.push({
+        core_value: stmt.core_value,
+        behavior_statement: stmt.statement,
+        quarter: qUpper,
+        original_mark: originalMark,
+        normalized_rating: norm.normalized,
+        ocr_confidence: prevQ.confidence,
+        source_page: prevQ.source_page,
+        location: prevQ.location,
+        bounding_box: prevQ.bounding_box,
+        needs_verification: norm.isUnreadable,
+        verification_status: norm.isUnreadable ? "flagged" : "corrected",
+        teacher_correction: teacherCorrection,
+        teacher_corrected_at: new Date().toISOString(),
+      });
+    }
+    ov.observations = observations;
+
+    // Refresh core_values grouping
+    const coreValuesGroups: any[] = [
+      { name: "Maka-Diyos", index: 1, statements: [] },
+      { name: "Makatao", index: 2, statements: [] },
+      { name: "Makakalikasan", index: 3, statements: [] },
+      { name: "Makabansa", index: 4, statements: [] },
+    ];
+    for (const s of statements) {
+      const g = coreValuesGroups.find((grp) => grp.index === s.core_value_index);
+      if (g) g.statements.push(s);
+    }
+    ov.core_values = coreValuesGroups;
+
+    const anyUnreadable = observations.some((o) => o.needs_verification);
+    ov.has_unreadable_marks = anyUnreadable;
+    ov.flagged_for_verification = anyUnreadable;
+
+    onFieldChange("observed_values", ov);
+  };
+
   const handleAttendanceTotalChange = (
     recordIndex: number,
     valStr: string
@@ -221,6 +349,26 @@ export default function OcrResultCard({
               ? "OCR provider does not supply token-level confidence scores. Please verify student details and subject marks against the original scanned document before authorizing approval."
               : "Some fields were extracted with low OCR confidence or via local fallback. Please carefully verify student details and marks against the scanned document before authorizing approval."}
           </div>
+        </div>
+      )}
+
+      {/* Azure ICR (Handwriting Recognition) Informational Notice */}
+      {(fields.has_handwritten_content || fields.recognition_summary?.has_handwriting) && (
+        <div className="mb-4 p-3 rounded-lg bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-300 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-purple-600 animate-pulse shrink-0" />
+            <div>
+              <strong>Azure Intelligent Character Recognition (ICR) Active:</strong>{" "}
+              Handwritten text detected ({fields.handwritten_field_count ?? fields.recognition_summary?.handwritten_word_count ?? 0} words,{" "}
+              {typeof (fields.icr_confidence ?? fields.recognition_summary?.handwriting_confidence) === "number"
+                ? `${Math.round((fields.icr_confidence ?? fields.recognition_summary?.handwriting_confidence ?? 0) * 100)}% handwriting style confidence`
+                : "verified handwriting style"}
+              ). Standard AVV governance requires teacher review for handwritten entries prior to official recording.
+            </div>
+          </div>
+          <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-200 dark:bg-purple-900/60 text-purple-800 dark:text-purple-200 border border-purple-300 dark:border-purple-700">
+            ICR Verified
+          </span>
         </div>
       )}
 
@@ -1226,6 +1374,433 @@ export default function OcrResultCard({
                   )}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Section 3.5: Report on Learner's Observed Values */}
+          {fields.observed_values && (
+            <div className="flex flex-col gap-3 mt-5 p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 rounded-lg bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-400">
+                    <Heart className="w-4 h-4" />
+                  </span>
+                  <div>
+                    <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
+                      Report on Learner&apos;s Observed Values
+                    </h4>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      DepEd SF9-SHS Non-numerical Ratings: AO (Always Observed) &bull; SO (Sometimes Observed) &bull; RO (Rarely Observed) &bull; NO (Not Observed)
+                    </p>
+                  </div>
+                </div>
+
+                {fields.observed_values.has_unreadable_marks && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Unreadable Marks Require Teacher Verification
+                  </span>
+                )}
+              </div>
+
+              {/* Core Values Accordion */}
+              <div className="space-y-3 mt-1">
+                {(fields.observed_values.core_values || []).map((cv) => {
+                  const isExpanded = expandedCoreValues[String(cv.index)] !== false;
+                  return (
+                    <div
+                      key={cv.index}
+                      className="rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden bg-zinc-50/50 dark:bg-zinc-900/40"
+                    >
+                      {/* Core Value Header Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => toggleCoreValue(String(cv.index))}
+                        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-zinc-100/70 dark:bg-zinc-800/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-left transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-zinc-500" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-zinc-500" />
+                          )}
+                          <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200">
+                            {cv.index}. {cv.name}
+                          </span>
+                          <span className="text-[10px] text-zinc-400">
+                            ({cv.statements.length} {cv.statements.length === 1 ? "statement" : "statements"})
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-zinc-400 uppercase">
+                          {isExpanded ? "Collapse" : "Expand"}
+                        </span>
+                      </button>
+
+                      {/* Behavior Statements Table */}
+                      {isExpanded && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-white dark:bg-zinc-900 text-zinc-500 font-semibold text-[10px] uppercase border-b border-zinc-200 dark:border-zinc-800">
+                                <th className="py-2.5 px-3.5 font-bold">Behavior Statements</th>
+                                <th className="py-2.5 px-3 text-center w-20">Quarter 1</th>
+                                <th className="py-2.5 px-3 text-center w-20">Quarter 2</th>
+                                <th className="py-2.5 px-3 text-center w-20">Quarter 3</th>
+                                <th className="py-2.5 px-3 text-center w-20">Quarter 4</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-200/60 dark:divide-zinc-800/60 bg-white dark:bg-zinc-900/20">
+                              {cv.statements.map((stmt) => (
+                                <tr key={stmt.statement_id} className="hover:bg-zinc-50/70 dark:hover:bg-zinc-800/30 transition-colors">
+                                  <td className="py-2.5 px-3.5 text-zinc-800 dark:text-zinc-200 font-medium text-xs">
+                                    {stmt.statement}
+                                  </td>
+                                  {(["q1", "q2", "q3", "q4"] as const).map((qKey) => {
+                                    const qRec = stmt[qKey];
+                                    const currentMark = qRec?.normalized_rating ?? (qRec?.original_mark || "");
+                                    const isBlank = !qRec?.original_mark && !qRec?.normalized_rating;
+                                    const isFlagged = qRec?.needs_verification;
+
+                                    return (
+                                      <td key={qKey} className="py-2 px-2 text-center align-middle">
+                                        <div className="flex flex-col items-center gap-1">
+                                          <select
+                                            value={currentMark}
+                                            onChange={(e) =>
+                                              handleObservedValueChange(
+                                                stmt.statement_id,
+                                                qKey,
+                                                e.target.value
+                                              )
+                                            }
+                                            className={`text-xs font-bold font-mono px-2 py-1 rounded border transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-hidden ${
+                                              isFlagged
+                                                ? "bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/70 dark:text-amber-200 dark:border-amber-700 ring-2 ring-amber-400"
+                                                : isBlank
+                                                ? "bg-zinc-50 text-zinc-400 border-dashed border-zinc-300 dark:bg-zinc-800/40 dark:border-zinc-700"
+                                                : currentMark === "AO"
+                                                ? "bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800"
+                                                : currentMark === "SO"
+                                                ? "bg-blue-50 text-blue-800 border-blue-300 dark:bg-blue-950/50 dark:text-blue-300 dark:border-blue-800"
+                                                : currentMark === "RO"
+                                                ? "bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800"
+                                                : "bg-purple-50 text-purple-800 border-purple-300 dark:bg-purple-950/50 dark:text-purple-300 dark:border-purple-800"
+                                            }`}
+                                          >
+                                            <option value="">— (Blank)</option>
+                                            <option value="AO">AO - Always Observed</option>
+                                            <option value="SO">SO - Sometimes Observed</option>
+                                            <option value="RO">RO - Rarely Observed</option>
+                                            <option value="NO">NO - Not Observed</option>
+                                            {isFlagged && qRec?.original_mark && (
+                                              <option value={qRec.original_mark}>
+                                                ? &quot;{qRec.original_mark}&quot; (Unreadable OCR)
+                                              </option>
+                                            )}
+                                          </select>
+                                          {isFlagged && (
+                                            <span className="text-[9px] text-amber-700 dark:text-amber-300 font-semibold">
+                                              Review mark
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Section 3.6: Learner Progress and Achievement (Grading Scale) */}
+          {(fields.learner_progress_achievement || fields.grading_scale) && (
+            <div className="flex flex-col gap-2 mt-4 p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 shadow-xs">
+              <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 dark:bg-indigo-950/50 dark:text-indigo-400">
+                    <Award className="w-4 h-4" />
+                  </span>
+                  <div>
+                    <h4 className="text-xs font-bold text-zinc-900 dark:text-zinc-100 uppercase tracking-wider">
+                      Learner Progress and Achievement
+                    </h4>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      Official DepEd SF9-SHS Grading Scale Legend
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800 mt-1">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 font-semibold text-[10px] uppercase border-b border-zinc-200 dark:border-zinc-800">
+                    <tr>
+                      <th className="py-2.5 px-4 font-bold">Descriptors</th>
+                      <th className="py-2.5 px-4 font-bold">Grading Scale</th>
+                      <th className="py-2.5 px-4 font-bold">Remarks</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-200/60 dark:divide-zinc-800/60 bg-white dark:bg-zinc-900/30">
+                    {(
+                      (fields.learner_progress_achievement?.scale_items ||
+                        (Array.isArray(fields.grading_scale)
+                          ? fields.grading_scale
+                          : fields.grading_scale?.scale_items) ||
+                        []) as any[]
+                    ).map((item: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors">
+                        <td className="py-2 px-4 font-semibold text-zinc-800 dark:text-zinc-200">
+                          {item.descriptor}
+                        </td>
+                        <td className="py-2 px-4 font-mono text-zinc-600 dark:text-zinc-400">
+                          {item.grading_scale}
+                        </td>
+                        <td className="py-2 px-4">
+                          <span
+                            className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold ${
+                              item.remarks?.toLowerCase() === "passed"
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                : "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
+                            }`}
+                          >
+                            {item.remarks}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Section 4: SF1 Multi-Learner School Register */}
+          {fields.document_type === "sf1" && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
+            <div className="flex flex-col gap-2 mt-4">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Users className="w-4 h-4 text-blue-600" />
+                  SF1 School Register Roster ({(fields as any).learners.length} Learners)
+                </span>
+                <span className="text-xs text-zinc-500">
+                  DepEd SHS SF1 &bull; {fields.grade_level || "Grade 11"} &bull; {fields.section || "Section"}
+                </span>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-semibold">
+                    <tr className="border-b border-zinc-200 dark:border-zinc-700">
+                      <th className="py-2 px-2 text-center w-8">#</th>
+                      <th className="py-2 px-3">LRN</th>
+                      <th className="py-2 px-3">Learner Name (Last, First, Middle)</th>
+                      <th className="py-2 px-2 text-center w-12">Sex</th>
+                      <th className="py-2 px-3">Birth Date</th>
+                      <th className="py-2 px-2 text-center w-12">Age</th>
+                      <th className="py-2 px-3 text-right">Recognition</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {(fields as any).learners.map((lrn: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <td className="py-1.5 px-2 text-center text-zinc-400 font-mono">{idx + 1}</td>
+                        <td className="py-1.5 px-3 font-mono font-semibold text-zinc-800 dark:text-zinc-200">{lrn.lrn}</td>
+                        <td className="py-1.5 px-3 font-medium text-zinc-900 dark:text-zinc-100">
+                          {lrn.last_name}, {lrn.first_name} {lrn.middle_name || ""} {lrn.suffix || ""}
+                        </td>
+                        <td className="py-1.5 px-2 text-center font-bold">{lrn.sex}</td>
+                        <td className="py-1.5 px-3 text-zinc-600 dark:text-zinc-400">{lrn.birth_date || "-"}</td>
+                        <td className="py-1.5 px-2 text-center text-zinc-600 dark:text-zinc-400">{lrn.age ?? "-"}</td>
+                        <td className="py-1.5 px-3 text-right">
+                          {lrn.is_handwritten ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300 border border-purple-200">
+                              Azure ICR
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                              Printed OCR
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Section 5: SF2 Daily Attendance Grid with Pattern Shading Recognition */}
+          {fields.document_type === "sf2" && Array.isArray((fields as any).attendance_records) && (fields as any).attendance_records.length > 0 && (
+            <div className="flex flex-col gap-2 mt-4">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-emerald-600" />
+                  SF2 Daily Attendance &amp; Shading Pattern Classifier ({(fields as any).attendance_records.length} Learners)
+                </span>
+                <span className="text-xs text-zinc-500">
+                  Month: {(fields as any).attendance_month || "Current"} &bull; Total School Days: {fields.attendance_records?.[0]?.total_school_days ?? 20}
+                </span>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-semibold">
+                    <tr className="border-b border-zinc-200 dark:border-zinc-700">
+                      <th className="py-2 px-2 text-center w-8">#</th>
+                      <th className="py-2 px-3">Learner Name</th>
+                      <th className="py-2 px-2 text-center w-14">Present</th>
+                      <th className="py-2 px-2 text-center w-14">Absent</th>
+                      <th className="py-2 px-2 text-center w-14">Tardy</th>
+                      <th className="py-2 px-3">Daily Grid Status (Sample Days 1..10)</th>
+                      <th className="py-2 px-3 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {(fields as any).attendance_records.map((rec: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <td className="py-1.5 px-2 text-center text-zinc-400 font-mono">{idx + 1}</td>
+                        <td className="py-1.5 px-3 font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                          {rec.learner_name}
+                          {rec.is_handwritten && (
+                            <span className="px-1 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300">
+                              ICR
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-center font-mono font-bold text-emerald-600">{rec.days_present}</td>
+                        <td className="py-1.5 px-2 text-center font-mono font-bold text-red-600">{rec.days_absent}</td>
+                        <td className="py-1.5 px-2 text-center font-mono font-bold text-amber-600">{rec.days_tardy}</td>
+                        <td className="py-1.5 px-3">
+                          <div className="flex items-center gap-1">
+                            {(rec.daily_grid || []).slice(0, 10).map((dg: any, dIdx: number) => (
+                              <span
+                                key={dIdx}
+                                title={`Day ${dg.day}: ${dg.shading_classification || dg.status} (${dg.recognition_method || "pattern_recognition"})`}
+                                className={`w-5 h-5 flex items-center justify-center rounded text-[10px] font-bold ${
+                                  dg.shading_classification === "FULL_SHADE" || dg.status === "ABSENT"
+                                    ? "bg-red-500 text-white"
+                                    : dg.shading_classification === "HALF_SHADE" || dg.status === "TARDY"
+                                    ? "bg-amber-400 text-zinc-900 border-r-2 border-amber-600"
+                                    : dg.shading_classification === "UNCLEAR" || dg.status === "UNKNOWN"
+                                    ? "bg-purple-200 text-purple-900 border border-purple-500"
+                                    : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
+                                }`}
+                              >
+                                {dg.day}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-1.5 px-3 text-right">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              rec.review_status === "VERIFIED"
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                            }`}
+                          >
+                            {rec.review_status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Section 6: SF5 Promotion and Level of Proficiency */}
+          {fields.document_type === "sf5" && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
+            <div className="flex flex-col gap-2 mt-4">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Award className="w-4 h-4 text-purple-600" />
+                  SF5 Promotion &amp; Level of Proficiency ({(fields as any).form_variant || "SF5A-SHS"})
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {(fields as any).learners.length} Candidates Evaluated
+                </span>
+              </div>
+              <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 font-semibold">
+                    <tr className="border-b border-zinc-200 dark:border-zinc-700">
+                      <th className="py-2 px-2 text-center w-8">#</th>
+                      <th className="py-2 px-3">LRN</th>
+                      <th className="py-2 px-3">Learner Name</th>
+                      <th className="py-2 px-2 text-center w-20">Gen. Average</th>
+                      <th className="py-2 px-3 text-center">Action Taken</th>
+                      <th className="py-2 px-3 text-right">Proficiency</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
+                    {(fields as any).learners.map((lrn: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/50">
+                        <td className="py-1.5 px-2 text-center text-zinc-400 font-mono">{idx + 1}</td>
+                        <td className="py-1.5 px-3 font-mono font-semibold text-zinc-800 dark:text-zinc-200">{lrn.lrn}</td>
+                        <td className="py-1.5 px-3 font-medium text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                          {lrn.learner_name}
+                          {lrn.is_handwritten && (
+                            <span className="px-1 py-0.2 rounded text-[9px] font-bold bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300">
+                              ICR
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-center font-mono font-bold">{lrn.general_average ?? "-"}</td>
+                        <td className="py-1.5 px-3 text-center">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              lrn.action_taken === "COMPLETE" || lrn.action_taken === "GRADUATING"
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                : "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300"
+                            }`}
+                          >
+                            {lrn.action_taken}
+                          </span>
+                        </td>
+                        <td className="py-1.5 px-3 text-right font-medium text-zinc-700 dark:text-zinc-300">
+                          {lrn.proficiency_level || "-"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Section 7: PSA Birth Certificate Supporting Evidence */}
+          {(fields.document_type === "birth_cert" || fields.registry_number) && (
+            <div className="flex flex-col gap-2 mt-4 p-4 rounded-lg bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-sky-600" />
+                  PSA Certificate of Live Birth (Supporting Identity Evidence)
+                </span>
+                <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300">
+                  RA 10173 Protected
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                <div className="p-2 rounded bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700">
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Local Civil Registry No.</span>
+                  <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{fields.registry_number || "Not Recorded"}</span>
+                </div>
+                <div className="p-2 rounded bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700">
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Mother&apos;s Maiden Name</span>
+                  <span className="font-medium text-zinc-900 dark:text-zinc-100">{fields.mother_maiden_name || "Not Recorded"}</span>
+                </div>
+                <div className="p-2 rounded bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700">
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Father&apos;s Name</span>
+                  <span className="font-medium text-zinc-900 dark:text-zinc-100">{fields.father_name || "Not Recorded"}</span>
+                </div>
+              </div>
             </div>
           )}
         </div>

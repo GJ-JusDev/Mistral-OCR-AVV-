@@ -9,9 +9,11 @@
  * - Captures non-numeric DepEd marks (INC, DRP)
  */
 
-import type { GradeRecord, AttendanceRecord, ExtractedFields } from "@/types/documents";
+import type { GradeRecord, AttendanceRecord, ExtractedFields, LearnersObservedValues, LearnerProgressAndAchievement, GradingScaleItem } from "@/types/documents";
 import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
 import { normalizeGradeRecords } from "../validation/gradeUtils";
+import { classifyFieldRecognition } from "./handwritingExtractor";
+import { parseAzureObservedValuesTable, parseAzureGradingScaleTable } from "./observedValuesParser";
 
 export interface ParsedTableGradesResult {
   grades: GradeRecord[];
@@ -30,6 +32,9 @@ export interface ParsedTableGradesResult {
   attendance_risk_status?: "NORMAL" | "ATTENDANCE_WARNING" | "ATTENDANCE_REVIEW_REQUIRED" | "INCOMPLETE_ATTENDANCE_DATA";
   attendance_discrepancy_details?: string[];
   general_average?: number;
+  observed_values?: LearnersObservedValues;
+  learner_progress_achievement?: LearnerProgressAndAchievement;
+  grading_scale?: LearnerProgressAndAchievement | GradingScaleItem[];
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +230,7 @@ function buildCellMatrix(table: any): string[][] {
 /**
  * Parse structured tables from Azure Document Intelligence layout into GradeRecord[].
  */
-export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResult {
+export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): ParsedTableGradesResult {
   const result: ParsedTableGradesResult = {
     grades: [],
   };
@@ -240,11 +245,28 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
       continue;
     }
 
-    // 1. Explicit Exclusions (Phases 8 & 10)
+    // 1. Observed Values & Grading Scale Extraction (Strictly excluded from academic grades)
     if (isObservedValuesTable(table)) {
+      try {
+        const ov = parseAzureObservedValuesTable(table);
+        if (ov) {
+          result.observed_values = ov;
+        }
+      } catch (err) {
+        console.warn("[tableGradesParser] Error parsing Observed Values table:", err);
+      }
       continue;
     }
     if (isGradingScaleTable(table)) {
+      try {
+        const gs = parseAzureGradingScaleTable(table);
+        if (gs) {
+          result.learner_progress_achievement = gs;
+          result.grading_scale = gs;
+        }
+      } catch (err) {
+        console.warn("[tableGradesParser] Error parsing Grading Scale table:", err);
+      }
       continue;
     }
 
@@ -367,6 +389,13 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
     let isSemester1 = false;
     let isSemester2 = false;
     let isFullYearQuarterly = false;
+    let tableGradeLevel: "Grade 11" | "Grade 12" | undefined = undefined;
+
+    if (/\bgrade\s*(?:level)?[:\s]*(?:12|xii)\b/i.test(fullTableText)) {
+      tableGradeLevel = "Grade 12";
+    } else if (/\bgrade\s*(?:level)?[:\s]*(?:11|xi)\b/i.test(fullTableText)) {
+      tableGradeLevel = "Grade 11";
+    }
 
     if (fullTableText.includes("first semester") || fullTableText.includes("1st semester")) {
       isSemester1 = true;
@@ -620,12 +649,13 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
         needsVerification = true;
       }
 
-      // In SHS semestral mode, subjects are semester-specific and must NEVER merge across semesters.
-      // Only merge if within the same semester and same subject (e.g. split row in single table).
+      // In SHS semestral mode, subjects are semester-specific and grade-level-specific and must NEVER merge across semesters or grade levels.
+      // Only merge if within the same grade_level, same semester, and same subject (e.g. split row in single table).
       const existingIdx = isFullYearQuarterly
         ? result.grades.findIndex((g) => g.subject.toLowerCase() === rawSubject.toLowerCase())
         : result.grades.findIndex(
             (g) =>
+              g.grade_level === tableGradeLevel &&
               g.semester === semesterLabel &&
               g.subject.toLowerCase() === rawSubject.toLowerCase()
           );
@@ -648,10 +678,13 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
         }
         if (needsVerification) existing.needsVerification = true;
       } else {
+        const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
+
         const record: GradeRecord = {
           category: currentCategory || undefined,
           subject: rawSubject,
           semester: semesterLabel,
+          grade_level: tableGradeLevel,
           grading_period_scheme: isFullYearQuarterly ? "quarterly" : "quarterly_semestral",
           q1,
           q2,
@@ -660,6 +693,10 @@ export function parseAzureLayoutGrades(rawTables?: any[]): ParsedTableGradesResu
           final: candidateFinal,
           status,
           needsVerification,
+          recognition_type: gradeRec?.recognition_type || "printed_ocr",
+          is_handwritten: gradeRec?.is_handwritten || false,
+          icr_confidence: gradeRec?.icr_confidence,
+          bounding_box: gradeRec?.bounding_box,
         };
 
         if (isSemester2) {

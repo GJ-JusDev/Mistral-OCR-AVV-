@@ -8,12 +8,15 @@ import OcrResultCard from "@/components/ocr/OcrResultCard";
 import ValidationSummary from "@/components/validation/ValidationSummary";
 import ReviewPanel from "@/components/review/ReviewPanel";
 import StudentGradeReviewSection from "@/components/review/StudentGradeReviewSection";
+import ShsRosterReviewSection from "@/components/review/ShsRosterReviewSection";
+import PsaIdentityVerificationModal from "@/components/review/PsaIdentityVerificationModal";
 import DeleteReviewDocumentModal from "@/components/review/DeleteReviewDocumentModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ShieldCheck, UserCheck } from "lucide-react";
 
-import { submitDocumentReview, saveDocumentCorrections } from "@/actions/review";
+import { submitDocumentReview, saveDocumentCorrections, updateRosterEntryReviewStatus, verifyPsaIdentityRecord } from "@/actions/review";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
+import { formatAssignmentContextMismatch } from "@/types/documents";
 
 export default function DocumentDetailPage() {
   const params = useParams();
@@ -30,6 +33,10 @@ export default function DocumentDetailPage() {
   const [isSavingCorrections, setIsSavingCorrections] = useState(false);
   const [activeSide, setActiveSide] = useState<"front" | "back">("front");
   const [isDeletionModalOpen, setIsDeletionModalOpen] = useState(false);
+  const [rosterEntries, setRosterEntries] = useState<any[]>([]);
+  const [psaRecord, setPsaRecord] = useState<any>(null);
+  const [isPsaModalOpen, setIsPsaModalOpen] = useState(false);
+  const [currentUserRole, setCurrentUserRole] = useState<string>("teacher");
 
   const fetchDocumentDetail = async () => {
     try {
@@ -43,6 +50,8 @@ export default function DocumentDetailPage() {
         existing_grades: data.existing_grades || baseDoc.existing_grades || [],
         grade_comparison: data.grade_comparison || baseDoc.grade_comparison,
         grade_change_history: data.grade_change_history || baseDoc.grade_change_history || [],
+        roster_entries: data.roster_entries || baseDoc.roster_entries || [],
+        psa_record: data.psa_record || baseDoc.psa_record || null,
       };
       if (doc?.extracted_fields?.grades && Array.isArray(doc.extracted_fields.grades)) {
         doc.extracted_fields.grades = normalizeGradeRecords(
@@ -52,6 +61,11 @@ export default function DocumentDetailPage() {
         Object.assign(doc.extracted_fields, updateExtractedFieldsAverages(doc.extracted_fields));
       }
       setDocument(doc);
+      setRosterEntries(doc.roster_entries || []);
+      setPsaRecord(doc.psa_record || null);
+      if (data.current_user_role) {
+        setCurrentUserRole(String(data.current_user_role).toLowerCase());
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -64,7 +78,13 @@ export default function DocumentDetailPage() {
     fetchDocumentDetail();
   }, [documentId]);
 
+  const canApprove = currentUserRole === "admin";
+
   const handleApprove = async () => {
+    if (!canApprove) {
+      setActionError("Forbidden: Final approval is restricted to authorized Administrators.");
+      return;
+    }
     setIsSubmitting(true);
     setActionError(null);
     const res = await submitDocumentReview(documentId, "approve");
@@ -88,6 +108,10 @@ export default function DocumentDetailPage() {
   };
 
   const handleReject = async (reason: string) => {
+    if (!canApprove) {
+      setActionError("Forbidden: Final rejection is restricted to authorized Administrators.");
+      return;
+    }
     setIsSubmitting(true);
     setActionError(null);
     const res = await submitDocumentReview(documentId, "reject", reason);
@@ -234,9 +258,11 @@ export default function DocumentDetailPage() {
           {Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
             document.extracted_fields.assignment_context_mismatches.length > 0 && (
               <ul className="list-disc list-inside text-amber-800 dark:text-amber-300 space-y-0.5">
-                {document.extracted_fields.assignment_context_mismatches.map((mismatch: string, idx: number) => (
-                  <li key={idx}>{mismatch}</li>
-                ))}
+                {document.extracted_fields.assignment_context_mismatches.map((mismatch: unknown, idx: number) => {
+                  const renderedText = formatAssignmentContextMismatch(mismatch);
+                  if (!renderedText) return null;
+                  return <li key={idx}>{renderedText}</li>;
+                })}
               </ul>
             )}
           {(typeof document.extracted_fields?.identity_conflict_details === "string"
@@ -264,18 +290,80 @@ export default function DocumentDetailPage() {
         </div>
       )}
       
-      {/* Student Identification & Controlled Grade Review Section */}
-      <div className="mt-6">
-        <StudentGradeReviewSection
-          document={document}
-          matchedStudent={document.matched_student}
-          existingGrades={document.existing_grades}
-          gradeComparison={document.grade_comparison}
-          gradeChangeHistory={document.grade_change_history}
-        />
-      </div>
+      {/* Document Review Section: PSA Supporting Civil Identity vs Single-Learner Grade */}
+      {document.document_type === "birth_cert" ? (
+        <div className="mt-6 bg-white dark:bg-zinc-900 border border-purple-200 dark:border-purple-800/60 rounded-xl p-5 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-purple-100 dark:bg-purple-950/50 rounded-lg text-purple-700 dark:text-purple-300">
+                <ShieldCheck className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                  PSA Certificate of Live Birth
+                  <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                    Supporting Identity Evidence
+                  </span>
+                </h3>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  Civil identity record protected under RA 10173. Zero automatic overwrite of student profiles.
+                </p>
+              </div>
+            </div>
+            {psaRecord && (
+              <button
+                type="button"
+                onClick={() => setIsPsaModalOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+              >
+                <UserCheck className="w-4 h-4" />
+                <span>Verify Civil Identity</span>
+              </button>
+            )}
+          </div>
 
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {psaRecord && (
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 text-xs">
+              <div>
+                <span className="text-zinc-400 block font-medium">Child Full Name:</span>
+                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                  {psaRecord.last_name}, {psaRecord.first_name} {psaRecord.middle_name || ""}
+                </span>
+              </div>
+              <div>
+                <span className="text-zinc-400 block font-medium">Date of Birth:</span>
+                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                  {psaRecord.birth_date || "Not extracted"}
+                </span>
+              </div>
+              <div>
+                <span className="text-zinc-400 block font-medium">Sex:</span>
+                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                  {psaRecord.sex === "M" ? "Male" : psaRecord.sex === "F" ? "Female" : psaRecord.sex || "-"}
+                </span>
+              </div>
+              <div>
+                <span className="text-zinc-400 block font-medium">Registry Number:</span>
+                <span className="font-mono text-zinc-800 dark:text-zinc-200">
+                  {psaRecord.registry_number || "N/A"}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : ["sf1", "sf2", "sf5"].includes(document.document_type) ? null : (
+        <div className="mt-6">
+          <StudentGradeReviewSection
+            document={document}
+            matchedStudent={document.matched_student}
+            existingGrades={document.existing_grades}
+            gradeComparison={document.grade_comparison}
+            gradeChangeHistory={document.grade_change_history}
+          />
+        </div>
+      )}
+
+      <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
         {/* Left Column: Image Preview with Front / Back Toggle */}
         {(() => {
           const backImageUrl = document.extracted_fields?.back_image_url || document.extracted_fields?.images?.back;
@@ -288,7 +376,7 @@ export default function DocumentDetailPage() {
           }
 
           return (
-            <div className="bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700 flex flex-col items-center">
+            <div className="bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 border border-zinc-200 dark:border-zinc-700 flex flex-col items-center lg:sticky lg:top-24 w-full">
               <div className="w-full flex flex-wrap items-center justify-between gap-2 mb-4">
                 <h2 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">
                   {imageTitle}
@@ -337,27 +425,47 @@ export default function DocumentDetailPage() {
 
         {/* Right Column: OCR Results, Validation, Review Panel */}
         <div className="flex flex-col gap-6">
-          <div className="flex flex-col gap-2">
-            <OcrResultCard 
-              fields={document.extracted_fields} 
-              rawText={document.extracted_text}
-              onFieldChange={handleFieldChange}
-              confidence={document.extracted_fields?.ocr_confidence}
-              model={document.extracted_fields?.ocr_model}
-              provider={document.extracted_fields?.ocr_provider}
+          {["sf1", "sf2", "sf5"].includes(document.document_type) ? (
+            <ShsRosterReviewSection
+              documentType={document.document_type as "sf1" | "sf2" | "sf5"}
+              documentId={document.id}
+              entries={rosterEntries}
+              onVerifyEntry={async (entryId) => {
+                await updateRosterEntryReviewStatus(document.document_type, entryId, "VERIFIED");
+                setRosterEntries((prev) =>
+                  prev.map((e) => (e.id === entryId ? { ...e, review_status: "VERIFIED" } : e))
+                );
+              }}
+              onFlagEntry={async (entryId, reason) => {
+                await updateRosterEntryReviewStatus(document.document_type, entryId, "FLAGGED", reason);
+                setRosterEntries((prev) =>
+                  prev.map((e) => (e.id === entryId ? { ...e, review_status: "FLAGGED", flag_reasons: [reason] } : e))
+                );
+              }}
             />
-            {hasModifications && (
-              <div className="flex justify-end mt-2">
-                <button
-                  onClick={handleSaveCorrections}
-                  disabled={isSavingCorrections}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition shadow-sm disabled:opacity-50"
-                >
-                  {isSavingCorrections ? "Saving Changes..." : "Save Corrections"}
-                </button>
-              </div>
-            )}
-          </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <OcrResultCard 
+                fields={document.extracted_fields} 
+                rawText={document.extracted_text}
+                onFieldChange={handleFieldChange}
+                confidence={document.extracted_fields?.ocr_confidence}
+                model={document.extracted_fields?.ocr_model}
+                provider={document.extracted_fields?.ocr_provider}
+              />
+              {hasModifications && (
+                <div className="flex justify-end mt-2">
+                  <button
+                    onClick={handleSaveCorrections}
+                    disabled={isSavingCorrections}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition shadow-sm disabled:opacity-50"
+                  >
+                    {isSavingCorrections ? "Saving Changes..." : "Save Corrections"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <ValidationSummary 
             report={{ 
               results: validationResults, 
@@ -373,6 +481,8 @@ export default function DocumentDetailPage() {
             onReject={handleReject}
             onDelete={() => setIsDeletionModalOpen(true)}
             isSubmitting={isSubmitting}
+            userRole={currentUserRole}
+            canApprove={canApprove}
           />
         </div>
       </div>
@@ -422,6 +532,24 @@ export default function DocumentDetailPage() {
           onSuccess={() => {
             fetchDocumentDetail();
             setIsDeletionModalOpen(false);
+          }}
+        />
+      )}
+
+      {isPsaModalOpen && psaRecord && (
+        <PsaIdentityVerificationModal
+          isOpen={isPsaModalOpen}
+          onClose={() => setIsPsaModalOpen(false)}
+          psaRecord={psaRecord}
+          onConfirmVerification={async (psaId, notes) => {
+            await verifyPsaIdentityRecord(psaId, "VERIFIED", notes);
+            setPsaRecord((prev: any) => ({ ...prev, verification_status: "VERIFIED", verification_notes: notes }));
+            setIsPsaModalOpen(false);
+          }}
+          onFlagConflict={async (psaId, reason) => {
+            await verifyPsaIdentityRecord(psaId, "FLAGGED", reason);
+            setPsaRecord((prev: any) => ({ ...prev, verification_status: "FLAGGED", verification_notes: reason }));
+            setIsPsaModalOpen(false);
           }}
         />
       )}

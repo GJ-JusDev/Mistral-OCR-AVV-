@@ -135,7 +135,42 @@ export function computeRawSemesterFinalGrade(
   if (numA === undefined || numB === undefined) return undefined;
 
   const raw = (numA + numB) / 2;
-  return Number(raw.toFixed(2));
+  return Number(raw.toFixed(4));
+}
+
+/**
+ * Standard DepEd whole-number rounding for display:
+ * .50 and above rounds up; below .50 rounds down.
+ */
+export function roundDisplayedGrade(val: number | string | undefined | null): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  const num = typeof val === "number" ? val : parseFloat(String(val).trim());
+  if (isNaN(num)) return undefined;
+  return Math.round(num);
+}
+
+/**
+ * Formats a grade for regular student-facing SF9 display.
+ * Displays the rounded whole-number grade where required.
+ * Standard rounding: .50 and above rounds up; below .50 rounds down.
+ * Does not display unnecessary decimal places in regular SF9 grade output.
+ */
+export function formatDisplayedGrade(grade: number | string | undefined | null): string {
+  if (isBlankOrMissingFinal(grade)) return "—";
+  const num = typeof grade === "number" ? grade : parseFloat(String(grade).trim());
+  if (isNaN(num)) return String(grade);
+  return String(Math.round(num));
+}
+
+/**
+ * Formats a grade with full precision or specified decimal places.
+ * Used for awardee evaluation, ranking, comparisons, and audit logs.
+ */
+export function formatPreciseGrade(grade: number | string | undefined | null, decimals: number = 2): string {
+  if (isBlankOrMissingFinal(grade)) return "—";
+  const num = typeof grade === "number" ? grade : parseFloat(String(grade).trim());
+  if (isNaN(num)) return String(grade);
+  return num.toFixed(decimals);
 }
 
 /**
@@ -261,12 +296,19 @@ export function recalculateSubjectGradeStatus(
   const rawGrade = computeRawSemesterFinalGrade(qA, qB);
   const officialGrade = computeOfficialSemesterFinalGrade(qA, qB);
 
-  if (officialGrade !== undefined) {
-    updated.computed_final_grade = officialGrade;
-    updated.official_computed_final = officialGrade;
-  }
   if (rawGrade !== undefined) {
+    updated.precise_computed_grade = rawGrade;
     updated.raw_calculated_final = rawGrade;
+    updated.computed_final_grade = rawGrade; // Preserve precise decimal
+    updated.computation_formula = "arithmetic_quarter_mean: (qA + qB) / 2";
+    if (!updated.grading_policy_version) {
+      updated.grading_policy_version = "DO 8, s. 2015 / DO 36, s. 2016";
+    }
+  }
+  if (officialGrade !== undefined) {
+    updated.displayed_grade = officialGrade;
+    updated.displayed_final_grade = officialGrade;
+    updated.official_computed_final = officialGrade;
   }
 
   // Alamin ang authoritative semestral final grade
@@ -277,31 +319,35 @@ export function recalculateSubjectGradeStatus(
   if (isCandidateBlank) {
     if (officialGrade !== undefined && rawGrade !== undefined) {
       // Automatic Candidate Grade Computation (Both quarters valid)
-      updated.final = officialGrade;
+      // PRESERVE DECIMAL PRECISION IN STORAGE:
+      // Save the unrounded computation in the database to prevent premature rounding.
+      // Use this value for academic average calculations, ranking, and awardee evaluation.
+      updated.final = rawGrade;
       const targetSem = normalizeSemesterContext(updated.semester) || effectiveSem;
       if (targetSem === "1st Semester") {
-        updated.sem1_final_grade = officialGrade;
+        updated.sem1_final_grade = rawGrade;
       } else if (targetSem === "2nd Semester") {
-        updated.sem2_final_grade = officialGrade;
+        updated.sem2_final_grade = rawGrade;
       } else {
         if (numQ1 !== undefined || numQ2 !== undefined) {
-          updated.sem1_final_grade = officialGrade;
+          updated.sem1_final_grade = rawGrade;
         } else if (numQ3 !== undefined || numQ4 !== undefined) {
-          updated.sem2_final_grade = officialGrade;
+          updated.sem2_final_grade = rawGrade;
         }
       }
 
       updated.is_auto_computed = true;
       updated.grade_source = "auto_computed";
-      updated.status = officialGrade >= 75 ? "Passed" : "Failed";
+      // DepEd passing mark is 75. A mark < 75 is Failed (e.g. 74.5 is strictly below 75)
+      updated.status = rawGrade >= 75 ? "Passed" : "Failed";
       updated.has_calculation_discrepancy = false;
-      updated.calculation_notes = `Auto-computed candidate final grade: ${officialGrade} (raw arithmetic average: ${rawGrade}). Requires teacher verification.`;
+      updated.calculation_notes = `Auto-computed candidate final grade: ${rawGrade} (displayed: ${officialGrade}). Preserved precise decimal in database. Requires teacher verification.`;
       updated.needsVerification = true; // Auto-computed candidates always require human review before final approval
 
       // Remedial handling kung bagsak (< 75)
-      if (officialGrade < 75) {
+      if (rawGrade < 75) {
         if (!updated.failed_final_grade) {
-          updated.failed_final_grade = officialGrade;
+          updated.failed_final_grade = rawGrade;
         }
         if (
           updated.remedial_class_mark !== undefined &&
@@ -313,7 +359,8 @@ export function recalculateSubjectGradeStatus(
               ? updated.remedial_class_mark
               : parseFloat(String(updated.remedial_class_mark));
           if (!isNaN(rMark)) {
-            updated.recomputed_final_grade = Math.round((officialGrade + rMark) / 2);
+            const recomputed = (rawGrade + rMark) / 2;
+            updated.recomputed_final_grade = Number(recomputed.toFixed(2));
           }
         }
       }
@@ -341,6 +388,14 @@ export function recalculateSubjectGradeStatus(
   }
 
   // CASE 2: CANDIDATE FINAL GRADE ALREADY PRESENT (Extracted from OCR or manually edited)
+  // Preserve original printed SF9 grade and original extracted OCR grade
+  if (updated.printed_final_grade === undefined && candidate !== undefined) {
+    updated.printed_final_grade = candidate;
+  }
+  if (updated.ocr_final_grade === undefined && (updated.grade_source === "ocr" || !updated.grade_source) && candidate !== undefined) {
+    updated.ocr_final_grade = candidate;
+  }
+
   // Synchronize across properties based on semester context
   const targetSem = normalizeSemesterContext(updated.semester) || effectiveSem;
   if (targetSem === "1st Semester") {
@@ -371,6 +426,14 @@ export function recalculateSubjectGradeStatus(
     const num = parseFloat(numMatch[1]);
     if (!isNaN(num)) {
       updated.status = num >= 75 ? "Passed" : "Failed";
+      updated.displayed_grade = Math.round(num);
+      updated.displayed_final_grade = Math.round(num);
+
+      if (rawGrade !== undefined) {
+        updated.precise_computed_grade = rawGrade;
+        updated.raw_calculated_final = rawGrade;
+        updated.computed_final_grade = rawGrade;
+      }
 
       // Kung bagsak (< 75), itala ang failed_final_grade at suriin kung may remedial_class_mark
       if (num < 75) {
@@ -387,7 +450,8 @@ export function recalculateSubjectGradeStatus(
               ? updated.remedial_class_mark
               : parseFloat(String(updated.remedial_class_mark));
           if (!isNaN(rMark)) {
-            updated.recomputed_final_grade = Math.round((num + rMark) / 2);
+            const recomputed = (num + rMark) / 2;
+            updated.recomputed_final_grade = Number(recomputed.toFixed(2));
           }
         }
       }
@@ -445,6 +509,8 @@ export function normalizeGradeRecords(
 export interface SemesterAverageResult {
   rawAverage?: number;
   officialAverage?: number;
+  preciseAverage?: number;
+  displayedAverage?: number;
   subjectCount: number;
   completeness: "COMPLETE" | "INCOMPLETE" | "EMPTY";
   pendingSubjects?: string[];
@@ -505,7 +571,8 @@ export function getSemesterGrades(
  * 2. If 0 eligible subjects exist (e.g. 2nd semester not yet scanned), returns completeness = "EMPTY".
  * 3. Completeness requirement: If any eligible subject has missing, blank, or non-numeric final grade,
  *    returns completeness = "INCOMPLETE", without finalizing the official general average.
- * 4. When complete, official general average is presented to two decimal places (e.g. 85.94).
+ * 4. When complete, official general average is presented with full decimal precision (e.g. 85.94)
+ *    and also provides the rounded whole-number display value (e.g. 86) for regular SF9 student card output.
  */
 export function computeSemesterGeneralAverage(
   grades: GradeRecord[] | undefined | null,
@@ -544,8 +611,25 @@ export function computeSemesterGeneralAverage(
       continue;
     }
 
-    sumOfficial += num;
-    sumRaw += typeof g.raw_calculated_final === "number" ? g.raw_calculated_final : num;
+    // Authoritative Printed Grade preservation:
+    // If an official printed final grade exists on the SF9 document, it remains authoritative.
+    // An unverified computed discrepancy must never silently replace the official printed grade.
+    const authoritativeFinal = g.printed_final_grade !== undefined && g.printed_final_grade !== null
+      ? (typeof g.printed_final_grade === "number" ? g.printed_final_grade : parseFloat(String(g.printed_final_grade)))
+      : num;
+
+    const authoritativeNum = isNaN(authoritativeFinal) ? num : authoritativeFinal;
+
+    // Use preciseComputedGrade when auto-computed without discrepancy,
+    // but if an unverified discrepancy exists, the authoritative printed grade remains in place.
+    const preciseVal = (g.has_calculation_discrepancy && g.needsVerification)
+      ? authoritativeNum
+      : (typeof g.precise_computed_grade === "number"
+          ? g.precise_computed_grade
+          : (typeof g.raw_calculated_final === "number" ? g.raw_calculated_final : authoritativeNum));
+
+    sumOfficial += authoritativeNum;
+    sumRaw += preciseVal;
   }
 
   const subjectCount = eligible.length;
@@ -559,12 +643,16 @@ export function computeSemesterGeneralAverage(
     };
   }
 
-  const officialAvg = Number((sumOfficial / subjectCount).toFixed(2));
   const rawAvg = Number((sumRaw / subjectCount).toFixed(2));
+  const preciseAvg = Number((sumRaw / subjectCount).toFixed(4));
+  const displayedAvg = Math.round(rawAvg);
+  const officialAvg = rawAvg;
 
   return {
     rawAverage: rawAvg,
     officialAverage: officialAvg,
+    preciseAverage: preciseAvg,
+    displayedAverage: displayedAvg,
     subjectCount,
     completeness: "COMPLETE",
     pendingSubjects: [],
@@ -586,12 +674,16 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
   updated.sem1_completeness = sem1Result.completeness;
   updated.sem1_general_average = sem1Result.officialAverage;
   updated.sem1_raw_general_average = sem1Result.rawAverage;
+  updated.sem1_precise_general_average = sem1Result.preciseAverage;
+  updated.sem1_displayed_general_average = sem1Result.displayedAverage;
 
   const sem2Result = computeSemesterGeneralAverage(grades, "2nd Semester");
   updated.sem2_subject_count = sem2Result.subjectCount;
   updated.sem2_completeness = sem2Result.completeness;
   updated.sem2_general_average = sem2Result.officialAverage;
   updated.sem2_raw_general_average = sem2Result.rawAverage;
+  updated.sem2_precise_general_average = sem2Result.preciseAverage;
+  updated.sem2_displayed_general_average = sem2Result.displayedAverage;
 
   const docSem = normalizeSemesterContext(updated.semester);
 
@@ -605,6 +697,8 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
       (updated.general_average === undefined || updated.is_auto_computed_average)
     ) {
       updated.general_average = sem2Result.officialAverage;
+      updated.precise_general_average = sem2Result.preciseAverage;
+      updated.displayed_general_average = sem2Result.displayedAverage;
       updated.is_auto_computed_average = true;
     }
   } else if (docSem === "1st Semester" || sem1Result.completeness === "COMPLETE") {
@@ -613,6 +707,8 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
       (updated.general_average === undefined || updated.is_auto_computed_average)
     ) {
       updated.general_average = sem1Result.officialAverage;
+      updated.precise_general_average = sem1Result.preciseAverage;
+      updated.displayed_general_average = sem1Result.displayedAverage;
       updated.is_auto_computed_average = true;
     }
   }

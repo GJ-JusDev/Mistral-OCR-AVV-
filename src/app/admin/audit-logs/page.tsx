@@ -221,12 +221,12 @@ export default function AdminAuditLogsPage() {
   return (
     <PageContainer>
       <Header
-        title="Audit Logs & Activity Monitoring"
+        title="User Logs & Activity Monitoring"
         description="Immutable administrative activity history for institutional accountability, compliance, and security."
         breadcrumbs={[
           { label: "Home", href: "/" },
           { label: "Admin", href: "/admin/users" },
-          { label: "Audit Logs" },
+          { label: "User Logs" },
         ]}
       />
 
@@ -408,7 +408,7 @@ export default function AdminAuditLogsPage() {
       {/* Main Table Container */}
       <div className="mt-6">
         <DataTableContainer
-          title={`Administrative Activity Records (${totalCount})`}
+          title={`User Activity Records (${totalCount})`}
           description="Real-time chronological events from all verified sub-modules"
           actions={
             <div className="flex items-center gap-2 text-xs text-zinc-500">
@@ -664,6 +664,56 @@ export default function AdminAuditLogsPage() {
                   <span className="px-2 py-1 bg-white border rounded text-emerald-700 font-bold">
                     After: {selectedEvent.details.new_status || "N/A"}
                   </span>
+                </div>
+              </div>
+            )}
+
+            {/* Document Lifecycle & Deletion Details Viewer */}
+            {selectedEvent.details && (selectedEvent.details.document_type || selectedEvent.details.document_id || selectedEvent.details.teacher_name) && (
+              <div className="p-3.5 rounded-lg border bg-blue-50/50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-900/40 text-xs">
+                <span className="font-bold text-blue-900 dark:text-blue-300 block mb-2 text-[11px] uppercase tracking-wider">
+                  Document Audit Record Details
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 font-sans">
+                  {selectedEvent.details.teacher_name && (
+                    <div>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold block">Teacher Name</span>
+                      <span className="font-medium text-slate-900 dark:text-white">{selectedEvent.details.teacher_name}</span>
+                    </div>
+                  )}
+                  {selectedEvent.details.document_type && (
+                    <div>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold block">Document Type</span>
+                      <span className="inline-block px-1.5 py-0.5 rounded text-xs font-mono font-bold bg-white dark:bg-zinc-800 border">
+                        {selectedEvent.details.document_type}
+                      </span>
+                    </div>
+                  )}
+                  {selectedEvent.details.document_id && (
+                    <div>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold block">Document ID</span>
+                      <span className="font-mono text-zinc-800 dark:text-zinc-200 select-all">{selectedEvent.details.document_id}</span>
+                    </div>
+                  )}
+                  {(selectedEvent.details.deleted_at || selectedEvent.details.archived_at) && (
+                    <div>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold block">Exact Deletion/Archival Time</span>
+                      <span className="font-medium text-slate-900 dark:text-white">
+                        {formatToManilaTime(selectedEvent.details.deleted_at || selectedEvent.details.archived_at)}
+                      </span>
+                      <span className="text-[10px] text-zinc-400 font-mono block">
+                        {selectedEvent.details.deleted_at || selectedEvent.details.archived_at}
+                      </span>
+                    </div>
+                  )}
+                  {(selectedEvent.details.school_year || selectedEvent.details.section) && (
+                    <div className="sm:col-span-2">
+                      <span className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold block">Academic Scope (School Year & Section)</span>
+                      <span className="font-medium text-slate-900 dark:text-white">
+                        SY {selectedEvent.details.school_year || "N/A"} • Section: {selectedEvent.details.section || "N/A"}{selectedEvent.details.grade_level ? ` (${selectedEvent.details.grade_level})` : ""}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

@@ -43,7 +43,7 @@ export default function DocumentTable({
       <div className="text-center p-8 border border-dashed border-slate-300 rounded-xl bg-slate-50/50">
         <FileText className="h-8 w-8 text-slate-400 mx-auto mb-2" />
         <p className="text-sm font-semibold text-slate-700">No documents found</p>
-        <p className="text-xs text-slate-400 mt-1">Upload an SF9 or SF10 form to begin verification.</p>
+        <p className="text-xs text-slate-400 mt-1">Upload a student form, section roster, or civil registry document to begin verification.</p>
       </div>
     );
   }
@@ -66,9 +66,54 @@ export default function DocumentTable({
           </TableHeader>
           <TableBody>
             {documents.map((doc) => {
-              const fields = doc.extracted_fields as ExtractedFields;
-              const studentName = fields?.name || "-";
-              const docType = (doc.document_type || "Unknown").replace(/_/g, " ").toUpperCase();
+              const fields = (doc.extracted_fields || {}) as Record<string, any>;
+              const rawType = String(doc.document_type || "").toLowerCase().trim();
+              const isRoster = ["sf1", "sf2", "sf5"].includes(rawType);
+              const isPsa = rawType === "birth_cert" || rawType === "psa";
+
+              // 1. Resolve student name cleanly across all supported document types
+              let studentName = fields?.name || null;
+              if (isPsa) {
+                const idObj = fields?.identity;
+                const psaRec = doc.psa_record;
+                const last = psaRec?.last_name || idObj?.last_name || fields?.last_name;
+                const first = psaRec?.first_name || idObj?.first_name || fields?.first_name;
+                const middle = psaRec?.middle_name || idObj?.middle_name || fields?.middle_name;
+                if (last && first) {
+                  studentName = `${last}, ${first}${middle ? ` ${middle}` : ""}`;
+                } else if (first || last) {
+                  studentName = String(first || last);
+                } else if (fields?.child_name) {
+                  studentName = String(fields.child_name);
+                } else {
+                  studentName = "PSA Child Identity Record";
+                }
+              } else if (isRoster) {
+                studentName = `Section Roster: ${doc.section || fields?.section || "Unassigned"} (${doc.grade_level || "SHS"})`;
+              } else if (!studentName) {
+                if (fields?.first_name || fields?.last_name) {
+                  studentName = `${fields.last_name || ""}, ${fields.first_name || ""}`.trim().replace(/^,\s*|,\s*$/g, "");
+                } else if (doc.students && typeof doc.students === "object") {
+                  studentName = `${doc.students.last_name || ""}, ${doc.students.first_name || ""}`.trim().replace(/^,\s*|,\s*$/g, "");
+                }
+              }
+              studentName = studentName || "-";
+
+              // 2. Resolve document type badge label
+              let docType = (doc.document_type || "Unknown").replace(/_/g, " ").toUpperCase();
+              if (isPsa) {
+                docType = "PSA BIRTH CERTIFICATE";
+              } else if (rawType === "sf5") {
+                docType = fields?.form_variant ? String(fields.form_variant).toUpperCase() : "SF5-SHS";
+              } else if (rawType === "sf1") {
+                docType = "SF1-SHS";
+              } else if (rawType === "sf2") {
+                docType = "SF2-SHS";
+              } else if (rawType === "sf9") {
+                docType = "SF9-SHS";
+              } else if (rawType === "sf10") {
+                docType = "SF10-SHS";
+              }
 
               return (
                 <TableRow 

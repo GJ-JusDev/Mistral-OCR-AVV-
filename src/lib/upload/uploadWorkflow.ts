@@ -1,6 +1,6 @@
 import type { ExtractedFields } from "@/types/documents";
 
-export type UploadDocCategory = "sf9" | "sf10";
+export type UploadDocCategory = "sf1" | "sf2" | "sf5" | "sf9" | "sf10" | "birth_cert";
 export type UploadWorkflowType = "two_sided" | "single";
 export type ShsGradeLevel = "Grade 11" | "Grade 12";
 export type AcademicGradeLevel = ShsGradeLevel;
@@ -20,9 +20,16 @@ export function isAcademicGradeLevel(value: unknown): value is AcademicGradeLeve
 /**
  * Returns true when the academic grade-level selector (Grade 11 / Grade 12)
  * should be displayed in the Upload Document header.
+ * SF1, SF2, SF5, SF9, and SF10 are all grade-level specific in SHS.
  */
 export function shouldShowGradeLevelSelector(docCategory: UploadDocCategory): boolean {
-  return docCategory === "sf9" || docCategory === "sf10";
+  return (
+    docCategory === "sf1" ||
+    docCategory === "sf2" ||
+    docCategory === "sf5" ||
+    docCategory === "sf9" ||
+    docCategory === "sf10"
+  );
 }
 
 export function getGradeLevelShortLabel(gradeLevel: string): string {
@@ -55,7 +62,7 @@ export interface UploadSessionSnapshot<TOcrResult = unknown> {
 }
 
 /**
- * Pure state transition when switching between SF9 and SF10.
+ * Pure state transition when switching between document categories.
  * - Clicking the already-active category is a no-op.
  * - Switching categories preserves `gradeLevel` (academic selection) while clearing
  *   incompatible previews, captured sides, preview rotation, and stale OCR output.
@@ -90,8 +97,8 @@ export type ResolvedOcrRequest =
       kind: "single";
       image: string;
       extractFields: true;
-      gradeLevel: AcademicGradeLevel;
-      documentType: "sf10";
+      gradeLevel: AcademicGradeLevel | string;
+      documentType: "sf1" | "sf2" | "sf5" | "sf10" | "birth_cert";
     }
   | {
       kind: "two_sided";
@@ -103,10 +110,7 @@ export type ResolvedOcrRequest =
     };
 
 /**
- * Resolves the exact OCR request arguments for the active upload workflow,
- * ensuring SF10 forwards both the selected `gradeLevel` and `documentType: "sf10"`,
- * and SF9 forwards two-sided captures with `documentType: "sf9"`.
- * Active workflows strictly support SF9 and SF10 only.
+ * Resolves the exact OCR request arguments for the active upload workflow.
  */
 export function resolveOcrExtractionRequest(params: {
   docCategory: UploadDocCategory | string;
@@ -127,19 +131,16 @@ export function resolveOcrExtractionRequest(params: {
     psaImage,
   } = params;
 
-  // Active OCR extraction rejects unsupported PSA/birth_cert categories
-  if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
-    if (psaImage) {
-      // Legacy backward-compatibility shim for historical test suites only
-      return {
-        kind: "single",
-        image: psaImage,
-        extractFields: true,
-        gradeLevel: "PSA",
-        documentType: "birth_cert",
-      } as unknown as ResolvedOcrRequest;
-    }
-    return null;
+  if (docCategory === "birth_cert" || (docCategory as string) === "psa") {
+    const effectivePsaImage = psaImage || singleImage;
+    if (!effectivePsaImage) return null;
+    return {
+      kind: "single",
+      image: effectivePsaImage,
+      extractFields: true,
+      gradeLevel: "PSA",
+      documentType: "birth_cert",
+    };
   }
 
   if (workflowType === "two_sided") {
@@ -154,13 +155,17 @@ export function resolveOcrExtractionRequest(params: {
     };
   }
 
-  if (!singleImage) return null;
+  const effectiveImage = singleImage;
+  if (!effectiveImage) return null;
+
+  const validDocType = docCategory as "sf1" | "sf2" | "sf5" | "sf10";
+
   return {
     kind: "single",
-    image: singleImage,
+    image: effectiveImage,
     extractFields: true,
     gradeLevel: gradeLevel as AcademicGradeLevel,
-    documentType: "sf10",
+    documentType: validDocType,
   };
 }
 
@@ -179,7 +184,7 @@ export interface BuildDocumentSubmissionParams {
 }
 
 export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionParams): {
-  docType: "sf9" | "sf10" | "birth_cert";
+  docType: UploadDocCategory;
   combinedFields: ExtractedFields;
   requestBody: Record<string, unknown>;
 } {
@@ -195,21 +200,10 @@ export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionPa
     originalFilename,
   } = params;
 
-  if ((docCategory as string) === "birth_cert" || (docCategory as string) === "psa") {
-    if (
-      gradeLevel === "Grade 11" ||
-      gradeLevel === "Grade 12" ||
-      !ocrFields ||
-      (ocrFields as any).selected_grade_level === undefined
-    ) {
-      throw new Error(
-        "Unsupported document category: PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."
-      );
-    }
-
+  if (docCategory === "birth_cert" || (docCategory as string) === "psa") {
     const combinedFields: ExtractedFields = {
       ...ocrFields,
-      document_type: "birth_cert" as any,
+      document_type: "birth_cert",
       grades: [],
     };
     delete (combinedFields as any).selected_grade_level;
@@ -231,11 +225,7 @@ export function buildDocumentSubmissionPayload(params: BuildDocumentSubmissionPa
     return { docType: "birth_cert", combinedFields, requestBody };
   }
 
-  const docType: "sf9" | "sf10" =
-    docCategory === "sf10" || ocrFields?.document_type?.toLowerCase() === "sf10"
-      ? "sf10"
-      : "sf9";
-
+  const docType: UploadDocCategory = docCategory;
   const sanitizedBaseFields: ExtractedFields = { ...ocrFields };
   const academicScheme =
     sanitizedBaseFields.grading_period_scheme || "quarterly_semestral";
@@ -293,6 +283,50 @@ export function getUploadUiCopy(params: {
 } {
   const { docCategory, workflowType, currentStep, gradeLevel } = params;
   const shortLevel = getGradeLevelShortLabel(gradeLevel);
+
+  if (docCategory === "sf1") {
+    return {
+      captureHeading: `Capture SHS SF1 School Register (${shortLevel})`,
+      previewHeading: `SF1 School Register Preview — ${gradeLevel}`,
+      emptyHeading: `Capture or upload an SHS SF1 (${shortLevel}) Roster`,
+      emptyDescription:
+        "Ensure school header, Track, Strand, Semester, and learner enrollment table columns (LRN, names, sex, DOB) are clearly visible.",
+      modalSummaryLabel: `SHS SF1 School Register (${gradeLevel})`,
+    };
+  }
+
+  if (docCategory === "sf2") {
+    return {
+      captureHeading: `Capture SHS SF2 Daily Attendance (${shortLevel})`,
+      previewHeading: `SF2 Daily Attendance Report Preview — ${gradeLevel}`,
+      emptyHeading: `Capture or upload an SHS SF2 (${shortLevel}) Monthly Sheet`,
+      emptyDescription:
+        "Ensure reporting month, learner names, 31-day attendance marks, and monthly summary columns are clearly visible.",
+      modalSummaryLabel: `SHS SF2 Attendance Report (${gradeLevel})`,
+    };
+  }
+
+  if (docCategory === "sf5") {
+    return {
+      captureHeading: `Capture SHS SF5 Promotion Report (${shortLevel})`,
+      previewHeading: `SF5 Promotion & Proficiency Preview — ${gradeLevel}`,
+      emptyHeading: `Capture or upload an SHS SF5A/SF5B (${shortLevel}) Form`,
+      emptyDescription:
+        "Ensure learner promotion action (Complete/Incomplete/Graduating), general averages, and deficient subjects are clearly legible.",
+      modalSummaryLabel: `SHS SF5 Promotion Report (${gradeLevel})`,
+    };
+  }
+
+  if (docCategory === "birth_cert") {
+    return {
+      captureHeading: "Capture PSA Certificate of Live Birth",
+      previewHeading: "PSA Birth Certificate Preview (Supporting Identity Document)",
+      emptyHeading: "Capture or upload a PSA Birth Certificate",
+      emptyDescription:
+        "Ensure civil registry number, child name, date of birth, sex, and parent names are clearly visible. Stored privately with short-lived signed URLs.",
+      modalSummaryLabel: "PSA Birth Certificate (Civil Identity Evidence)",
+    };
+  }
 
   if (docCategory === "sf10") {
     const levelInstruction =

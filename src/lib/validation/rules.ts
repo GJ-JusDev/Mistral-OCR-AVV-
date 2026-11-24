@@ -27,16 +27,13 @@ export const VALIDATION_RULES: ValidationRule[] = [
     field: "document_type",
     message: (_v, ctx) => {
       const docType = String(ctx?.allFields?.document_type || "").toLowerCase().trim();
-      if (docType === "birth_cert" || docType === "psa" || docType === "psa_birth_certificate") {
-        return "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.";
-      }
-      return `Unsupported document type: '${docType}'. Only SF9 and SF10 are supported.`;
+      return `Unsupported document type: '${docType}'. Supported Senior High School document types: SF1, SF2, SF5, SF9, SF10, and PSA Birth Certificate.`;
     },
     severity: "error",
     check: (_v, ctx) => {
       const docType = String(ctx?.allFields?.document_type || "").toLowerCase().trim();
       if (!docType) return true;
-      return docType === "sf9" || docType === "sf10";
+      return ["sf1", "sf2", "sf5", "sf9", "sf10", "birth_cert", "psa"].includes(docType);
     },
   },
 

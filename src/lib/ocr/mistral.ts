@@ -308,21 +308,11 @@ export async function handleOcrRoute(
     const { image, frontImage, backImage, images, extractFields, gradeLevel, documentSide, documentType, docType } = body || {};
     const effectiveDocType = (documentType || docType || "").toLowerCase().trim();
 
-    if (effectiveDocType === "birth_cert" || effectiveDocType === "psa" || gradeLevel === "PSA") {
-      return Response.json(
-        {
-          error: "PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document.",
-          code: "DOCUMENT_TYPE_NOT_SUPPORTED",
-        },
-        { status: 400 }
-      );
-    }
-
-    const validOcrDocTypes = ["sf9", "sf10"];
+    const validOcrDocTypes = ["sf1", "sf2", "sf5", "sf9", "sf10", "birth_cert", "psa"];
     if (effectiveDocType && !validOcrDocTypes.includes(effectiveDocType)) {
       return Response.json(
         {
-          error: `Unsupported document type: '${effectiveDocType}'. The active AVV scope supports only SF9 and SF10.`,
+          error: `Unsupported document type: '${effectiveDocType}'. The active AVV Senior High School scope supports SF1, SF2, SF5, SF9, SF10, and PSA Birth Certificate.`,
           code: "DOCUMENT_TYPE_NOT_SUPPORTED",
         },
         { status: 400 }
@@ -453,6 +443,9 @@ export async function handleOcrRoute(
             attendance_risk_status: backFields?.attendance_risk_status || frontFields?.attendance_risk_status,
             attendance_discrepancy_details: backFields?.attendance_discrepancy_details || frontFields?.attendance_discrepancy_details,
             general_average: backFields?.general_average ?? frontFields?.general_average,
+            observed_values: backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values,
+            learner_progress_achievement: backFields?.learner_progress_achievement || frontFields?.learner_progress_achievement || crossSideCheck.mergedFields.learner_progress_achievement,
+            grading_scale: backFields?.grading_scale || frontFields?.grading_scale || crossSideCheck.mergedFields.grading_scale,
             ocr_provider: frontResult.provider || "azure",
             ocr_model: `${frontResult.model}+${backResult.model.replace(/^azure\//, "")}`,
           };
@@ -575,6 +568,9 @@ export async function handleOcrRoute(
           attendance_risk_status: backFields?.attendance_risk_status || frontFields?.attendance_risk_status,
           attendance_discrepancy_details: backFields?.attendance_discrepancy_details || frontFields?.attendance_discrepancy_details,
           general_average: backFields?.general_average ?? frontFields?.general_average,
+          observed_values: backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values,
+          learner_progress_achievement: backFields?.learner_progress_achievement || frontFields?.learner_progress_achievement || crossSideCheck.mergedFields.learner_progress_achievement,
+          grading_scale: backFields?.grading_scale || frontFields?.grading_scale || crossSideCheck.mergedFields.grading_scale,
           ocr_provider: "mistral",
           ocr_model: "mistral-ocr-latest",
         };

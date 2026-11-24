@@ -108,7 +108,7 @@ export default async function DashboardPage({
 
   const VALIDATION_STATUSES = ["validated", "needs_review", "corrected", "approved", "rejected"];
 
-  // Fetch stats for the logged-in teacher
+  // Fetch stats for the logged-in user under database Row Level Security (RLS)
   const [
     { count: totalValidations },
     { count: matched },
@@ -116,16 +116,12 @@ export default async function DashboardPage({
     { count: mismatched }
   ] = await Promise.all([
     supabase.from("documents").select("*", { count: "exact", head: true })
-      .eq("uploaded_by", user.id)
       .in("status", VALIDATION_STATUSES),
     supabase.from("documents").select("*", { count: "exact", head: true })
-      .eq("uploaded_by", user.id)
       .in("status", ["validated", "approved"]),
     supabase.from("documents").select("*", { count: "exact", head: true })
-      .eq("uploaded_by", user.id)
       .in("status", ["needs_review", "corrected"]),
     supabase.from("documents").select("*", { count: "exact", head: true })
-      .eq("uploaded_by", user.id)
       .eq("status", "rejected")
   ]);
 
@@ -138,11 +134,10 @@ export default async function DashboardPage({
   const startDate = startOfDay(last7Days[0].date).toISOString();
   const endDate = endOfDay(last7Days[6].date).toISOString();
 
-  // Fetch activity for last 7 days
+  // Fetch activity for last 7 days within authorized RLS scope
   const { data: recentActivity } = await supabase
     .from("documents")
     .select("created_at")
-    .eq("uploaded_by", user.id)
     .in("status", VALIDATION_STATUSES)
     .gte("created_at", startDate)
     .lte("created_at", endDate);
@@ -157,16 +152,15 @@ export default async function DashboardPage({
     return { date: day.label, count };
   });
 
-  // Recent Validations (Top 5)
+  // Recent Validations within authorized RLS scope (Top 5)
   const { data: recentValidations } = await supabase
     .from("documents")
     .select("id, status, created_at, document_type, extracted_fields")
-    .eq("uploaded_by", user.id)
     .in("status", VALIDATION_STATUSES)
     .order("created_at", { ascending: false })
     .limit(5);
 
-  // Needs Attention (Top 3)
+  // Needs Attention within authorized RLS scope (Top 3)
   const { data: attentionDocsRaw } = await supabase
     .from("documents")
     .select(`
@@ -176,7 +170,6 @@ export default async function DashboardPage({
       document_type, 
       extracted_fields
     `)
-    .eq("uploaded_by", user.id)
     .in("status", ["needs_review", "corrected"])
     .order("created_at", { ascending: false })
     .limit(3);

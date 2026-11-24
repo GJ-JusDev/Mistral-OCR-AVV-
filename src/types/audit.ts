@@ -50,6 +50,7 @@ export type AuditAction =
   | "DOCUMENT_UPLOADED"
   | "DOCUMENT_REPLACED"
   | "DOCUMENT_DELETED"
+  | "DOCUMENT_ARCHIVED"
   | "DOCUMENT_CLASSIFICATION_FAILED"
   | "REVIEW_QUEUE_DOCUMENT_DELETED"
   // Deletion Request & Archival Operations

@@ -199,6 +199,9 @@ export function mergeSf9FrontAndBack(
     absence_percentage: absencePercentage,
     attendance_risk_status: attendanceRiskStatus,
     general_average: generalAverage,
+    observed_values: back.observed_values || front.observed_values,
+    learner_progress_achievement: back.learner_progress_achievement || front.learner_progress_achievement,
+    grading_scale: back.grading_scale || front.grading_scale || back.learner_progress_achievement || front.learner_progress_achievement,
     ocr_provider: front.ocr_provider || back.ocr_provider || "azure",
     ocr_model: [front.ocr_model, back.ocr_model].filter(Boolean).join(" + ") || "azure-layout",
   };

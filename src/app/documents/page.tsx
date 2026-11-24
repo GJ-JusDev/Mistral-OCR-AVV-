@@ -44,11 +44,102 @@ export default function DocumentsPage() {
     return documents.filter((doc) => {
       if (doc.status === "archived") return false;
       const q = searchQuery.toLowerCase().trim();
-      const name = ((doc.extracted_fields as any)?.name || "").toLowerCase();
-      const type = (doc.document_type || "").toLowerCase();
-      const matchesSearch = !q || name.includes(q) || doc.id.toLowerCase().includes(q);
-      const matchesType = typeFilter === "all" || type === typeFilter;
-      return matchesSearch && matchesType;
+      const docType = String(doc.document_type || "").toLowerCase().trim();
+      const ef = (doc.extracted_fields || {}) as Record<string, any>;
+      const formVariant = String(ef.form_variant || doc.form_variant || "").toUpperCase();
+
+      let matchesType = false;
+      if (typeFilter === "all") {
+        matchesType = true;
+      } else if (typeFilter === "sf1") {
+        matchesType = docType === "sf1";
+      } else if (typeFilter === "sf2") {
+        matchesType = docType === "sf2";
+      } else if (typeFilter === "sf5a") {
+        matchesType = docType === "sf5a" || (docType === "sf5" && (formVariant.includes("SF5A") || !formVariant.includes("SF5B")));
+      } else if (typeFilter === "sf5b") {
+        matchesType = docType === "sf5b" || (docType === "sf5" && formVariant.includes("SF5B"));
+      } else if (typeFilter === "sf9") {
+        matchesType = docType === "sf9";
+      } else if (typeFilter === "sf10") {
+        matchesType = docType === "sf10";
+      } else if (typeFilter === "birth_cert") {
+        matchesType = docType === "birth_cert" || docType === "psa";
+      }
+
+      if (!matchesType) return false;
+      if (!q) return true;
+
+      // Check document top-level attributes
+      if (
+        (doc.id && String(doc.id).toLowerCase().includes(q)) ||
+        (doc.original_filename && String(doc.original_filename).toLowerCase().includes(q)) ||
+        (doc.section && String(doc.section).toLowerCase().includes(q)) ||
+        (doc.grade_level && String(doc.grade_level).toLowerCase().includes(q)) ||
+        (doc.school_year && String(doc.school_year).toLowerCase().includes(q)) ||
+        (doc.document_type && String(doc.document_type).toLowerCase().includes(q)) ||
+        (formVariant && formVariant.toLowerCase().includes(q))
+      ) {
+        return true;
+      }
+
+      // Check extracted fields (learner name, LRN, section, grade)
+      if (
+        (ef.name && String(ef.name).toLowerCase().includes(q)) ||
+        (ef.first_name && String(ef.first_name).toLowerCase().includes(q)) ||
+        (ef.last_name && String(ef.last_name).toLowerCase().includes(q)) ||
+        (ef.lrn && String(ef.lrn).toLowerCase().includes(q)) ||
+        (ef.learner_reference_number && String(ef.learner_reference_number).toLowerCase().includes(q)) ||
+        (ef.section && String(ef.section).toLowerCase().includes(q)) ||
+        (ef.grade_level && String(ef.grade_level).toLowerCase().includes(q)) ||
+        (ef.school_year && String(ef.school_year).toLowerCase().includes(q)) ||
+        (ef.child_name && String(ef.child_name).toLowerCase().includes(q))
+      ) {
+        return true;
+      }
+
+      // Check PSA identity fields (child name, registry number, parents)
+      if (ef.identity && typeof ef.identity === "object") {
+        const idObj = ef.identity;
+        if (
+          (idObj.first_name && String(idObj.first_name).toLowerCase().includes(q)) ||
+          (idObj.last_name && String(idObj.last_name).toLowerCase().includes(q)) ||
+          (idObj.middle_name && String(idObj.middle_name).toLowerCase().includes(q)) ||
+          (idObj.registry_number && String(idObj.registry_number).toLowerCase().includes(q)) ||
+          (idObj.mother_maiden_name && String(idObj.mother_maiden_name).toLowerCase().includes(q)) ||
+          (idObj.father_name && String(idObj.father_name).toLowerCase().includes(q))
+        ) {
+          return true;
+        }
+      }
+
+      // Check linked student object if populated
+      if (doc.students && typeof doc.students === "object") {
+        const st = doc.students;
+        if (
+          (st.lrn && String(st.lrn).toLowerCase().includes(q)) ||
+          (st.first_name && String(st.first_name).toLowerCase().includes(q)) ||
+          (st.last_name && String(st.last_name).toLowerCase().includes(q))
+        ) {
+          return true;
+        }
+      }
+
+      // Check roster learners / attendance entries (SF1, SF2, SF5A, SF5B)
+      const rosterLists = [ef.learners, ef.attendance, doc.roster_entries];
+      for (const list of rosterLists) {
+        if (Array.isArray(list)) {
+          const found = list.some((item) => {
+            if (!item || typeof item !== "object") return false;
+            const lName = (item.learner_name || `${item.last_name || ""} ${item.first_name || ""}`).toLowerCase();
+            const lLrn = String(item.lrn || "").toLowerCase();
+            return lName.includes(q) || lLrn.includes(q);
+          });
+          if (found) return true;
+        }
+      }
+
+      return false;
     });
   }, [documents, searchQuery, typeFilter]);
 
@@ -60,7 +151,7 @@ export default function DocumentsPage() {
     <PageContainer>
       <Header 
         title="Document Registry" 
-        description="Comprehensive repository of scanned and extracted SF9 and SF10 records."
+        description="Comprehensive repository of scanned and verified SHS academic records, section rosters, and civil identity documents."
         roleBadge={{ role: "teacher", label: "Faculty Validator" }}
         schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
@@ -98,7 +189,7 @@ export default function DocumentsPage() {
           description="Click any row to open the complete extraction card and validation report."
           searchValue={searchQuery}
           onSearchChange={setSearchQuery}
-          searchPlaceholder="Search by student name or document ID..."
+          searchPlaceholder="Search by student name, LRN, section, grade, document ID, or type..."
           itemCount={filteredDocuments.length}
           totalCount={documents.length}
           filters={
@@ -109,8 +200,13 @@ export default function DocumentsPage() {
               className="px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:bg-white"
             >
               <option value="all">All Document Types</option>
-              <option value="sf9">SF9 Progress Report</option>
-              <option value="sf10">SF10 Permanent Record</option>
+              <option value="sf1">SF1-SHS School Register</option>
+              <option value="sf2">SF2-SHS Daily Attendance</option>
+              <option value="sf5a">SF5A-SHS End of Semester Status</option>
+              <option value="sf5b">SF5B-SHS Graduation Candidates</option>
+              <option value="sf9">SF9-SHS Progress Report</option>
+              <option value="sf10">SF10-SHS Permanent Record</option>
+              <option value="birth_cert">PSA Birth Certificate</option>
             </select>
           }
         >

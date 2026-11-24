@@ -1,4 +1,9 @@
-import { computeSemesterFinalGrade, getAuthoritativeSemesterFinalGrade } from "./gradeUtils";
+import {
+  computeSemesterFinalGrade,
+  computeRawSemesterFinalGrade,
+  computeOfficialSemesterFinalGrade,
+  getAuthoritativeSemesterFinalGrade,
+} from "./gradeUtils";
 import type { GradeRecord } from "@/types/documents";
 
 export interface GradeQuarterDiff {
@@ -248,8 +253,11 @@ export function compareScannedGradesWithExisting(params: {
     const effectiveQ4 = scanQ4 ?? exQ4;
 
     const computedFinal = scanSem === "1st Semester"
-      ? computeSemesterFinalGrade(effectiveQ1, effectiveQ2)
-      : computeSemesterFinalGrade(effectiveQ3, effectiveQ4);
+      ? computeRawSemesterFinalGrade(effectiveQ1, effectiveQ2)
+      : computeRawSemesterFinalGrade(effectiveQ3, effectiveQ4);
+    const displayedFinal = scanSem === "1st Semester"
+      ? computeOfficialSemesterFinalGrade(effectiveQ1, effectiveQ2)
+      : computeOfficialSemesterFinalGrade(effectiveQ3, effectiveQ4);
 
     const proposedFinal = computedFinal ?? scanFinal ?? exFinal;
     const proposedStatus = (proposedFinal !== undefined && proposedFinal !== null)

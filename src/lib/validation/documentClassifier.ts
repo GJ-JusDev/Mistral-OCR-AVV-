@@ -14,7 +14,7 @@
 
 import type { ExtractedFields, GradeRecord } from "@/types/documents";
 
-export type DetectedDocumentType = "sf9" | "sf10" | "birth_cert" | "unrelated_document" | "unreadable";
+export type DetectedDocumentType = "sf1" | "sf2" | "sf5" | "sf9" | "sf10" | "birth_cert" | "unrelated_document" | "unreadable";
 
 export interface DocumentClassificationResult {
   detectedType: DetectedDocumentType;
@@ -43,6 +43,49 @@ const DEPED_HEADER_KEYWORDS = [
   "division of",
   "region",
   "taysan resettlement",
+];
+
+const SF1_SPECIFIC_KEYWORDS = [
+  "sf1",
+  "sf-1",
+  "school form 1",
+  "school register",
+  "master list",
+  "registered learners",
+  "mother tongue",
+  "ip community",
+  "guardian",
+  "remarks indicator",
+];
+
+const SF2_SPECIFIC_KEYWORDS = [
+  "sf2",
+  "sf-2",
+  "school form 2",
+  "daily attendance report",
+  "daily attendance",
+  "for the month of",
+  "total school days",
+  "average daily attendance",
+  "percentage of attendance",
+];
+
+const SF5_SPECIFIC_KEYWORDS = [
+  "sf5",
+  "sf-5",
+  "sf5a",
+  "sf-5a",
+  "sf5b",
+  "sf-5b",
+  "school form 5",
+  "report on promotion",
+  "end of semester",
+  "learner status",
+  "candidates for complete",
+  "level of proficiency",
+  "did not meet expectations",
+  "fairly satisfactory",
+  "action taken",
 ];
 
 const SF9_SPECIFIC_KEYWORDS = [
@@ -123,7 +166,7 @@ const ACADEMIC_SUBJECT_KEYWORDS = [
 export function classifyDocument(
   text: string,
   rawLayout?: any,
-  expectedType?: "sf9" | "sf10"
+  expectedType?: "sf1" | "sf2" | "sf5" | "sf9" | "sf10" | "birth_cert" | string
 ): DocumentClassificationResult {
   const lower = (text || "").toLowerCase().trim();
   const reasons: string[] = [];
@@ -147,6 +190,9 @@ export function classifyDocument(
 
   // 2. Score keyword matches
   const depedHeaderMatches = DEPED_HEADER_KEYWORDS.filter((kw) => lower.includes(kw));
+  const sf1Matches = SF1_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
+  const sf2Matches = SF2_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
+  const sf5Matches = SF5_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
   const sf9Matches = SF9_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
   const sf10Matches = SF10_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
   const psaMatches = PSA_SPECIFIC_KEYWORDS.filter((kw) => lower.includes(kw));
@@ -163,7 +209,14 @@ export function classifyDocument(
     lower.includes("days absent");
 
   // 3. Detect Unrelated Documents (e.g. personal photograph, scenic photo, receipt, personal ID)
-  const isDepEdRelated = depedHeaderMatches.length > 0 || hasLrn || sf9Matches.length > 0 || sf10Matches.length > 0;
+  const isDepEdRelated =
+    depedHeaderMatches.length > 0 ||
+    hasLrn ||
+    sf1Matches.length > 0 ||
+    sf2Matches.length > 0 ||
+    sf5Matches.length > 0 ||
+    sf9Matches.length > 0 ||
+    sf10Matches.length > 0;
   const isPsaRelated = psaMatches.length >= 2;
 
   if (!isDepEdRelated && !isPsaRelated && !hasAcademicTable) {
@@ -184,28 +237,41 @@ export function classifyDocument(
     };
   }
 
-  // 4. Distinguish PSA Birth Certificate (Explicitly rejected in AVV System)
+  // 4. Distinguish PSA Birth Certificate (Supported as Civil Identity Verification)
   if (isPsaRelated && psaMatches.length >= 2 && !hasAcademicTable) {
+    const isExpected = !expectedType || expectedType === "birth_cert";
     return {
       detectedType: "birth_cert",
       expectedType,
-      isPlausible: false,
-      confidence: 0.9,
-      reasons: ["PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."],
-      warnings: ["PSA Birth Certificates are not supported. Please upload an SF9 or SF10 document."],
-      needsTeacherReview: true,
+      isPlausible: isExpected,
+      confidence: 0.95,
+      reasons: ["Detected PSA Certificate of Live Birth supporting identity document."],
+      warnings: isExpected ? [] : [`Slot expected ${expectedType.toUpperCase()}, but content is a PSA Birth Certificate.`],
+      needsTeacherReview: false,
       hasAcademicGrades: false,
       hasLearnerIdentity: hasLrn || lower.includes("child") || lower.includes("name"),
       hasAttendance: false,
     };
   }
 
-  // 5. Distinguish SF10 vs SF9
+  // 5. Distinguish Document Types: SF1, SF2, SF5, SF10, SF9
   let detectedType: DetectedDocumentType = "sf9";
   let confidence = 0.75;
   let pageSideHint: "front" | "back" | "multi_page" | "unknown" = "unknown";
 
-  if (sf10Matches.length > sf9Matches.length || (lower.includes("permanent record") && !lower.includes("progress report card"))) {
+  if (sf1Matches.length >= 2 || (lower.includes("school register") && !lower.includes("progress report card"))) {
+    detectedType = "sf1";
+    confidence = 0.92;
+    reasons.push(`Detected SF1 School Register markers (${sf1Matches.join(", ")}).`);
+  } else if (sf2Matches.length >= 2 || (lower.includes("daily attendance report") && !lower.includes("progress report card"))) {
+    detectedType = "sf2";
+    confidence = 0.92;
+    reasons.push(`Detected SF2 Daily Attendance Report markers (${sf2Matches.join(", ")}).`);
+  } else if (sf5Matches.length >= 2 || lower.includes("report on promotion") || lower.includes("sf5a") || lower.includes("sf5b")) {
+    detectedType = "sf5";
+    confidence = 0.92;
+    reasons.push(`Detected SF5 Promotion Report markers (${sf5Matches.join(", ")}).`);
+  } else if (sf10Matches.length > sf9Matches.length || (lower.includes("permanent record") && !lower.includes("progress report card"))) {
     detectedType = "sf10";
     confidence = sf10Matches.length >= 2 ? 0.92 : 0.78;
     reasons.push(`Detected SF10 Student Permanent Record markers (${sf10Matches.join(", ")}).`);

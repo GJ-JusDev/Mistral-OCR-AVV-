@@ -17,7 +17,8 @@ import {
   X,
   UserCheck,
   ShieldCheck,
-  School
+  School,
+  ArrowLeftRight
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
 
@@ -25,6 +26,7 @@ const teacherNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Upload Document", href: "/upload", icon: Upload },
   { name: "Documents", href: "/documents", icon: FileText },
+  { name: "Document Comparison", href: "/compare", icon: ArrowLeftRight },
   { name: "Review Queue", href: "/review", icon: CheckSquare },
   { name: "Students", href: "/students", icon: Users },
   { name: "Settings", href: "/settings", icon: Settings },
@@ -32,14 +34,15 @@ const teacherNavigation = [
 
 const adminNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
-  { name: "Upload Document", href: "/upload", icon: Upload },
   { name: "Documents", href: "/documents", icon: FileText },
+  { name: "Document Comparison", href: "/compare", icon: ArrowLeftRight },
   { name: "Review Queue", href: "/review", icon: CheckSquare },
   { name: "Students", href: "/students", icon: Users },
+  { name: "Institutional Reports", href: "/reports", icon: BarChart3 },
   { name: "User Management", href: "/admin/users", icon: UserCheck },
   { name: "Teacher Registry", href: "/admin/teacher-registry", icon: GraduationCap },
   { name: "Teacher Assignments", href: "/admin/teacher-assignments", icon: CheckSquare },
-  { name: "Audit Logs", href: "/admin/audit-logs", icon: ShieldCheck },
+  { name: "User Logs", href: "/admin/audit-logs", icon: ShieldCheck },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
 

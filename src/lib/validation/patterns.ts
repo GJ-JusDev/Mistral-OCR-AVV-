@@ -64,8 +64,9 @@ export function looksLikeDate(value: string): boolean {
 /**
  * Normalize sex value to single letter M or F.
  */
-export function normalizeSex(raw: string): "M" | "F" | "" {
-  const trimmed = raw.trim().toUpperCase();
+export function normalizeSex(raw: string | null | undefined): "M" | "F" | "" {
+  if (!raw) return "";
+  const trimmed = String(raw).trim().toUpperCase();
   if (trimmed === "M" || trimmed === "MALE") return "M";
   if (trimmed === "F" || trimmed === "FEMALE") return "F";
   return "";

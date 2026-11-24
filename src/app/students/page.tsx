@@ -25,6 +25,7 @@ import {
   Clock,
   FileText,
   GraduationCap,
+  ShieldCheck,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -412,6 +413,7 @@ export default function StudentsPage() {
                     <th className="px-4 py-3.5">Section</th>
                     <th className="px-4 py-3.5 text-center">Review Status</th>
                     <th className="px-4 py-3.5 text-center">Validation Status</th>
+                    <th className="px-4 py-3.5 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white dark:bg-zinc-900 divide-y divide-zinc-200 dark:divide-zinc-800">
@@ -426,20 +428,24 @@ export default function StudentsPage() {
                         {/* 1. Student / Learner Name */}
                         <td className="px-5 py-3.5">
                           <div className="flex flex-col">
-                            <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-sm">
-                              {student.latest_document_id ? (
+                            <div className="flex items-center gap-1.5">
+                              <Link
+                                href={`/students/${student.id}`}
+                                className="font-semibold text-zinc-900 dark:text-zinc-100 text-sm hover:text-blue-600 dark:hover:text-blue-400 hover:underline"
+                                title="View 360° student validation hub"
+                              >
+                                {student.full_name}
+                              </Link>
+                              {student.latest_document_id && (
                                 <Link
                                   href={`/documents/${student.latest_document_id}`}
-                                  className="hover:text-blue-600 dark:hover:text-blue-400 hover:underline flex items-center gap-1.5"
-                                  title="View verified document"
+                                  className="text-zinc-400 hover:text-blue-600 dark:hover:text-blue-400"
+                                  title="View verified scanned document"
                                 >
-                                  {student.full_name}
-                                  <FileText className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+                                  <FileText className="h-3.5 w-3.5 shrink-0" />
                                 </Link>
-                              ) : (
-                                student.full_name
                               )}
-                            </span>
+                            </div>
                             <span className="text-xs text-zinc-400 dark:text-zinc-500">
                               {student.school_name !== "-" ? student.school_name : "DepEd Learner Record"}
                             </span>
@@ -531,6 +537,18 @@ export default function StudentsPage() {
                               Needs Attention
                             </span>
                           )}
+                        </td>
+
+                        {/* 8. Actions: 360° Validation Hub */}
+                        <td className="px-4 py-3.5 whitespace-nowrap text-center">
+                          <Link
+                            href={`/students/${student.id}`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-800 transition-colors"
+                            title="Open 360° cross-document validation hub"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>360° Hub</span>
+                          </Link>
                         </td>
                       </tr>
                     );

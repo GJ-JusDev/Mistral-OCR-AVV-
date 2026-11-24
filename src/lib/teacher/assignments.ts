@@ -144,17 +144,14 @@ export function evaluateTeacherScanAuthorization(input: TeacherAuthorizationInpu
     };
   }
 
-  if (role === "admin") {
-    if (input.assignment && input.userSchoolId && input.assignment.school_id !== input.userSchoolId) {
-      return {
-        allowed: false,
-        statusCode: 403,
-        code: "SCHOOL_MISMATCH",
-        error: "Forbidden: Assignment belongs to a different school.",
-        effectiveRole: "unauthorized",
-      };
-    }
-    return { allowed: true, statusCode: 200, effectiveRole: "admin" };
+  if (role === "admin" || role === "administrator") {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: "ADMIN_CANNOT_UPLOAD",
+      error: "Forbidden: Administrator role is restricted to management and approval. Only authorized Teachers may scan or upload documents.",
+      effectiveRole: "admin",
+    };
   }
 
   if (role !== "teacher") {
@@ -215,6 +212,17 @@ export function evaluateTeacherScanAuthorization(input: TeacherAuthorizationInpu
       code: "CLASS_ADVISER_REQUIRED",
       error: "Forbidden: Only an officially assigned and active Class Adviser may scan SF9/SF10 documents or perform OCR extraction. Subject Teachers are not permitted to scan.",
       effectiveRole: assignment.assignment_type === "subject_teacher" ? "subject_teacher" : "unauthorized",
+    };
+  }
+
+  const normGrade = normalizeGradeLevelKey(assignment.grade_level);
+  if (normGrade !== "Grade 11" && normGrade !== "Grade 12") {
+    return {
+      allowed: false,
+      statusCode: 403,
+      code: "SHS_LEVEL_REQUIRED",
+      error: "Forbidden: Scanning and document upload are restricted to Senior High School (Grade 11 or Grade 12) advisory assignments.",
+      effectiveRole: "unauthorized",
     };
   }
 
