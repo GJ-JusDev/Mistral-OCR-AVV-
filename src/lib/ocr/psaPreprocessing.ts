@@ -31,6 +31,8 @@ export interface PsaCropRegion {
 }
 
 export interface PsaCropRegionsConfig {
+  /** Upper identity section (Header/Registry No. + Items 1 - 17: Child, Mother, Father) */
+  upperIdentitySection: PsaCropRegion;
   /** Child section (Items 1 - 5: Name, Sex, DOB, Place of Birth, Type/Order/Weight of Birth) */
   childSection: PsaCropRegion;
   /** Item 1 Name-only crop (First, Middle, Last Name boxes and labels) */
@@ -42,16 +44,24 @@ export interface PsaCropRegionsConfig {
  * These boundaries are proportional to image dimensions and accommodate variations in scanner margins.
  */
 export const DEFAULT_PSA_CROP_REGIONS: PsaCropRegionsConfig = {
-  // Items 1 - 5: Child Section (roughly top 12% to 36% of upright height)
+  // Upper identity section: Header/Registry No. + Items 1 - 17 (Child, Mother, Father)
+  // Cleanly frames Registry No. & Items 1-17, stopping right above Item 18 Marriage of Parents, excluding right-side OCRG code boxes
+  upperIdentitySection: {
+    top: 0.04,
+    bottom: 0.58,
+    left: 0.03,
+    right: 0.84,
+  },
+  // Items 1 - 5: Child Section (roughly top 10% to 36% of upright height)
   childSection: {
-    top: 0.12,
+    top: 0.10,
     bottom: 0.36,
     left: 0.02,
     right: 0.98,
   },
   // Item 1: Name-only (First Name, Middle Name, Last Name boxes and Item 1 header)
   childNameOnly: {
-    top: 0.11,
+    top: 0.10,
     bottom: 0.24,
     left: 0.02,
     right: 0.98,
@@ -127,6 +137,8 @@ export interface PsaPreprocessingResult {
   width?: number;
   height?: number;
   rotationApplied?: number;
+  /** Targeted crop covering Header + Items 1 - 17 (Child, Mother, Father) */
+  upperSectionDataUrl?: string;
   /** Targeted crop covering Items 1 - 5 (Child section: Name, Sex, DOB, Place of Birth) */
   childSectionDataUrl?: string;
   /** Targeted tighter crop covering Item 1 (Child Name only: First, Middle, Last) */
@@ -450,13 +462,18 @@ export async function preprocessPsaImage(
     const outQuality = options?.outputQuality ?? 0.95;
     const processedDataUrl = canvas.toDataURL(outFormat, outQuality);
 
-    // 7. Targeted Cropping (Child Section & Item 1 Name-only)
+    // 7. Targeted Cropping (Upper Identity Section, Child Section & Item 1 Name-only)
+    let upperSectionDataUrl: string | undefined;
     let childSectionDataUrl: string | undefined;
     let childNameDataUrl: string | undefined;
 
     const generateCrops = options?.generateCrops !== false;
     if (generateCrops) {
       const cropCfg: PsaCropRegionsConfig = {
+        upperIdentitySection: {
+          ...DEFAULT_PSA_CROP_REGIONS.upperIdentitySection,
+          ...(options?.cropRegions?.upperIdentitySection || {}),
+        },
         childSection: {
           ...DEFAULT_PSA_CROP_REGIONS.childSection,
           ...(options?.cropRegions?.childSection || {}),
@@ -487,6 +504,7 @@ export async function preprocessPsaImage(
         return cropCanvas.toDataURL(outFormat, outQuality);
       };
 
+      upperSectionDataUrl = generateCropDataUrl(cropCfg.upperIdentitySection);
       childSectionDataUrl = generateCropDataUrl(cropCfg.childSection);
       childNameDataUrl = generateCropDataUrl(cropCfg.childNameOnly);
     }
@@ -499,6 +517,7 @@ export async function preprocessPsaImage(
       width: targetW,
       height: targetH,
       rotationApplied: rotationToApply,
+      upperSectionDataUrl,
       childSectionDataUrl,
       childNameDataUrl,
     };

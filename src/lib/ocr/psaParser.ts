@@ -45,6 +45,7 @@ export interface PsaFieldStatusMap {
   sex: PsaFieldStatusItem;
   birth_place: PsaFieldStatusItem;
   mother_name: PsaFieldStatusItem;
+  mother_maiden_name?: PsaFieldStatusItem;
   father_name: PsaFieldStatusItem;
   registry_number: PsaFieldStatusItem;
 }
@@ -85,6 +86,8 @@ export interface PsaParseResult {
 }
 
 export interface PsaParseOptions {
+  /** OCR text extracted from targeted upper identity section crop (Items 1 - 17: Child, Mother, Father) */
+  upperSectionText?: string;
   /** OCR text extracted from targeted Child section crop (Items 1 - 5) */
   childSectionText?: string;
   /** OCR text extracted from targeted Item 1 Child Name crop */
@@ -106,12 +109,49 @@ export function toTitleCase(str: string): string {
  */
 export function cleanPersonNameString(raw: string): string {
   if (!raw) return "";
+  // Immediately reject/strip standalone parenthesized structural labels like (First), (Middla), (LAM), (Flrst)
+  if (/^\s*\([A-Za-z0-9\.\s]{1,15}\)\s*$/.test(raw)) return "";
+
   return raw
-    .replace(/\([^)]*(?:first|middle|last|pangalan|apelyido|name)[^)]*\)/gi, " ")
-    .replace(/\b(?:first|middle|last)\s*,?\s*(?:middle|last)?\s*,?\s*(?:last)?\b/gi, " ")
+    .replace(/^[:\s\-\.]+|[:\s\-\.]+$/g, "")
+    .replace(
+      /\([^)]*(?:first|flrst|firat|fist|middle|middla|middie|middl|mid|mlddle|last|lan|lam|lest|las|lat|laat|pangalan|apelyido|name)[^)]*\)/gi,
+      " "
+    )
+    .replace(
+      /\b(?:first|flrst|firat|fist|middle|middla|middie|middl|mid|mlddle|last|lan|lam|lest|las|lat|laat)\s*,?\s*(?:middle|last)?\s*,?\s*(?:last)?\b/gi,
+      " "
+    )
     .replace(/[|*_`()]+/g, " ")
+    .replace(/^(?:\(?)(?:last|lan|las|lam|lat|lest|laat|apelyido|surname)(?:\)?)\s+/i, "")
+    .replace(/^[:\s\-\.]+|[:\s\-\.]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Detects official PSA Form header/label noise (e.g. "Chy/Municipality", "City/Municipality", "Province",
+ * "Certificate of Live Birth", "Registry No") to prevent it from leaking into person names.
+ */
+export function isPsaHeaderNoise(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const lower = str.replace(/[|*_`()]+/g, "").trim().toLowerCase();
+  if (lower.length === 0) return true;
+  return (
+    lower.includes("republic") ||
+    lower.includes("civil registrar") ||
+    lower.includes("certificate of live birth") ||
+    lower.includes("birth certificate") ||
+    lower.includes("registry no") ||
+    lower.includes("form no") ||
+    /^(?:province|lalawigan)[:\s]*/i.test(lower) ||
+    /^(?:city\/municipality|chy\/municipality|lungsod\/bayan|municipality|city)[:\s]*/i.test(lower) ||
+    lower === "province" ||
+    lower === "city/municipality" ||
+    lower === "chy/municipality" ||
+    lower === "national statistics" ||
+    lower === "philippine statistics"
+  );
 }
 
 /**
@@ -126,12 +166,19 @@ export function isInvalidPersonName(str: string): boolean {
   // Digits are forbidden in Philippine birth certificate names
   if (/\d/.test(trimmed)) return true;
 
+  // General safeguard: Reject any standalone parenthesized token like (First), (Middla), (LAM), (Fist), etc.
+  if (/^\s*\([A-Za-z0-9\.\s]{1,15}\)\s*$/.test(trimmed) || /^\([A-Za-z0-9\.\s]{1,15}\)$/.test(str.trim())) {
+    return true;
+  }
+
   const lower = trimmed.toLowerCase();
 
   // 1. Geographic, administrative, and address tokens (prevents "RIN CAL. CITY", "QUEZON CITY", etc.)
   const geoTerms = [
     "cal. city",
     "cal city",
+    "city/municipality",
+    "chy/municipality",
     "city",
     "municipality",
     "province",
@@ -310,15 +357,61 @@ function extractChildNameFromText(
 ): ChildNameCandidate | null {
   if (!text || text.trim().length === 0) return null;
 
+  // 1. Determine anchor boundary between Item 1 (NAME) and Item 2 (SEX) to exclude document headers and trailing form fields
+  let targetBlock = text;
+  const nameAnchor = text.match(/(?:\b1\.\s*name(?:\s*of\s*child)?\b|\bname\s*of\s*child\b|\bchild\'?s?\s*name\b|\bpangalan\s*(?:ng\s*bata)?\b)/i);
+  const sexAnchor = text.match(/(?:\(?\s*2\.\s*sex\b|\b2\.\s*kasarian\b|\bkasarian\b|\(?\s*3\.\s*date\b|\bdate\s*of\s*birth\b|\bpetsa\b|\(?\s*4\.\s*place\b|\bplace\s*of\s*birth\b)/i);
+
+  if (nameAnchor && nameAnchor.index !== undefined) {
+    const startIdx = nameAnchor.index + nameAnchor[0].length;
+    const endIdx = sexAnchor && sexAnchor.index !== undefined && sexAnchor.index > startIdx
+      ? sexAnchor.index
+      : text.length;
+    targetBlock = text.slice(startIdx, endIdx);
+  } else if (sexAnchor && sexAnchor.index !== undefined && !isTargetedNameCrop) {
+    targetBlock = text.slice(0, sexAnchor.index);
+  }
+
+  // Strategy 0: Comma format, e.g. "DELA CRUZ, CARLOS MIGUEL" (Surname first)
+  const commaMatch = targetBlock.match(/[:\s\-]*([a-zA-ZñÑ\s\.\-]+),\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*2\.\s*sex\b|\bsex\b|$|\r|\n))/i);
+  if (commaMatch) {
+    const rawLn = cleanPersonNameString(commaMatch[1]);
+    const rawRest = cleanPersonNameString(commaMatch[2]);
+    if (!isInvalidPersonName(rawLn) && !isInvalidPersonName(rawRest) && !isPsaHeaderNoise(rawLn)) {
+      const restTokens = rawRest.split(/\s+/).filter(Boolean);
+      if (restTokens.length >= 2) {
+        const fn = toTitleCase(restTokens.slice(0, -1).join(" "));
+        const mn = toTitleCase(restTokens[restTokens.length - 1]);
+        const ln = toTitleCase(rawLn);
+        return {
+          firstName: fn,
+          middleName: mn,
+          lastName: ln,
+          completeName: `${fn} ${mn} ${ln}`,
+        };
+      } else if (restTokens.length === 1) {
+        const fn = toTitleCase(restTokens[0]);
+        const ln = toTitleCase(rawLn);
+        return {
+          firstName: fn,
+          middleName: undefined,
+          lastName: ln,
+          completeName: `${fn} ${ln}`,
+        };
+      }
+    }
+  }
+
   // Strategy 1: Explicit inline labeled tokens, e.g. "(First) JUSTIN (Middle) LOQUILLANO (Last) GOMEZ"
-  const explicitInline = text.match(
-    /(?:(?:1a\.\s*)?\(?\s*first(?:\s*name)?\s*\)?|\bunang\s*pangalan\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:(?:1b\.\s*)?\(?\s*middle(?:\s*name)?\s*\)?|\bgitnang\s*pangalan\b))[:\s\-_]*(?:(?:1b\.\s*)?\(?\s*middle(?:\s*name)?\s*\)?|\bgitnang\s*pangalan\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:(?:1c\.\s*)?\(?\s*last(?:\s*name)?\s*\)?|\bapelyido\b|\bsurname\b))[:\s\-_]*(?:(?:1c\.\s*)?\(?\s*last(?:\s*name)?\s*\)?|\bapelyido\b|\bsurname\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*2\.\s*sex\b|\bsex\b|date\s*of\s*birth|kasarian|3\.\s*date|petsa|4\.\s*place|place\s*of\s*birth|$|\r|\n))/i
+  // Handles OCR label typos like (Flrst), (Middla), (LAM), (Lest), (Las), (Lat), (Laat), (Lan)
+  const explicitInline = targetBlock.match(
+    /(?:(?:1a\.\s*)?\(?\s*(?:first|flrst|firat|fist)(?:\s*name)?\s*\)?|\bunang\s*pangalan\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:(?:1b\.\s*)?\(?\s*(?:middle|middla|middie|middl|mid|mlddle)(?:\s*name)?\s*\)?|\bgitnang\s*pangalan\b))[:\s\-_]*(?:(?:1b\.\s*)?\(?\s*(?:middle|middla|middie|middl|mid|mlddle)(?:\s*name)?\s*\)?|\bgitnang\s*pangalan\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:(?:1c\.\s*)?\(?\s*(?:last|lan|lam|lest|las|lat|laat)(?:\s*name)?\s*\)?|\bapelyido\b|\bsurname\b))[:\s\-_]*(?:(?:1c\.\s*)?\(?\s*(?:last|lan|lam|lest|las|lat|laat)(?:\s*name)?\s*\)?|\bapelyido\b|\bsurname\b)[:\s\-_]*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*2\.\s*sex\b|\b2\.\s*kasarian\b|\bkasarian\b|date\s*of\s*birth|3\.\s*date|petsa|4\.\s*place|place\s*of\s*birth|$|\r|\n))/i
   );
   if (explicitInline) {
     const fn = cleanPersonNameString(explicitInline[1]);
     const mn = cleanPersonNameString(explicitInline[2]);
     const ln = cleanPersonNameString(explicitInline[3]);
-    if (!isInvalidPersonName(fn) && !isInvalidPersonName(ln)) {
+    if (!isInvalidPersonName(fn) && !isInvalidPersonName(ln) && !isPsaHeaderNoise(fn) && !isPsaHeaderNoise(ln)) {
       const middleName = mn && !/^(none|n\/?a|wala|-)$/i.test(mn) && !isInvalidPersonName(mn) ? toTitleCase(mn) : undefined;
       return {
         firstName: toTitleCase(fn),
@@ -330,22 +423,22 @@ function extractChildNameFromText(
   }
 
   // Strategy 1b: Separate labeled tokens on single or multiple lines
-  const fnMatch = text.match(
-    /(?:(?:\(?\s*1a\.\s*)?(?:\(?\s*first(?:\s*name)?\s*\)?|unang\s*pangalan))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*(?:1b\.\s*)?middle|\(?\s*(?:1c\.\s*)?last|gitnang|apelyido|sex|kasarian|2\.\s*sex|$|\r|\n))/i
+  const fnMatch = targetBlock.match(
+    /(?:(?:\(?\s*1a\.\s*)?(?:\(?\s*(?:first|flrst|firat|fist)(?:\s*name)?\s*\)?|unang\s*pangalan))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*(?:1b\.\s*)?(?:middle|middla|middie|middl|mid|mlddle)|\(?\s*(?:1c\.\s*)?(?:last|lan|lam|lest|las|lat|laat)|gitnang|apelyido|sex|kasarian|2\.\s*sex|$|\r|\n))/i
   );
-  const mnMatch = text.match(
-    /(?:(?:\(?\s*1b\.\s*)?(?:\(?\s*middle(?:\s*name)?\s*\)?|gitnang\s*pangalan))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*(?:1c\.\s*)?last|apelyido|sex|kasarian|date|petsa|2\.\s*sex|3\.\s*date|$|\r|\n))/i
+  const mnMatch = targetBlock.match(
+    /(?:(?:\(?\s*1b\.\s*)?(?:\(?\s*(?:middle|middla|middie|middl|mid|mlddle)(?:\s*name)?\s*\)?|gitnang\s*pangalan))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*(?:1c\.\s*)?(?:last|lan|lam|lest|las|lat|laat)|apelyido|sex|kasarian|date|petsa|2\.\s*sex|3\.\s*date|$|\r|\n))/i
   );
-  const lnMatch = text.match(
-    /(?:(?:\(?\s*1c\.\s*)?(?:\(?\s*last(?:\s*name)?\s*\)?|apelyido|surname))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*first|\(?\s*middle|sex|kasarian|date|petsa|place|lugar|2\.\s*sex|3\.\s*date|4\.\s*place|$|\r|\n))/i
+  const lnMatch = targetBlock.match(
+    /(?:(?:\(?\s*1c\.\s*)?(?:\(?\s*(?:last|lan|lam|lest|las|lat|laat)(?:\s*name)?\s*\)?|apelyido|surname))\s*[:\-]?\s*([a-zA-ZñÑ\s\.\-]+?)(?=(?:\(?\s*(?:first|flrst|firat|fist)|\(?\s*(?:middle|middla|middie|middl|mid|mlddle)|sex|kasarian|date|petsa|place|lugar|2\.\s*sex|3\.\s*date|4\.\s*place|$|\r|\n))/i
   );
 
   if (fnMatch && lnMatch) {
-    const fnClean = fnMatch[1].replace(/[|*_`()]+/g, "").trim();
-    const lnClean = lnMatch[1].replace(/[|*_`()]+/g, "").trim();
-    const mnClean = mnMatch ? mnMatch[1].replace(/[|*_`()]+/g, "").trim() : "";
+    const fnClean = cleanPersonNameString(fnMatch[1]);
+    const lnClean = cleanPersonNameString(lnMatch[1]);
+    const mnClean = mnMatch ? cleanPersonNameString(mnMatch[1]) : "";
 
-    if (!isInvalidPersonName(fnClean) && !isInvalidPersonName(lnClean)) {
+    if (!isInvalidPersonName(fnClean) && !isInvalidPersonName(lnClean) && !isPsaHeaderNoise(fnClean) && !isPsaHeaderNoise(lnClean)) {
       let middleName: string | undefined = undefined;
       if (mnClean && !/^(none|n\/?a|wala|-|middle|gitna)$/i.test(mnClean) && !isInvalidPersonName(mnClean)) {
         middleName = toTitleCase(mnClean);
@@ -359,37 +452,115 @@ function extractChildNameFromText(
     }
   }
 
-  // Strategy 2: Clean non-header lines in Item 1 crop or table row
-  // PSA Form 102 Item 1 is laid out horizontally into three columns: (First) (Middle) (Last)
-  const rawLines = text
+  // Strategy 1c: Multiline state machine scanner inside targetBlock
+  // Tracks (First), (Middle), (Last|LAM|Lest|Las|Lat|Lan) and assigns trailing unlabelled lines right before 2. SEX
+  const rawLines = targetBlock
     .split(/\r?\n/)
-    .map((l) => l.replace(/\((?:first|middle|last|unang|gitnang|apelyido|first,\s*middle,\s*last)[^\)]*\)/gi, " "))
-    .map((l) => l.replace(/[|*_`]+/g, "").trim())
+    .map((l) => l.trim())
     .filter((l) => {
-      if (l.length < 2) return false;
+      if (!l || l.length < 2) return false;
+      if (isPsaHeaderNoise(l)) return false;
       if (/^(?:1\.\s*)?name(?:\s*of\s*child)?$/i.test(l)) return false;
       if (/^(?:1a\.|1b\.|1c\.|2\.\s*sex|sex|kasarian|date\s*of\s*birth|3\.\s*date|4\.\s*place)$/i.test(l)) return false;
-      return !isInvalidPersonName(l);
+      return true;
     });
 
+  let detectedFirst: string | undefined;
+  let detectedMiddle: string | undefined;
+  let detectedLast: string | undefined;
+  let currentSlot: "first" | "middle" | "last" | "none" = "none";
+
+  for (const line of rawLines) {
+    const firstM = line.match(/^(?:(?:\(?\s*(?:1a\.\s*)?(?:first|flrst|firat|fist)(?:\s*name)?\s*\)?|unang\s*pangalan)[:\s\-_]*)(.*)$/i);
+    if (firstM) {
+      currentSlot = "first";
+      const rem = cleanPersonNameString(firstM[1]);
+      if (rem && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) detectedFirst = rem;
+      continue;
+    }
+
+    const middleM = line.match(/^(?:(?:\(?\s*(?:1b\.\s*)?(?:middle|middla|middie|middl|mid|mlddle)(?:\s*name)?\s*\)?|gitnang\s*pangalan)[:\s\-_]*)(.*)$/i);
+    if (middleM) {
+      currentSlot = "middle";
+      const rem = cleanPersonNameString(middleM[1]);
+      if (rem && !/^(none|n\/?a|wala|-)$/i.test(rem) && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) {
+        detectedMiddle = rem;
+      }
+      continue;
+    }
+
+    const lastM = line.match(/^(?:(?:\(?\s*(?:1c\.\s*)?(?:last|lan|lam|lest|las|lat|laat)(?:\s*name)?\s*\)?|apelyido|surname)[:\s\-_]*)(.*)$/i);
+    if (lastM) {
+      currentSlot = "last";
+      const rem = cleanPersonNameString(lastM[1]);
+      if (rem && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) detectedLast = rem;
+      continue;
+    }
+
+    // General safeguard: ignore any standalone parenthesized token as an unrecognized structural label
+    if (/^\s*\([A-Za-z0-9\.\s]{1,15}\)\s*$/.test(line)) {
+      continue;
+    }
+
+    const clean = cleanPersonNameString(line);
+    if (!clean || isInvalidPersonName(clean) || isPsaHeaderNoise(clean)) continue;
+
+    if (currentSlot === "first" && !detectedFirst) {
+      detectedFirst = clean;
+    } else if (currentSlot === "first" && detectedFirst && !detectedMiddle) {
+      detectedMiddle = clean;
+    } else if (currentSlot === "middle" && !detectedMiddle) {
+      if (!/^(none|n\/?a|wala|-)$/i.test(clean)) detectedMiddle = clean;
+    } else if (currentSlot === "middle" && detectedMiddle && !detectedLast) {
+      detectedLast = clean;
+    } else if (currentSlot === "last" && !detectedLast) {
+      detectedLast = clean;
+    } else if (detectedFirst && detectedMiddle && !detectedLast) {
+      // Missing (Last) label right before Item 2 (SEX)
+      detectedLast = clean;
+    } else if (detectedFirst && !detectedLast) {
+      detectedLast = clean;
+    }
+  }
+
+  if (detectedFirst && detectedLast && !isInvalidPersonName(detectedFirst) && !isInvalidPersonName(detectedLast)) {
+    const fn = toTitleCase(cleanPersonNameString(detectedFirst));
+    const mn = detectedMiddle && !/^(none|n\/?a|wala|-)$/i.test(detectedMiddle) ? toTitleCase(cleanPersonNameString(detectedMiddle)) : undefined;
+    const cleanedLast = cleanPersonNameString(detectedLast).replace(/^(?:\(?)(?:last|lan|las|lam|lat|lest|laat|apelyido|surname)(?:\)?)\s+/i, "");
+    const ln = toTitleCase(cleanedLast);
+    return {
+      firstName: fn,
+      middleName: mn,
+      lastName: ln,
+      completeName: [fn, mn, ln].filter(Boolean).join(" "),
+    };
+  }
+
+  // Strategy 2: Clean non-header lines in Item 1 crop or table row
+  // PSA Form 102 Item 1 is laid out horizontally into three columns: (First) (Middle) (Last)
+  const validCandidateLines = rawLines
+    .map(cleanPersonNameString)
+    .filter((l) => !isInvalidPersonName(l) && !isPsaHeaderNoise(l));
+
   const hasNameHeader = /(?:\b(?:1\.\s*)?name(?:\s*of\s*child)?\b|\bpangalan\s*(?:ng\s*bata)?\b|\bchild\'?s?\s*name\b)/i.test(text);
-  if ((isTargetedNameCrop || hasNameHeader) && rawLines.length >= 1) {
-    // Process candidate name line (either the first valid name line, or separate lines)
-    if (rawLines.length === 3) {
+  if ((isTargetedNameCrop || hasNameHeader) && validCandidateLines.length >= 1) {
+    if (validCandidateLines.length === 3) {
       // 3 separate lines: First, Middle, Last
-      const fn = toTitleCase(rawLines[0]);
-      const mn = toTitleCase(rawLines[1]);
-      const ln = toTitleCase(rawLines[2]);
+      const fn = toTitleCase(validCandidateLines[0]);
+      const mn = toTitleCase(validCandidateLines[1]);
+      const cleanedLast = validCandidateLines[2].replace(/^(?:\(?)(?:last|lan|las|lam|lat|lest|laat|apelyido|surname)(?:\)?)\s+/i, "");
+      const ln = toTitleCase(cleanedLast);
       return {
         firstName: fn,
         middleName: mn,
         lastName: ln,
         completeName: `${fn} ${mn} ${ln}`,
       };
-    } else if (rawLines.length === 2 && isTargetedNameCrop) {
+    } else if (validCandidateLines.length === 2 && isTargetedNameCrop) {
       // 2 separate lines in targeted crop: First, Last
-      const fn = toTitleCase(rawLines[0]);
-      const ln = toTitleCase(rawLines[1]);
+      const fn = toTitleCase(validCandidateLines[0]);
+      const cleanedLast = validCandidateLines[1].replace(/^(?:\(?)(?:last|lan|las|lam|lat|lest|laat|apelyido|surname)(?:\)?)\s+/i, "");
+      const ln = toTitleCase(cleanedLast);
       return {
         firstName: fn,
         middleName: undefined,
@@ -398,11 +569,16 @@ function extractChildNameFromText(
       };
     } else {
       // 1 line containing horizontal columns: e.g. "JUSTIN LOQUILLANO GOMEZ"
-      const nameLine = rawLines[0];
-      const tokens = nameLine.split(/\s+/).filter(Boolean);
+      const nameLine = validCandidateLines[0];
+      let tokens = nameLine.split(/\s+/).filter(Boolean);
+      let detectedSuffix: string | undefined;
+      const suffixRegex = /^(?:jr\.?|sr\.?|ii|iii|iv|v|vi)$/i;
+      if (tokens.length >= 3 && suffixRegex.test(tokens[tokens.length - 1])) {
+        detectedSuffix = tokens[tokens.length - 1].toUpperCase();
+        tokens = tokens.slice(0, -1);
+      }
       if (tokens.length >= 3) {
         // Form 102 horizontal 3-column standard: Token 0 = First, Token 1 = Middle, Token 2 = Last
-        // Handles compound first names when 4 tokens: "JUSTIN PAUL" + "LOQUILLANO" + "GOMEZ"
         if (tokens.length === 3) {
           const compoundPrefixes = ["de", "del", "dela", "de la", "san", "santa", "de los", "delos"];
           if (compoundPrefixes.includes(tokens[1].toLowerCase())) {
@@ -412,7 +588,8 @@ function extractChildNameFromText(
               firstName: fn,
               middleName: undefined,
               lastName: ln,
-              completeName: `${fn} ${ln}`,
+              suffix: detectedSuffix,
+              completeName: [fn, ln, detectedSuffix].filter(Boolean).join(" "),
             };
           }
           const fn = toTitleCase(tokens[0]);
@@ -422,7 +599,8 @@ function extractChildNameFromText(
             firstName: fn,
             middleName: mn,
             lastName: ln,
-            completeName: `${fn} ${mn} ${ln}`,
+            suffix: detectedSuffix,
+            completeName: [fn, mn, ln, detectedSuffix].filter(Boolean).join(" "),
           };
         } else {
           // Check for compound surname (e.g. Dela Cruz)
@@ -436,7 +614,8 @@ function extractChildNameFromText(
               firstName: fn,
               middleName: mn,
               lastName: ln,
-              completeName: `${fn} ${mn} ${ln}`,
+              suffix: detectedSuffix,
+              completeName: [fn, mn, ln, detectedSuffix].filter(Boolean).join(" "),
             };
           }
           // Standard 4-token name: First two are First Name, next is Middle, last is Last Name
@@ -447,7 +626,8 @@ function extractChildNameFromText(
             firstName: fn,
             middleName: mn,
             lastName: ln,
-            completeName: `${fn} ${mn} ${ln}`,
+            suffix: detectedSuffix,
+            completeName: [fn, mn, ln, detectedSuffix].filter(Boolean).join(" "),
           };
         }
       } else if (tokens.length === 2) {
@@ -457,7 +637,8 @@ function extractChildNameFromText(
           firstName: fn,
           middleName: undefined,
           lastName: ln,
-          completeName: `${fn} ${ln}`,
+          suffix: detectedSuffix,
+          completeName: [fn, ln, detectedSuffix].filter(Boolean).join(" "),
         };
       } else if (tokens.length === 1) {
         const fn = toTitleCase(tokens[0]);
@@ -465,6 +646,7 @@ function extractChildNameFromText(
           firstName: fn,
           middleName: undefined,
           lastName: "Unknown",
+          suffix: detectedSuffix,
           completeName: fn,
           isAmbiguous: true,
         };
@@ -479,10 +661,29 @@ function extractChildNameFromText(
 
   if (childMatch) {
     const candidateName = cleanPersonNameString(childMatch[1]);
-    if (!isInvalidPersonName(candidateName)) {
-      const tokens = candidateName.split(/\s+/).filter(Boolean);
+    if (!isInvalidPersonName(candidateName) && !isPsaHeaderNoise(candidateName)) {
+      let tokens = candidateName.split(/\s+/).filter(Boolean);
+      let detectedSuffix: string | undefined;
+      const suffixRegex = /^(?:jr\.?|sr\.?|ii|iii|iv|v|vi)$/i;
+      if (tokens.length >= 3 && suffixRegex.test(tokens[tokens.length - 1])) {
+        detectedSuffix = tokens[tokens.length - 1].toUpperCase();
+        tokens = tokens.slice(0, -1);
+      }
       if (tokens.length >= 3) {
         const compoundPrefixes = ["de", "del", "dela", "de la", "san", "santa", "de los", "delos"];
+        const n = tokens.length;
+        if (n >= 4 && compoundPrefixes.includes(tokens[n - 2].toLowerCase())) {
+          const ln = toTitleCase(`${tokens[n - 2]} ${tokens[n - 1]}`);
+          const mn = toTitleCase(tokens[n - 3]);
+          const fn = toTitleCase(tokens.slice(0, n - 3).join(" "));
+          return {
+            firstName: fn,
+            middleName: mn,
+            lastName: ln,
+            suffix: detectedSuffix,
+            completeName: [fn, mn, ln, detectedSuffix].filter(Boolean).join(" "),
+          };
+        }
         if (tokens.length === 3 && compoundPrefixes.includes(tokens[1].toLowerCase())) {
           const fn = toTitleCase(tokens[0]);
           const ln = toTitleCase(`${tokens[1]} ${tokens[2]}`);
@@ -490,7 +691,8 @@ function extractChildNameFromText(
             firstName: fn,
             middleName: undefined,
             lastName: ln,
-            completeName: `${fn} ${ln}`,
+            suffix: detectedSuffix,
+            completeName: [fn, ln, detectedSuffix].filter(Boolean).join(" "),
           };
         }
         const fn = toTitleCase(tokens[0]);
@@ -500,7 +702,8 @@ function extractChildNameFromText(
           firstName: fn,
           middleName: mn,
           lastName: ln,
-          completeName: `${fn} ${mn} ${ln}`,
+          suffix: detectedSuffix,
+          completeName: [fn, mn, ln, detectedSuffix].filter(Boolean).join(" "),
         };
       } else if (tokens.length === 2) {
         const fn = toTitleCase(tokens[0]);
@@ -509,7 +712,8 @@ function extractChildNameFromText(
           firstName: fn,
           middleName: undefined,
           lastName: ln,
-          completeName: `${fn} ${ln}`,
+          suffix: detectedSuffix,
+          completeName: [fn, ln, detectedSuffix].filter(Boolean).join(" "),
         };
       } else if (tokens.length === 1) {
         const fn = toTitleCase(tokens[0]);
@@ -517,6 +721,7 @@ function extractChildNameFromText(
           firstName: fn,
           middleName: undefined,
           lastName: "Unknown",
+          suffix: detectedSuffix,
           completeName: fn,
           isAmbiguous: true,
         };
@@ -525,6 +730,107 @@ function extractChildNameFromText(
   }
 
   return null;
+}
+
+/**
+ * Extracts Mother or Father Name strictly anchored within their section boundaries
+ * (Mother: Item 6 MAIDEN NAME to Item 7 CITIZENSHIP; Father: Item 13 NAME to Item 14 CITIZENSHIP).
+ * Supports multiline values even if the (Last) label is missing or mistyped in OCR.
+ */
+function extractParentNameFromSection(
+  sectionText: string,
+  startPattern: RegExp,
+  endPattern: RegExp
+): string | undefined {
+  if (!sectionText) return undefined;
+  const startMatch = sectionText.match(startPattern);
+  if (!startMatch || startMatch.index === undefined) return undefined;
+
+  const afterStart = sectionText.slice(startMatch.index + startMatch[0].length);
+  const endMatch = afterStart.match(endPattern);
+  const block = endMatch && endMatch.index !== undefined
+    ? afterStart.slice(0, endMatch.index)
+    : afterStart.slice(0, 400);
+
+  // Scan lines in candidate block
+  const lines = block
+    .split(/\r?\n/)
+    .map((l) => cleanPersonNameString(l))
+    .filter((l) => {
+      if (!l || l.length < 2) return false;
+      if (isPsaHeaderNoise(l)) return false;
+      return true;
+    });
+
+  let first: string | undefined;
+  let middle: string | undefined;
+  let last: string | undefined;
+  let currentSlot: "first" | "middle" | "last" | "none" = "none";
+
+  for (const line of lines) {
+    const fnM = line.match(/^(?:(?:\(?\s*first(?:\s*name)?\s*\)?|unang\s*pangalan)[:\s\-_]*)(.*)$/i);
+    if (fnM) {
+      currentSlot = "first";
+      const rem = cleanPersonNameString(fnM[1]);
+      if (rem && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) first = rem;
+      continue;
+    }
+
+    const mnM = line.match(/^(?:(?:\(?\s*middle(?:\s*name)?\s*\)?|gitnang\s*pangalan)[:\s\-_]*)(.*)$/i);
+    if (mnM) {
+      currentSlot = "middle";
+      const rem = cleanPersonNameString(mnM[1]);
+      if (rem && !/^(none|n\/?a|wala|-)$/i.test(rem) && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) {
+        middle = rem;
+      }
+      continue;
+    }
+
+    const lnM = line.match(/^(?:(?:\(?\s*(?:last|lam|lest|las|lat)(?:\s*name)?\s*\)?|apelyido|surname)[:\s\-_]*)(.*)$/i);
+    if (lnM) {
+      currentSlot = "last";
+      const rem = cleanPersonNameString(lnM[1]);
+      if (rem && !isInvalidPersonName(rem) && !isPsaHeaderNoise(rem)) last = rem;
+      continue;
+    }
+
+    const clean = cleanPersonNameString(line);
+    if (isInvalidPersonName(clean) || isPsaHeaderNoise(clean)) continue;
+
+    if (currentSlot === "first" && !first) {
+      first = clean;
+    } else if (currentSlot === "middle" && !middle) {
+      if (!/^(none|n\/?a|wala|-)$/i.test(clean)) middle = clean;
+    } else if (currentSlot === "last" && !last) {
+      last = clean;
+    } else if (first && middle && !last) {
+      // Missing (Last) label right before citizenship or next item
+      last = clean;
+    }
+  }
+
+  if (first && last && !isInvalidPersonName(first) && !isInvalidPersonName(last)) {
+    return [first, middle && !/^(none|n\/?a|wala|-)$/i.test(middle) ? middle : undefined, last].filter(Boolean).join(" ");
+  }
+
+  // Handle single-line or unlabelled lines
+  const validCandidateLines = lines
+    .map(cleanPersonNameString)
+    .filter((l) => !isInvalidPersonName(l) && !isPsaHeaderNoise(l));
+
+  if (validCandidateLines.length >= 3) {
+    return [
+      validCandidateLines[0],
+      validCandidateLines[1],
+      validCandidateLines[2],
+    ].join(" ");
+  } else if (validCandidateLines.length === 2) {
+    return `${validCandidateLines[0]} ${validCandidateLines[1]}`;
+  } else if (validCandidateLines.length === 1) {
+    return validCandidateLines[0];
+  }
+
+  return undefined;
 }
 
 export function parsePsaBirthCert(
@@ -537,12 +843,18 @@ export function parsePsaBirthCert(
   const sections = extractPsaSections(rawText);
 
   // 1. Registry Number or PSA Certificate Number
+  // Supports multi-part formats separated by dots, dashes, or spaces (e.g. "204. 52545" -> "204-52545")
   let registryNumber: string | undefined;
-  const regMatch = rawText.match(
-    /(?:(?:psa\s*)?certificate\s*(?:no\.?|number)|registry\s*(?:no\.?|number)|rehistro\s*blg\.?|local\s*civil\s*registry\s*no\.?|lcr\s*no\.?)[:\s]*([0-9][0-9\- ]*)/i
+  const regSearchText = options?.upperSectionText || rawText;
+  const regMatch = regSearchText.match(
+    /(?:(?:psa\s*)?certificate\s*(?:no\.?|number)|registry\s*(?:no\.?|number)|rehistro\s*blg\.?|local\s*civil\s*registry\s*no\.?|lcr\s*no\.?)[:\s]*([0-9][0-9\.\- \t]*[0-9]|[0-9]+)/i
   );
   if (regMatch) {
-    registryNumber = regMatch[1].replace(/\s+/g, "").trim();
+    const rawReg = regMatch[1].trim();
+    registryNumber = rawReg
+      .replace(/[\.\s]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
   }
 
   // 2. Child Name (First, Middle, Last, Suffix, Complete Name)
@@ -553,21 +865,79 @@ export function parsePsaBirthCert(
   let completeName: string | undefined;
   let isNameAmbiguous = false;
 
-  // Attempt child name extraction across sources in priority order:
-  // Priority A: Targeted Item 1 Name-only crop OCR text
-  let extractedChild: ChildNameCandidate | null = null;
+  // Attempt child name extraction across sources with completeness scoring.
+  // CRITICAL: A narrow partial crop (e.g. only First Name) must NEVER overwrite
+  // a more complete candidate (First + Middle + Last) extracted from upperSectionText or full document.
+  function getCandidateCompletenessScore(cand: ChildNameCandidate | null): number {
+    if (!cand) return 0;
+    const hasFirst = cand.firstName && cand.firstName !== "Unknown" && cand.firstName.trim().length > 0;
+    const hasMiddle = cand.middleName && cand.middleName.trim().length > 0 && !/^(none|n\/?a|wala|-)$/i.test(cand.middleName);
+    const hasLast = cand.lastName && cand.lastName !== "Unknown" && cand.lastName.trim().length > 0;
+
+    if (hasFirst && hasMiddle && hasLast) return 4;
+    if (hasFirst && hasLast) return 3;
+    if (hasFirst || hasLast) return 1;
+    return 0;
+  }
+
+  const candidatePool: Array<{ source: string; candidate: ChildNameCandidate; score: number; priority: number }> = [];
+
+  const addCandidate = (source: string, cand: ChildNameCandidate | null, priority: number) => {
+    if (!cand) return;
+    const score = getCandidateCompletenessScore(cand);
+    if (score > 0) {
+      candidatePool.push({ source, candidate: cand, score, priority });
+    }
+  };
+
   if (options?.childNameText) {
-    extractedChild = extractChildNameFromText(options.childNameText, true);
+    addCandidate("childNameCrop", extractChildNameFromText(options.childNameText, true), 1);
   }
-
-  // Priority B: Targeted Child Section crop OCR text (Items 1 - 5)
-  if (!extractedChild && options?.childSectionText) {
-    extractedChild = extractChildNameFromText(options.childSectionText, false);
+  if (options?.childSectionText) {
+    addCandidate("childSectionCrop", extractChildNameFromText(options.childSectionText, false), 2);
   }
+  if (options?.upperSectionText) {
+    const upperSections = extractPsaSections(options.upperSectionText);
+    addCandidate("upperSectionChild", extractChildNameFromText(upperSections.childSectionText || options.upperSectionText, false), 3);
+    if (upperSections.childSectionText && upperSections.childSectionText !== options.upperSectionText) {
+      addCandidate("upperSectionFull", extractChildNameFromText(options.upperSectionText, false), 3);
+    }
+  }
+  if (sections.childSectionText) {
+    addCandidate("docChildSection", extractChildNameFromText(sections.childSectionText, false), 4);
+  }
+  addCandidate("fullDoc", extractChildNameFromText(rawText, false), 5);
 
-  // Priority C: Full document CHILD section text (strictly bounded before Mother section)
-  if (!extractedChild && sections.childSectionText) {
-    extractedChild = extractChildNameFromText(sections.childSectionText, false);
+  let extractedChild: ChildNameCandidate | null = null;
+  if (candidatePool.length > 0) {
+    // Sort primarily by completeness score (descending), then by source priority (ascending)
+    candidatePool.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      // When upperSection yields a complete 3-part name (score >= 4), prefer upperSection over childNameCrop
+      if (a.score >= 4 && b.score >= 4) {
+        if (a.source.startsWith("upperSection") && b.source === "childNameCrop") return -1;
+        if (b.source.startsWith("upperSection") && a.source === "childNameCrop") return 1;
+      }
+      return a.priority - b.priority;
+    });
+
+    extractedChild = { ...candidatePool[0].candidate };
+
+    // If best candidate is missing middle name, check if another candidate with matching first/last has middle name
+    if (!extractedChild.middleName) {
+      const withMiddle = candidatePool.find(
+        (c) =>
+          c.candidate.middleName &&
+          !/^(none|n\/?a|wala|-)$/i.test(c.candidate.middleName) &&
+          c.candidate.firstName.toLowerCase() === extractedChild!.firstName.toLowerCase() &&
+          (extractedChild!.lastName === "Unknown" || c.candidate.lastName.toLowerCase() === extractedChild!.lastName.toLowerCase())
+      );
+      if (withMiddle?.candidate.middleName) {
+        extractedChild.middleName = withMiddle.candidate.middleName;
+        const parts = [extractedChild.firstName, extractedChild.middleName, extractedChild.lastName !== "Unknown" ? extractedChild.lastName : ""].filter(Boolean);
+        extractedChild.completeName = parts.join(" ") + (extractedChild.suffix ? ` ${extractedChild.suffix}` : "");
+      }
+    }
   }
 
   if (extractedChild) {
@@ -601,26 +971,87 @@ export function parsePsaBirthCert(
 
   // 3. Sex
   let sex: "M" | "F" | undefined;
-  const sexSearchText = options?.childSectionText || sections.childSectionText || rawText;
 
-  // Check for selection mark or checkbox next to Male vs Female in Item 2
-  const maleChecked = /(?:(?:\[[xX✓\/\*]\]|\([xX✓\/\*]\)|[xX✓])\s*(?:1\s*)?male\b|\b1\s*(?:\[[xX✓\/\*]\]|\([xX✓\/\*]\)|[xX✓])?\s*male\b|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*male\b)/i.test(sexSearchText);
-  const femaleChecked = /(?:(?:\[[xX✓\/\*]\]|\([xX✓\/\*]\)|[xX✓])\s*(?:2\s*)?female\b|\b2\s*(?:\[[xX✓\/\*]\]|\([xX✓\/\*]\)|[xX✓])?\s*female\b|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*female\b)/i.test(sexSearchText);
+  const extractSexFromBlock = (textToSearch: string): "M" | "F" | undefined => {
+    if (!textToSearch) return undefined;
+    let sexSectionText = textToSearch;
+    const sexAnchorMatch = textToSearch.match(/(?:\b2\.\s*sex\b|\bkasarian\b)/i);
+    if (sexAnchorMatch && sexAnchorMatch.index !== undefined) {
+      const afterSex = textToSearch.slice(sexAnchorMatch.index);
+      const dobAnchorMatch = afterSex.match(/(?:\b3\.\s*date\b|\bdate\s*of\s*birth\b|\bpetsa\b|\b4\.\s*place\b|\bplace\s*of\s*birth\b)/i);
+      sexSectionText = dobAnchorMatch && dobAnchorMatch.index !== undefined
+        ? afterSex.slice(0, dobAnchorMatch.index)
+        : afterSex.slice(0, 300);
+    }
 
-  if (maleChecked && !femaleChecked) {
-    sex = "M";
-  } else if (femaleChecked && !maleChecked) {
-    sex = "F";
-  } else {
+    // Step 1: Multiline line-by-line inspection of sexSectionText for checkmark preceding Male/Female
+    const sexLines = sexSectionText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    for (let i = 0; i < sexLines.length; i++) {
+      const curr = sexLines[i];
+      const isCheck = /^\[?[xX✓vV\/\*]\]?$/.test(curr);
+      if (isCheck && i + 1 < sexLines.length) {
+        const nextLine = sexLines[i + 1];
+        const nextNextLine = i + 2 < sexLines.length ? sexLines[i + 2] : "";
+        if (
+          /^(?:1\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(nextLine) ||
+          (nextLine === "1" && /^(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(nextNextLine))
+        ) {
+          return "M";
+        }
+        if (
+          /^(?:2\s*)?(?:female|femalo|fem|fema[il]e|babae)\b/i.test(nextLine) ||
+          (nextLine === "2" && /^(?:female|femalo|fem|fema[il]e|babae)\b/i.test(nextNextLine))
+        ) {
+          return "F";
+        }
+      }
+    }
+
+    // Step 2: Proximity regex detection for checkmark/X and 1 Male/Malo vs 2 Female/Femalo
+    const maleChecked =
+      /(?:(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*[\r\n\s]*_?\s*(?:1\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b|1\s*[\r\n\s]*_?\s*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*(?:male|malo|mal|ma[il]e|lalaki)\b|1\s*(?:male|malo|mal|ma[il]e|lalaki)\b\s*[\r\n\s]*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])|\bx_?1\s*(?:male|malo|mal|ma[il]e|lalaki)\b|\b(?:male|malo|mal|ma[il]e|lalaki)\s*[xX✓vV]|\b1\s*(?:male|malo|mal|ma[il]e|lalaki)\s+(?:2\s*(?:female|femalo|fem|fema[il]e|babae)\s*)?\[\s*\]|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:male|malo|mal|ma[il]e|lalaki)\b)/i.test(
+        sexSectionText
+      );
+    const femaleChecked =
+      /(?:(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*[\r\n\s]*_?\s*(?:2\s*)?(?:female|femalo|fem|fema[il]e|babae)\b|2\s*[\r\n\s]*_?\s*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*(?:female|femalo|fem|fema[il]e|babae)\b|2\s*(?:female|femalo|fem|fema[il]e|babae)\b\s*[\r\n\s]*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])|\bx_?2\s*(?:female|femalo|fem|fema[il]e|babae)\b|\b(?:female|femalo|fem|fema[il]e|babae)\s*[xX✓vV]|\b2\s*(?:female|femalo|fem|fema[il]e|babae)\s*\[[xX✓vV\/\*]\]|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:female|femalo|fem|fema[il]e|babae)\b)/i.test(
+        sexSectionText
+      );
+
+    if (maleChecked && !femaleChecked) {
+      return "M";
+    } else if (femaleChecked && !maleChecked) {
+      return "F";
+    }
+
     // Look for explicit word following "2. SEX" or "SEX:"
-    const sexMatch = sexSearchText.match(
-      /(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:1\s*|2\s*|\[[xX✓\/\*\s]*\]|\([xX✓\/\*\s]*\))*\s*(male|female|lalaki|babae)\b/i
+    const sexMatch = sexSectionText.match(
+      /(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:1\s*|2\s*|\[[xX✓vV\/\*\s]*\]|\([xX✓vV\/\*\s]*\))*\s*(male|malo|female|femalo|mal|fem|maie|lalaki|babae)\b/i
     );
     if (sexMatch) {
       const s = sexMatch[1].toUpperCase();
-      if (s.startsWith("M") || s === "LALAKI") sex = "M";
-      else if (s.startsWith("F") || s === "BABAE") sex = "F";
+      if (s.startsWith("M") || s === "LALAKI") return "M";
+      else if (s.startsWith("F") || s === "BABAE") return "F";
     }
+
+    return undefined;
+  };
+
+  // Extract sex preferring upperSectionText, then childSectionText, docChildSection, and finally fullText
+  if (options?.upperSectionText) {
+    sex = extractSexFromBlock(options.upperSectionText);
+  }
+  if (!sex && options?.childSectionText) {
+    sex = extractSexFromBlock(options.childSectionText);
+  }
+  if (!sex && sections.childSectionText) {
+    sex = extractSexFromBlock(sections.childSectionText);
+  }
+  if (!sex && rawText) {
+    sex = extractSexFromBlock(rawText);
   }
   if (!sex) {
     warnings.push("Sex could not be reliably extracted from PSA birth certificate.");
@@ -628,12 +1059,12 @@ export function parsePsaBirthCert(
 
   // 4. Date of Birth (No invented fallback!)
   let birthDate: string | undefined;
-  const dobSearchText = options?.childSectionText || sections.childSectionText || rawText;
+  const dobSearchText = options?.childSectionText || options?.upperSectionText || sections.childSectionText || rawText;
   // Clean out Form 102 parenthetical labels like "(Day)", "(Month)", "(Year)", "(Araw)", "(Buwan)", "(Taon)"
   const cleanDobText = dobSearchText.replace(/\(\s*(?:day|month|year|araw|buwan|taon)\s*\)/gi, " ");
 
   const dobMatch = cleanDobText.match(
-    /(?:date\s*of\s*birth|petsa\s*ng\s*kapanganakan|3\.\s*date)[:\s\-_]*([a-zA-Z0-9\s\,\/\-]+?)(?=(?:\s*(?:place|lugar|kasarian|sex|4\.\s*place|5\.\s*type|$|\n)))/i
+    /(?:date\s*of\s*birth|petsa\s*ng\s*kapanganakan|3\.\s*date)[:\s\-_]*([a-zA-Z0-9\s\,\/\-]+?)(?=(?:\s*(?:place|lugar|kasarian|sex|4\.\s*place|5\.\s*type|6\.\s*maiden|mother|ina|$)))/i
   );
   if (dobMatch) {
     const parsed = parseFlexibleDate(dobMatch[1].trim());
@@ -656,34 +1087,23 @@ export function parsePsaBirthCert(
 
   // 5. Parents (Mother & Father) — Strictly isolated to their respective document sections
   let motherMaidenName: string | undefined;
-  const motherSectionText = sections.motherSectionText || rawText;
-  const motherMatch = motherSectionText.match(
-    /(?:(?:\b(?:6\.\s*)?maiden\s*name\b|\bmother(?:\'?s?\s*(?:maiden\s*)?name)?\b|\bpangalan\s*ng\s*ina\b|\bina\b)[:\s\-]*(?:\([^\)]*\))?[:\s\-]*([a-zA-ZñÑ\s\.\,\-]+?)(?=(?:\s*(?:citizenship|relihiyon|religion|occupation|hanapbuhay|age|edad|total|7\.|8\.|9\.|10\.|11\.|12\.|residence|$|\r|\n))))/i
+  const motherCandidateText = options?.upperSectionText || sections.motherSectionText || rawText;
+  motherMaidenName = extractParentNameFromSection(
+    motherCandidateText,
+    /(?:\b(?:6\.\s*)?maiden\s*name\b|\bmother(?:\'?s?\s*(?:maiden\s*)?name)?\b|\bpangalan\s*ng\s*ina\b|\bina\b)/i,
+    /(?:\b(?:7\.\s*)?citizenship\b|\bpagkamamamayan\b|\b(?:8\.\s*)?religion\b|\brelihiyon\b|\b(?:9\.\s*)?occupation\b|\bhanapbuhay\b|\b13\.\s*name\b|\bfather\b)/i
   );
-  if (motherMatch) {
-    const clean = cleanPersonNameString(motherMatch[1]);
-    if (!isInvalidPersonName(clean)) {
-      motherMaidenName = clean;
-    }
-  }
   if (!motherMaidenName) {
     warnings.push("Mother's name could not be reliably extracted from PSA birth certificate.");
   }
 
   let fatherName: string | undefined;
-  // Strict Father Section Extraction (Prevents RIN CAL. CITY, addresses, and Place of Birth bleeding)
-  const fatherSectionText = sections.fatherSectionText || rawText;
-  if (fatherSectionText) {
-    const fatherMatch = fatherSectionText.match(
-      /(?:(?:\b13\.\s*name\b|\bfather(?:\'?s?\s*name)?\b|\bpangalan\s*ng\s*ama\b|\bama\b)[:\s\-]*(?:\([^\)]*\))?[:\s\-]*([a-zA-ZñÑ\s\.\,\-]+?)(?=(?:\s*(?:citizenship|relihiyon|religion|occupation|hanapbuhay|age|edad|14\.|15\.|16\.|17\.|18\.|19\.|residence|$|\r|\n))))/i
-    );
-    if (fatherMatch) {
-      const clean = cleanPersonNameString(fatherMatch[1]);
-      if (!isInvalidPersonName(clean)) {
-        fatherName = clean;
-      }
-    }
-  }
+  const fatherCandidateText = options?.upperSectionText || sections.fatherSectionText || rawText;
+  fatherName = extractParentNameFromSection(
+    fatherCandidateText,
+    /(?:\b13\.\s*name(?:\s*of\s*father)?\b|\bname\s*of\s*father\b|\bfather(?:\'?s?\s*name)?\b|\bpangalan\s*ng\s*ama\b|\bama\b)/i,
+    /(?:\b(?:14\.\s*)?citizenship\b|\bpagkamamamayan\b|\b(?:15\.\s*)?religion\b|\brelihiyon\b|\b(?:16\.\s*)?occupation\b|\bhanapbuhay\b|\b(?:20\.\s*)?marriage\b|\bkasal\b)/i
+  );
   if (!fatherName) {
     warnings.push("Father's name could not be reliably extracted from PSA birth certificate.");
   }
@@ -737,18 +1157,124 @@ export function parsePsaBirthCert(
     }
   }
 
-  // 8. Extraction status map calculation
+  // 8. Extraction status map calculation & honest per-field confidence percentage (0 to 100)
   const isConfidenceGood = ocrConfidence >= 0.85;
+  const baseConfidencePct = Math.round(
+    typeof ocrConfidence === "number" && !isNaN(ocrConfidence)
+      ? ocrConfidence > 1
+        ? ocrConfidence
+        : ocrConfidence * 100
+      : 95
+  );
+
+  const computeFieldConfidence = (
+    value: string | undefined,
+    status: FieldStatus,
+    isAmbiguous?: boolean
+  ): number => {
+    if (!value || status === "not_detected" || value === "Unknown" || value.trim().length === 0) {
+      return 0;
+    }
+
+    let matchedWordConfs: number[] = [];
+    if (rawLayout && Array.isArray(rawLayout.pages)) {
+      const valueTokens = value
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => t.replace(/[^a-z0-9]/g, ""))
+        .filter((t) => t.length >= 2);
+
+      for (const page of rawLayout.pages) {
+        if (Array.isArray(page.words)) {
+          for (const word of page.words) {
+            const cleanWord = (word.content || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+            if (valueTokens.includes(cleanWord) && typeof word.confidence === "number") {
+              matchedWordConfs.push(word.confidence);
+            }
+          }
+        }
+      }
+    }
+
+    let fieldConf: number;
+    if (matchedWordConfs.length > 0) {
+      const avg = matchedWordConfs.reduce((a, b) => a + b, 0) / matchedWordConfs.length;
+      fieldConf = Math.round(avg > 1 ? avg : avg * 100);
+    } else {
+      fieldConf = baseConfidencePct;
+    }
+
+    if (isAmbiguous || status === "needs_verification") {
+      fieldConf = Math.min(fieldConf, 74);
+      fieldConf = Math.max(fieldConf, 60);
+    } else if (status === "extracted") {
+      fieldConf = Math.min(100, Math.max(fieldConf, 85));
+    }
+
+    return Math.min(100, Math.max(0, Math.round(fieldConf)));
+  };
+
+  const completeNameStatus: FieldStatus = isNameDetected
+    ? isNameAmbiguous
+      ? "needs_verification"
+      : isConfidenceGood
+      ? "extracted"
+      : "needs_verification"
+    : "not_detected";
+
+  const firstNameStatus: FieldStatus =
+    firstName !== "Unknown" && firstName.length > 0
+      ? isNameAmbiguous
+        ? "needs_verification"
+        : isConfidenceGood
+        ? "extracted"
+        : "needs_verification"
+      : "not_detected";
+
+  const middleNameStatus: FieldStatus =
+    middleName && middleName.length > 0 && !/^(none|n\/?a|wala|-)$/i.test(middleName)
+      ? isNameAmbiguous
+        ? "needs_verification"
+        : isConfidenceGood
+        ? "extracted"
+        : "needs_verification"
+      : "not_detected";
+
+  const lastNameStatus: FieldStatus =
+    lastName !== "Unknown" && lastName.length > 0
+      ? isNameAmbiguous
+        ? "needs_verification"
+        : isConfidenceGood
+        ? "extracted"
+        : "needs_verification"
+      : "not_detected";
+
+  const birthDateStatus: FieldStatus =
+    birthDate && /^\d{4}-\d{2}-\d{2}$/.test(birthDate)
+      ? "extracted"
+      : birthDate
+      ? isConfidenceGood
+        ? "extracted"
+        : "needs_verification"
+      : "not_detected";
+
+  const sexStatus: FieldStatus = sex ? "extracted" : "not_detected";
+  const birthPlaceStatus: FieldStatus = birthPlace.city_municipality ? "extracted" : "not_detected";
+  const motherNameStatus: FieldStatus = motherMaidenName ? "extracted" : "not_detected";
+  const fatherNameStatus: FieldStatus = fatherName ? "extracted" : "not_detected";
+  const registryNumberStatus: FieldStatus = registryNumber ? "extracted" : "not_detected";
+
+  const motherItem: PsaFieldStatusItem = {
+    status: motherNameStatus,
+    value: motherMaidenName,
+    confidence: computeFieldConfidence(motherMaidenName, motherNameStatus),
+  };
 
   const fieldStatuses: PsaFieldStatusMap = {
     complete_name: {
-      status: isNameDetected
-        ? isConfidenceGood
-          ? "extracted"
-          : "needs_verification"
-        : "not_detected",
+      status: completeNameStatus,
       value: completeName,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(completeName, completeNameStatus, isNameAmbiguous),
       notes: isNameDetected
         ? isNameAmbiguous
           ? "Child complete name detected; component separation requires review"
@@ -756,74 +1282,53 @@ export function parsePsaBirthCert(
         : "Child complete name not detected in document",
     },
     first_name: {
-      status: firstName !== "Unknown" && firstName.length > 0
-        ? isNameAmbiguous
-          ? "needs_verification"
-          : isConfidenceGood
-          ? "extracted"
-          : "needs_verification"
-        : "not_detected",
+      status: firstNameStatus,
       value: firstName !== "Unknown" ? firstName : undefined,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(firstName !== "Unknown" ? firstName : undefined, firstNameStatus, isNameAmbiguous),
       notes: isNameAmbiguous ? "Review first name separation" : undefined,
     },
     middle_name: {
-      status: middleName && middleName.length > 0
-        ? isNameAmbiguous
-          ? "needs_verification"
-          : isConfidenceGood
-          ? "extracted"
-          : "needs_verification"
-        : "not_detected",
+      status: middleNameStatus,
       value: middleName,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(
+        middleName && !/^(none|n\/?a|wala|-)$/i.test(middleName) ? middleName : undefined,
+        middleNameStatus,
+        isNameAmbiguous
+      ),
       notes: middleName ? (isNameAmbiguous ? "Review middle name separation" : undefined) : "Middle name is optional / not detected",
     },
     last_name: {
-      status: lastName !== "Unknown" && lastName.length > 0
-        ? isNameAmbiguous
-          ? "needs_verification"
-          : isConfidenceGood
-          ? "extracted"
-          : "needs_verification"
-        : "not_detected",
+      status: lastNameStatus,
       value: lastName !== "Unknown" ? lastName : undefined,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(lastName !== "Unknown" ? lastName : undefined, lastNameStatus, isNameAmbiguous),
       notes: isNameAmbiguous ? "Review last name separation" : undefined,
     },
     birth_date: {
-      status: birthDate
-        ? isConfidenceGood
-          ? "extracted"
-          : "needs_verification"
-        : "not_detected",
+      status: birthDateStatus,
       value: birthDate,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(birthDate, birthDateStatus),
     },
     sex: {
-      status: sex ? "extracted" : "not_detected",
+      status: sexStatus,
       value: sex,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(sex, sexStatus),
     },
     birth_place: {
-      status: birthPlace.city_municipality ? "extracted" : "not_detected",
+      status: birthPlaceStatus,
       value: birthPlace.city_municipality,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(birthPlace.city_municipality, birthPlaceStatus),
     },
-    mother_name: {
-      status: motherMaidenName ? "extracted" : "not_detected",
-      value: motherMaidenName,
-      confidence: ocrConfidence,
-    },
+    mother_name: motherItem,
+    mother_maiden_name: motherItem,
     father_name: {
-      status: fatherName ? "extracted" : "not_detected",
+      status: fatherNameStatus,
       value: fatherName,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(fatherName, fatherNameStatus),
     },
     registry_number: {
-      status: registryNumber ? "extracted" : "not_detected",
+      status: registryNumberStatus,
       value: registryNumber,
-      confidence: ocrConfidence,
+      confidence: computeFieldConfidence(registryNumber, registryNumberStatus),
     },
   };
 
@@ -837,7 +1342,7 @@ export function parsePsaBirthCert(
       complete_name: completeName,
       formatted_name: formattedName,
       suffix,
-      sex: sex || ("M" as any),
+      sex: sex,
       birth_date: birthDate || "",
       birth_place: birthPlace,
       mother_maiden_name: motherMaidenName,

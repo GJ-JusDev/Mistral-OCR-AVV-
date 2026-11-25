@@ -308,11 +308,11 @@ export async function handleOcrRoute(
     const { image, frontImage, backImage, images, extractFields, gradeLevel, documentSide, documentType, docType } = body || {};
     const effectiveDocType = (documentType || docType || "").toLowerCase().trim();
 
-    const validOcrDocTypes = ["sf1", "sf2", "sf5", "sf9", "sf10", "birth_cert", "psa"];
+    const validOcrDocTypes = ["sf1", "sf2", "sf9", "sf10", "birth_cert", "psa"];
     if (effectiveDocType && !validOcrDocTypes.includes(effectiveDocType)) {
       return Response.json(
         {
-          error: `Unsupported document type: '${effectiveDocType}'. The active AVV Senior High School scope supports SF1, SF2, SF5, SF9, SF10, and PSA Birth Certificate.`,
+          error: `Unsupported document type: '${effectiveDocType}'. The active AVV Senior High School scope supports SF1, SF2, SF9, SF10, and PSA Birth Certificate.`,
           code: "DOCUMENT_TYPE_NOT_SUPPORTED",
         },
         { status: 400 }

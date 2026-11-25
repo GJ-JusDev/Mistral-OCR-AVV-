@@ -12,6 +12,7 @@ import {
   rebuildBatchValidationReportFromPersistedResults,
 } from "@/lib/validation/batchCrossDocumentValidator";
 import { parseGradesText } from "@/lib/ocr/gradesParser";
+import { mergeSf9FrontAndBack } from "@/lib/validation/sf9Merger";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
 import { ingestRosterDocument } from "@/lib/upload/rosterIngestion";
 import {
@@ -655,25 +656,84 @@ export async function POST(request: NextRequest) {
 
     for (const seg of segmentsToExtract) {
       try {
-        const segRawLayout = {
-          pages: seg.pages,
-          pageCount: seg.pageCount,
-        };
+        let parsed: any;
 
-        const parsed = parseGradesText(
-          seg.combinedText,
-          verifiedGradeLevel,
-          segRawLayout,
-          seg.documentType
-        );
+        if (seg.documentType === "sf9" && Array.isArray(seg.pages) && seg.pages.length === 2) {
+          // Identify Front vs Back page
+          let frontPage = seg.pages[0];
+          let backPage = seg.pages[1];
+
+          // Check if order is inverted (Page 0 is back, Page 1 is front)
+          const p0Side = (frontPage as any).documentSide || (frontPage as any).side;
+          const p1Side = (backPage as any).documentSide || (backPage as any).side;
+
+          const p0HasFrontMarkers = /certificate of transfer|dear parent|learner reference no|\blrn[:\s]*\d{12}\b/i.test(frontPage.text || "");
+          const p1HasFrontMarkers = /certificate of transfer|dear parent|learner reference no|\blrn[:\s]*\d{12}\b/i.test(backPage.text || "");
+
+          if (p0Side === "back" || p1Side === "front" || (!p0HasFrontMarkers && p1HasFrontMarkers)) {
+            frontPage = seg.pages[1];
+            backPage = seg.pages[0];
+          }
+
+          const frontRawLayout = { pages: [frontPage], pageCount: 1, tables: frontPage.tables || [] };
+          const backRawLayout = { pages: [backPage], pageCount: 1, tables: backPage.tables || [] };
+
+          const frontFields = parseGradesText(frontPage.text, verifiedGradeLevel, frontRawLayout, "sf9");
+          const backFields = parseGradesText(backPage.text, verifiedGradeLevel, backRawLayout, "sf9");
+
+          const mergedResult = mergeSf9FrontAndBack(
+            { fields: frontFields, rawText: frontPage.text, pageNumber: frontPage.pageNumber, confidence: seg.confidence },
+            { fields: backFields, rawText: backPage.text, pageNumber: backPage.pageNumber, confidence: seg.confidence }
+          );
+
+          if (mergedResult.hasIdentityConflict || !mergedResult.isSameLearner) {
+            // Do NOT attach back page's grades to learner; flag segment as NEEDS REVIEW / identity mismatch
+            parsed = {
+              ...mergedResult.unifiedFields,
+              grades: [], // Withhold grades from attaching to this learner
+              identity_conflict: true,
+              identity_conflicts: mergedResult.identityConflicts,
+              needs_review: true,
+            };
+            seg.needsClassification = true;
+            seg.persistenceStatus = "failed";
+            seg.reasons.push(
+              `SF9 Front and Back Identity Mismatch: ${mergedResult.identityConflicts.join("; ")}`
+            );
+          } else {
+            parsed = mergedResult.unifiedFields;
+            if (mergedResult.academicConflicts.length > 0) {
+              parsed.academic_conflicts = mergedResult.academicConflicts;
+            }
+          }
+        } else {
+          const segRawLayout = {
+            pages: seg.pages,
+            pageCount: seg.pageCount,
+          };
+
+          parsed = parseGradesText(
+            seg.combinedText,
+            verifiedGradeLevel,
+            segRawLayout,
+            seg.documentType
+          );
+
+          if (seg.documentType === "sf9" && Array.isArray(seg.pages) && seg.pages.length === 1) {
+            const hasGrades = Array.isArray(parsed.grades) && parsed.grades.length > 0;
+            const hasLrn = parsed.lrn && String(parsed.lrn).replace(/[^0-9]/g, "").length === 12;
+            if (hasLrn && !hasGrades) {
+              parsed.is_front_only = true;
+            } else if (!hasLrn && hasGrades) {
+              parsed.is_back_only = true;
+            }
+          }
+        }
 
         extractedSegmentData[seg.id] = parsed;
 
         // Persist Parent Document into public.documents first
-        const docTypeForDb =
-          seg.documentType === "sf5a" || seg.documentType === "sf5b"
-            ? "sf5"
-            : seg.documentType;
+        const docTypeForDb = seg.documentType;
 
         const primaryPage = seg.pages?.[0];
         const sourceFileName = primaryPage?.sourceFileName || (Array.isArray(files) && files[0]?.name) || "batch_upload.pdf";
@@ -746,6 +806,18 @@ export async function POST(request: NextRequest) {
         // PRESERVE EXISTING DOCUMENT ID on retry; generate new UUID only for first-time scans
         const docId = existingDocId || crypto.randomUUID();
 
+        const secondaryPage = seg.pages?.[1];
+        const frontFileName = primaryPage?.sourceFileName || sourceFileName;
+        const backFileName = secondaryPage?.sourceFileName || frontFileName;
+
+        const frontFileInfo = fileStorageMap.get(frontFileName) || fileInfo;
+        const backFileInfo = secondaryPage ? (fileStorageMap.get(backFileName) || frontFileInfo) : null;
+
+        const frontStoragePath = frontFileInfo?.storagePath || realStoragePath;
+        const backStoragePath = backFileInfo?.storagePath || (secondaryPage ? realStoragePath : null);
+        const frontSignedUrl = frontFileInfo?.signedUrl || realSignedUrl;
+        const backSignedUrl = backFileInfo?.signedUrl || (secondaryPage ? realSignedUrl : null);
+
         const extractedFieldsPayload = {
           ...parsed,
           batch_id: batchId,
@@ -757,6 +829,27 @@ export async function POST(request: NextRequest) {
           source_file: sourceFileName,
           mime_type: fileInfo?.mimeType || "application/pdf",
           file_size: fileInfo?.fileSize || null,
+          front_storage_path: frontStoragePath,
+          back_storage_path: backStoragePath,
+          front_image_url: frontSignedUrl,
+          back_image_url: backSignedUrl,
+          images: {
+            front: frontSignedUrl,
+            back: backSignedUrl,
+          },
+          source_pages: (seg.pages || []).map((p: any) => {
+            const pFname = p.sourceFileName || sourceFileName;
+            const pFinfo = fileStorageMap.get(pFname);
+            return {
+              pageNumber: p.pageNumber,
+              originalPageNumber: p.originalPageNumber || 1,
+              sourceFileName: pFname,
+              storagePath: pFinfo?.storagePath || realStoragePath,
+              signedUrl: pFinfo?.signedUrl || realSignedUrl,
+              documentSide: p.documentSide || p.side,
+              pairId: p.pairId,
+            };
+          }),
         };
 
         if (existingDocId) {
@@ -777,7 +870,7 @@ export async function POST(request: NextRequest) {
 
           const privilegedDb = createVerifiedServerPrivilegedClient(supabase);
 
-          if (["sf1", "sf2", "sf5a", "sf5b"].includes(seg.documentType)) {
+          if (["sf1", "sf2"].includes(seg.documentType)) {
             // Stage replacement roster entries under temporary staging document
             let stagingDocId: string;
             try {
@@ -1060,7 +1153,7 @@ export async function POST(request: NextRequest) {
         // Ingest child tables based on document type using verified server-side client
         const privilegedDb = createVerifiedServerPrivilegedClient(supabase);
 
-        if (["sf1", "sf2", "sf5a", "sf5b"].includes(seg.documentType)) {
+        if (["sf1", "sf2"].includes(seg.documentType)) {
           const rosterRes = await ingestRosterDocument({
             db: privilegedDb,
             documentId: docId,
@@ -1127,7 +1220,10 @@ export async function POST(request: NextRequest) {
           }
         } else if (seg.documentType === "sf9" || seg.documentType === "sf10") {
           // SF9 / SF10 subject grades persistence
-          if (Array.isArray(parsed.grades) && parsed.grades.length > 0) {
+          // SAFEGUARD: Never insert subject grades if SF9 identity conflict is present or marked needs_review
+          if (seg.documentType === "sf9" && (parsed.identity_conflict || (seg.persistenceStatus as string) === "failed")) {
+            console.warn(`[scan/batch] Withholding subject_grades insert for segment ${seg.id} due to identity conflict / needs_review`);
+          } else if (Array.isArray(parsed.grades) && parsed.grades.length > 0) {
             const parseNumOrNull = (val: any): number | null => {
               if (val === null || val === undefined || val === "") return null;
               const n = typeof val === "number" ? val : parseFloat(String(val));
@@ -1233,9 +1329,9 @@ export async function POST(request: NextRequest) {
             ...dossier.documentPresence,
             sf1: savedRecords.sf1Entries.length > 0,
             sf2: savedRecords.sf2Entries.length > 0,
-            sf5: savedRecords.sf5Entries.length > 0,
-            sf5a: savedRecords.sf5Entries.some((entry) => entry.form_variant === "SF5A-SHS"),
-            sf5b: savedRecords.sf5Entries.some((entry) => entry.form_variant === "SF5B-SHS"),
+            sf5: false,
+            sf5a: false,
+            sf5b: false,
             sf9: savedRecords.sf9Docs.length > 0,
             sf10: savedRecords.sf10Docs.length > 0,
             psa: savedRecords.psaRecords.length > 0,
@@ -1243,7 +1339,6 @@ export async function POST(request: NextRequest) {
             totalAvailable: [
               savedRecords.sf1Entries.length > 0,
               savedRecords.sf2Entries.length > 0,
-              savedRecords.sf5Entries.length > 0,
               savedRecords.sf9Docs.length > 0,
               savedRecords.sf10Docs.length > 0,
               savedRecords.psaRecords.length > 0,

@@ -21,6 +21,7 @@ import {
   CheckCircle2,
   AlertCircle,
   RotateCcw,
+  RotateCw,
   Eye,
   Sparkles,
   ArrowRight,
@@ -35,8 +36,12 @@ import {
   Plus,
   Trash2,
   Camera,
+  Loader2,
+  Edit3,
 } from "lucide-react";
 import DocumentCameraCaptureModal from "@/components/camera/DocumentCameraCaptureModal";
+import { preprocessPsaImage } from "@/lib/ocr/psaPreprocessing";
+import type { PsaFieldStatusItem } from "@/lib/ocr/psaParser";
 
 export type UnifiedProcessingStage =
   | "idle"
@@ -59,6 +64,8 @@ const STAGES_CONFIG: Array<{ id: UnifiedProcessingStage; label: string; descript
   { id: "completed", label: "Validation Report", description: "Consolidating report across all forms" },
 ];
 
+export type ExtractionStatus = "pending" | "extracting" | "extracted" | "failed";
+
 export interface WizardDocumentItem {
   id: string;
   file: File;
@@ -71,6 +78,20 @@ export interface WizardDocumentItem {
   documentType: ShsDocumentType;
   stepCategory: UploadDocCategory;
   uploadedAt: number;
+  pairId?: string;
+  documentSide?: "front" | "back";
+  extractionStatus?: ExtractionStatus;
+  extractionError?: string;
+  extractedText?: string;
+  extractedFields?: any;
+  rawLayout?: RawLayoutResult;
+  // Step 5 PSA Preprocessing & Multi-view Preview fields:
+  originalDataUrl?: string;
+  upperSectionDataUrl?: string;
+  processedDataUrl?: string;
+  previewMode?: "upper" | "processed" | "original";
+  rotation?: number;
+  isPreprocessing?: boolean;
 }
 
 export interface WizardStepDefinition {
@@ -112,20 +133,8 @@ export const WIZARD_STEPS: WizardStepDefinition[] = [
     requiredFieldsNote: "School Month, Days of Classes, Days Present/Absent per learner, Registered Adviser",
   },
   {
-    id: "sf5",
-    stepNumber: 3,
-    shortLabel: "SF5",
-    title: "School Form 5 (SF5-SHS)",
-    formCode: "SF5-SHS",
-    depedName: "Promotion / Graduation List",
-    description: "End of semester promotion status (SF5A) or candidates for graduation/TVL completion (SF5B).",
-    purpose: "Cross-checks learner promotion status, general average, and complete SHS graduation eligibility.",
-    isOptional: false,
-    requiredFieldsNote: "Promotion/Proficiency Status, General Average, Graduation Candidates",
-  },
-  {
     id: "sf9",
-    stepNumber: 4,
+    stepNumber: 3,
     shortLabel: "SF9",
     title: "School Form 9 (SF9-SHS)",
     formCode: "SF9-SHS",
@@ -137,7 +146,7 @@ export const WIZARD_STEPS: WizardStepDefinition[] = [
   },
   {
     id: "sf10",
-    stepNumber: 5,
+    stepNumber: 4,
     shortLabel: "SF10",
     title: "School Form 10 (SF10-SHS)",
     formCode: "SF10-SHS",
@@ -149,7 +158,7 @@ export const WIZARD_STEPS: WizardStepDefinition[] = [
   },
   {
     id: "birth_cert",
-    stepNumber: 6,
+    stepNumber: 5,
     shortLabel: "PSA",
     title: "PSA Certificate of Live Birth",
     formCode: "PSA / NSO",
@@ -173,9 +182,8 @@ interface RawLayoutResult {
 }
 
 export default function UnifiedUploadPage() {
-  // Wizard state: 0=SF1, 1=SF2, 2=SF5, 3=SF9, 4=SF10, 5=PSA, 6=Review
+  // Wizard state: 0=SF1, 1=SF2, 2=SF9, 3=SF10, 4=PSA, 5=Review
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
-  const [sf5Variant, setSf5Variant] = useState<"sf5a" | "sf5b">("sf5a");
   const [stepFiles, setStepFiles] = useState<Record<UploadDocCategory, WizardDocumentItem[]>>({
     sf1: [],
     sf2: [],
@@ -186,12 +194,44 @@ export default function UnifiedUploadPage() {
   });
   const [replacingFileId, setReplacingFileId] = useState<string | null>(null);
   const [previewModalFile, setPreviewModalFile] = useState<WizardDocumentItem | null>(null);
+  const [modalPsaPreviewMode, setModalPsaPreviewMode] = useState<"upper" | "processed" | "original">("upper");
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+
+  // Manual Correction state for Step 5 (PSA) documents
+  const [editingPsaFileId, setEditingPsaFileId] = useState<string | null>(null);
+  const [editingPsaForm, setEditingPsaForm] = useState<{
+    first_name: string;
+    middle_name: string;
+    last_name: string;
+    birth_date: string;
+    sex: string;
+    mother_maiden_name: string;
+    father_name: string;
+    registry_number: string;
+  }>({
+    first_name: "",
+    middle_name: "",
+    last_name: "",
+    birth_date: "",
+    sex: "",
+    mother_maiden_name: "",
+    father_name: "",
+    registry_number: "",
+  });
 
   // Selected files state (kept synchronized with wizard files for unified scanning and regression tests)
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<
-    Array<{ name: string; size: string; type: string; dataUrl: string; pageCount: number; documentType?: ShsDocumentType }>
+    Array<{
+      name: string;
+      size: string;
+      type: string;
+      dataUrl: string;
+      pageCount: number;
+      documentType?: ShsDocumentType;
+      documentSide?: "front" | "back";
+      pairId?: string;
+    }>
   >([]);
   const [isDragOver, setIsDragOver] = useState(false);
 
@@ -269,12 +309,11 @@ export default function UnifiedUploadPage() {
   // Synchronize aggregated selectedFiles and filePreviews from stepFiles map
   const syncAggregatedFiles = (updatedStepFiles: Record<UploadDocCategory, WizardDocumentItem[]>) => {
     const allItems: WizardDocumentItem[] = [
-      ...updatedStepFiles.sf1,
-      ...updatedStepFiles.sf2,
-      ...updatedStepFiles.sf5,
-      ...updatedStepFiles.sf9,
-      ...updatedStepFiles.sf10,
-      ...updatedStepFiles.birth_cert,
+      ...(updatedStepFiles.sf1 || []),
+      ...(updatedStepFiles.sf2 || []),
+      ...(updatedStepFiles.sf9 || []),
+      ...(updatedStepFiles.sf10 || []),
+      ...(updatedStepFiles.birth_cert || []),
     ];
 
     setSelectedFiles(allItems.map((i) => i.file));
@@ -286,6 +325,8 @@ export default function UnifiedUploadPage() {
         dataUrl: i.dataUrl,
         pageCount: i.pageCount,
         documentType: i.documentType,
+        documentSide: i.documentSide,
+        pairId: i.pairId,
       }))
     );
   };
@@ -379,13 +420,395 @@ export default function UnifiedUploadPage() {
     return new File([u8arr], filename, { type: mime });
   };
 
+  // Restore staged OCR records from sessionStorage on page refresh
+  useEffect(() => {
+    if (!isBatchHydrated || !currentBatchId) return;
+    try {
+      const rawOcr = sessionStorage.getItem(`avv_staged_ocr_${currentBatchId}`);
+      if (rawOcr) {
+        const parsedOcr = JSON.parse(rawOcr);
+        if (parsedOcr && typeof parsedOcr === "object") {
+          setStepFiles((prev) => {
+            let hasNewItems = false;
+            const next = { ...prev };
+            for (const cat of Object.keys(parsedOcr) as UploadDocCategory[]) {
+              const items = parsedOcr[cat];
+              if (Array.isArray(items) && items.length > 0 && (!prev[cat] || prev[cat].length === 0)) {
+                hasNewItems = true;
+                next[cat] = items.map((it: any) => ({
+                  ...it,
+                  file: it.dataUrl
+                    ? dataUrlToFile(it.dataUrl, it.name || "document.jpg")
+                    : new File([], it.name || "document.jpg"),
+                }));
+              }
+            }
+            if (hasNewItems) {
+              syncAggregatedFiles(next);
+              return next;
+            }
+            return prev;
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("[upload] Unable to restore staged OCR from sessionStorage:", e);
+    }
+  }, [isBatchHydrated, currentBatchId]);
+
+  const renderConfidencePill = (conf?: number, isCorrected?: boolean) => {
+    if (isCorrected) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold font-mono bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 shadow-2xs"
+          title="Manually verified and corrected by Teacher (100% verified)"
+        >
+          <Check className="w-2.5 h-2.5" />
+          <span>Corrected</span>
+        </span>
+      );
+    }
+    if (typeof conf !== "number" || isNaN(conf)) return null;
+    const rounded = Math.round(conf);
+    const badgeClass =
+      rounded >= 85
+        ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800"
+        : rounded >= 60
+        ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-300 dark:border-amber-800"
+        : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700";
+    return (
+      <span
+        className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold font-mono border ${badgeClass}`}
+        title={`OCR Field Confidence: ${rounded}%`}
+      >
+        {rounded}%
+      </span>
+    );
+  };
+
+  // Helper to update extraction state for a file item and persist to sessionStorage
+  const updateFileExtraction = (
+    fileId: string,
+    category: UploadDocCategory,
+    updates: Partial<WizardDocumentItem>
+  ) => {
+    setStepFiles((prev) => {
+      const currentList = prev[category] || [];
+      const updatedList = currentList.map((doc) =>
+        doc.id === fileId ? { ...doc, ...updates } : doc
+      );
+      const nextStepFiles = { ...prev, [category]: updatedList };
+
+      if (typeof window !== "undefined" && currentBatchId) {
+        try {
+          const serializable = Object.fromEntries(
+            Object.entries(nextStepFiles).map(([cat, items]) => [
+              cat,
+              (items as WizardDocumentItem[]).map((it) => ({
+                id: it.id,
+                name: it.name,
+                size: it.size,
+                sizeBytes: it.sizeBytes,
+                type: it.type,
+                pageCount: it.pageCount,
+                documentType: it.documentType,
+                stepCategory: it.stepCategory,
+                uploadedAt: it.uploadedAt,
+                documentSide: it.documentSide,
+                pairId: it.pairId,
+                extractionStatus: it.extractionStatus,
+                extractedText: it.extractedText,
+                extractedFields: it.extractedFields,
+                rawLayout: it.rawLayout,
+                extractionError: it.extractionError,
+                dataUrl: it.dataUrl,
+                originalDataUrl: it.originalDataUrl,
+                upperSectionDataUrl: it.upperSectionDataUrl,
+                processedDataUrl: it.processedDataUrl,
+                previewMode: it.previewMode,
+                rotation: it.rotation,
+              })),
+            ])
+          );
+          sessionStorage.setItem(`avv_staged_ocr_${currentBatchId}`, JSON.stringify(serializable));
+        } catch (e) {
+          console.warn("[upload] Unable to cache extraction to sessionStorage:", e);
+        }
+      }
+
+      return nextStepFiles;
+    });
+  };
+
+  // Auto-extract a single document file using /api/ocr with exponential backoff on HTTP 429
+  const extractSingleFile = async (item: WizardDocumentItem, category: UploadDocCategory) => {
+    updateFileExtraction(item.id, category, {
+      extractionStatus: "extracting",
+      extractionError: undefined,
+    });
+
+    const assignment = assignmentGate.selectedAssignment;
+    const maxRetries = 3;
+    let attempt = 0;
+    let lastError: Error | null = null;
+
+    const imageToSend =
+      category === "birth_cert" && item.upperSectionDataUrl
+        ? item.upperSectionDataUrl
+        : category === "birth_cert" && item.processedDataUrl
+        ? item.processedDataUrl
+        : item.dataUrl;
+
+    while (attempt <= maxRetries) {
+      try {
+        const ocrRes = await fetch("/api/ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            image: imageToSend,
+            upperSectionImage: item.upperSectionDataUrl,
+            originalImage: item.originalDataUrl || item.dataUrl,
+            documentType: item.documentType || "sf9",
+            teacherAssignmentId: assignment?.id,
+            assignmentConfirmed: true,
+            selectedSchoolYear: assignment?.school_year || "2024-2025",
+            selectedGradeLevel: assignment?.grade_level || "Grade 11",
+            selectedSection: assignment?.section || "Diamond",
+            extractFields: true,
+          }),
+        });
+
+        if (ocrRes.status === 429) {
+          attempt++;
+          if (attempt <= maxRetries) {
+            const delayMs = Math.pow(2, attempt) * 1000;
+            console.warn(
+              `[upload] HTTP 429 rate limit hit for "${item.name}". Retrying in ${delayMs}ms (attempt ${attempt}/${maxRetries})...`
+            );
+            await new Promise((r) => setTimeout(r, delayMs));
+            continue;
+          }
+          throw new Error("OCR rate limit exceeded (HTTP 429). Please retry extraction in a moment.");
+        }
+
+        if (!ocrRes.ok) {
+          const errJson = (await ocrRes.json().catch(() => ({}))) as Record<string, unknown>;
+          throw new Error(
+            typeof errJson.error === "string"
+              ? errJson.error
+              : `OCR extraction failed with HTTP ${ocrRes.status}.`
+          );
+        }
+
+        const ocrData = await ocrRes.json();
+        const rawLayout: RawLayoutResult = (ocrData.rawLayout || {}) as RawLayoutResult;
+        const text = (ocrData.text as string) || "";
+        const extractedFields = ocrData.fields || {};
+
+        updateFileExtraction(item.id, category, {
+          extractionStatus: "extracted",
+          extractedText: text,
+          extractedFields,
+          rawLayout,
+          extractionError: undefined,
+        });
+        return;
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt >= maxRetries) break;
+        attempt++;
+      }
+    }
+
+    updateFileExtraction(item.id, category, {
+      extractionStatus: "failed",
+      extractionError: lastError?.message || "Extraction failed.",
+    });
+  };
+
+  // Retry extracting an individual file that failed
+  const handleRetryFileExtraction = (fileId: string, category: UploadDocCategory) => {
+    const fileItem = (stepFiles[category] || []).find((f) => f.id === fileId);
+    if (!fileItem) return;
+    extractSingleFile(fileItem, category);
+  };
+
+  // Rotation control for Step 5 PSA documents
+  const handleRotatePsaFile = async (id: string, deltaDeg: number) => {
+    const list = stepFiles.birth_cert || [];
+    const item = list.find((it) => it.id === id);
+    if (!item) return;
+
+    const curRot = item.rotation || 0;
+    const nextRot = (((curRot + deltaDeg) % 360) + 360) % 360;
+    const baseDataUrl = item.originalDataUrl || item.dataUrl;
+
+    updateFileExtraction(id, "birth_cert", {
+      isPreprocessing: true,
+    });
+
+    try {
+      const prep = await preprocessPsaImage(baseDataUrl, {
+        autoRotate: false,
+        rotation: nextRot,
+      });
+
+      const updatedFields: Partial<WizardDocumentItem> = {
+        rotation: nextRot,
+        processedDataUrl: prep.processedDataUrl,
+        upperSectionDataUrl: prep.upperSectionDataUrl,
+        previewMode: prep.upperSectionDataUrl ? "upper" : "processed",
+        isPreprocessing: false,
+      };
+
+      updateFileExtraction(id, "birth_cert", updatedFields);
+
+      if (previewModalFile && previewModalFile.id === id) {
+        setPreviewModalFile((prev) => (prev ? { ...prev, ...updatedFields } : null));
+      }
+
+      const updatedItem: WizardDocumentItem = {
+        ...item,
+        ...updatedFields,
+      };
+      await extractSingleFile(updatedItem, "birth_cert");
+    } catch (err) {
+      console.error("[upload] Failed to rotate PSA image:", err);
+      updateFileExtraction(id, "birth_cert", {
+        isPreprocessing: false,
+      });
+    }
+  };
+
+  const handleSetPsaPreviewMode = (id: string, mode: "upper" | "processed" | "original") => {
+    updateFileExtraction(id, "birth_cert", { previewMode: mode });
+  };
+
+  // Manual Correction Handlers for Step 5 PSA documents
+  const handleStartPsaCorrection = (item: WizardDocumentItem) => {
+    const fields = item.extractedFields || {};
+    const id = fields.identity || {};
+    setEditingPsaForm({
+      first_name: id.first_name || fields.child_first_name || fields.first_name || "",
+      middle_name: id.middle_name || fields.child_middle_name || fields.middle_name || "",
+      last_name: id.last_name || fields.child_last_name || fields.last_name || "",
+      birth_date: id.birth_date || fields.birth_date || fields.date_of_birth || "",
+      sex: id.sex || fields.sex || "",
+      mother_maiden_name: id.mother_maiden_name || fields.mother_maiden_name || fields.mother_name || "",
+      father_name: id.father_name || fields.father_name || "",
+      registry_number: id.registry_number || fields.registry_number || fields.civil_registry_number || "",
+    });
+    setEditingPsaFileId(item.id);
+  };
+
+  const handleCancelPsaCorrection = () => {
+    setEditingPsaFileId(null);
+  };
+
+  const handleSavePsaCorrection = (fileId: string) => {
+    const list = stepFiles.birth_cert || [];
+    const item = list.find((it) => it.id === fileId);
+    if (!item) return;
+
+    const existingFields = item.extractedFields || {};
+    const existingIdentity = existingFields.identity || {};
+    const existingStatuses = (existingFields.field_statuses || {}) as Record<string, PsaFieldStatusItem>;
+
+    const parts = [editingPsaForm.first_name, editingPsaForm.middle_name, editingPsaForm.last_name].filter(
+      (p) => p && p.trim().length > 0 && p !== "Unknown"
+    );
+    const completeName = parts.join(" ");
+    const formattedName = `${editingPsaForm.last_name}, ${editingPsaForm.first_name}${editingPsaForm.middle_name ? ` ${editingPsaForm.middle_name}` : ""}`;
+
+    const updatedStatuses = { ...existingStatuses };
+    const correctedFields: Record<string, boolean> = { ...(existingFields.corrected_fields || {}) };
+
+    const checkCorrected = (fieldName: string, newVal: string, oldVal: string) => {
+      const n = (newVal || "").trim();
+      const o = (oldVal || "").trim();
+      if (n !== o && n.length > 0) {
+        correctedFields[fieldName] = true;
+        updatedStatuses[fieldName] = {
+          status: "extracted",
+          confidence: 100,
+          value: n,
+          notes: o ? `Original OCR: ${o}` : undefined,
+        };
+      }
+    };
+
+    checkCorrected("first_name", editingPsaForm.first_name, existingIdentity.first_name || existingFields.child_first_name || existingFields.first_name || "");
+    checkCorrected("middle_name", editingPsaForm.middle_name, existingIdentity.middle_name || existingFields.child_middle_name || existingFields.middle_name || "");
+    checkCorrected("last_name", editingPsaForm.last_name, existingIdentity.last_name || existingFields.child_last_name || existingFields.last_name || "");
+    checkCorrected("birth_date", editingPsaForm.birth_date, existingIdentity.birth_date || existingFields.birth_date || existingFields.date_of_birth || "");
+    checkCorrected("sex", editingPsaForm.sex, existingIdentity.sex || existingFields.sex || "");
+    checkCorrected("mother_maiden_name", editingPsaForm.mother_maiden_name, existingIdentity.mother_maiden_name || existingFields.mother_maiden_name || existingFields.mother_name || "");
+    checkCorrected("father_name", editingPsaForm.father_name, existingIdentity.father_name || existingFields.father_name || "");
+    checkCorrected("registry_number", editingPsaForm.registry_number, existingIdentity.registry_number || existingFields.registry_number || existingFields.civil_registry_number || "");
+
+    const updatedIdentity = {
+      ...existingIdentity,
+      first_name: editingPsaForm.first_name.trim(),
+      middle_name: editingPsaForm.middle_name.trim(),
+      last_name: editingPsaForm.last_name.trim(),
+      complete_name: completeName,
+      formatted_name: formattedName,
+      birth_date: editingPsaForm.birth_date.trim(),
+      sex: editingPsaForm.sex.trim(),
+      mother_maiden_name: editingPsaForm.mother_maiden_name.trim(),
+      father_name: editingPsaForm.father_name.trim(),
+      registry_number: editingPsaForm.registry_number.trim(),
+    };
+
+    const updatedExtractedFields = {
+      ...existingFields,
+      identity: updatedIdentity,
+      child_first_name: updatedIdentity.first_name,
+      child_middle_name: updatedIdentity.middle_name,
+      child_last_name: updatedIdentity.last_name,
+      first_name: updatedIdentity.first_name,
+      middle_name: updatedIdentity.middle_name,
+      last_name: updatedIdentity.last_name,
+      birth_date: updatedIdentity.birth_date,
+      date_of_birth: updatedIdentity.birth_date,
+      sex: updatedIdentity.sex,
+      mother_maiden_name: updatedIdentity.mother_maiden_name,
+      mother_name: updatedIdentity.mother_maiden_name,
+      father_name: updatedIdentity.father_name,
+      registry_number: updatedIdentity.registry_number,
+      civil_registry_number: updatedIdentity.registry_number,
+      field_statuses: updatedStatuses,
+      corrected_fields: correctedFields,
+      manually_corrected: true,
+    };
+
+    const updatedPsaText = [
+      "REPUBLIC OF THE PHILIPPINES",
+      "CERTIFICATE OF LIVE BIRTH",
+      `Registry No. ${updatedIdentity.registry_number}`,
+      "1. NAME",
+      `(First) ${updatedIdentity.first_name}`,
+      `(Middle) ${updatedIdentity.middle_name}`,
+      `(Last) ${updatedIdentity.last_name}`,
+      `2. SEX ${updatedIdentity.sex === "F" || updatedIdentity.sex.toLowerCase().startsWith("f") ? "2 Female" : "1 Male"}`,
+      `3. DATE OF BIRTH ${updatedIdentity.birth_date}`,
+      `11. MAIDEN NAME ${updatedIdentity.mother_maiden_name}`,
+      `16. NAME ${updatedIdentity.father_name}`,
+    ].join("\n");
+
+    updateFileExtraction(fileId, "birth_cert", {
+      extractedFields: updatedExtractedFields,
+      extractedText: updatedPsaText,
+    });
+
+    setEditingPsaFileId(null);
+  };
+
   // Add camera captured document photo to current step
-  const handlePhotoCaptured = (dataUrl: string, addAnother: boolean = false) => {
+  const handlePhotoCaptured = async (dataUrl: string, addAnother: boolean = false) => {
     const targetCategory: UploadDocCategory = currentDocCategory;
     let targetDocType: ShsDocumentType = "sf9";
-    if (targetCategory === "sf5") {
-      targetDocType = sf5Variant;
-    } else if (
+    if (
       targetCategory === "sf1" ||
       targetCategory === "sf2" ||
       targetCategory === "sf9" ||
@@ -402,6 +825,29 @@ export default function UnifiedUploadPage() {
     const file = dataUrlToFile(dataUrl, filename);
     const sizeMb = (file.size / (1024 * 1024)).toFixed(2) + " MB";
 
+    const sf9Side: "front" | "back" =
+      targetCategory === "sf9"
+        ? (currentList.length % 2 === 1 ? "back" : "front")
+        : "front";
+    const sf9PairId =
+      targetCategory === "sf9"
+        ? `pair-${Math.floor(currentList.length / 2) + 1}`
+        : undefined;
+
+    let upperSectionDataUrl: string | undefined;
+    let processedDataUrl: string | undefined;
+    let rotation = 0;
+    if (targetCategory === "birth_cert") {
+      try {
+        const prep = await preprocessPsaImage(dataUrl, { autoRotate: true, rotation: 0 });
+        processedDataUrl = prep.processedDataUrl;
+        upperSectionDataUrl = prep.upperSectionDataUrl;
+        rotation = prep.rotationApplied || 0;
+      } catch (err) {
+        console.warn("[upload] PSA preprocessing failed:", err);
+      }
+    }
+
     const newItem: WizardDocumentItem = {
       id: `doc-${targetDocType}-${timestamp}-${Math.random().toString(36).substring(2, 7)}`,
       file,
@@ -414,6 +860,14 @@ export default function UnifiedUploadPage() {
       documentType: targetDocType,
       stepCategory: targetCategory,
       uploadedAt: timestamp,
+      documentSide: targetCategory === "sf9" ? sf9Side : undefined,
+      pairId: sf9PairId,
+      extractionStatus: "pending",
+      originalDataUrl: dataUrl,
+      upperSectionDataUrl,
+      processedDataUrl,
+      previewMode: upperSectionDataUrl ? "upper" : "processed",
+      rotation,
     };
 
     const nextStepFiles: Record<UploadDocCategory, WizardDocumentItem[]> = {
@@ -428,6 +882,9 @@ export default function UnifiedUploadPage() {
     if (!addAnother) {
       setIsCameraOpen(false);
     }
+
+    // Auto-extract immediately on capture
+    extractSingleFile(newItem, targetCategory);
   };
 
   // Process selected files into previewable data URLs with hard 15MB file-size limit
@@ -474,9 +931,7 @@ export default function UnifiedUploadPage() {
 
     // Determine target ShsDocumentType
     let targetDocType: ShsDocumentType = "sf9";
-    if (targetCategory === "sf5") {
-      targetDocType = sf5Variant;
-    } else if (
+    if (
       targetCategory === "sf1" ||
       targetCategory === "sf2" ||
       targetCategory === "sf9" ||
@@ -488,13 +943,38 @@ export default function UnifiedUploadPage() {
 
     // Process new items
     const newItems: WizardDocumentItem[] = [];
-    for (const f of validFiles) {
+    for (let fIdx = 0; fIdx < validFiles.length; fIdx++) {
+      const f = validFiles[fIdx];
       const sizeMb = (f.size / (1024 * 1024)).toFixed(2) + " MB";
       const dataUrl = await new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onload = (e) => resolve(e.target?.result as string);
         reader.readAsDataURL(f);
       });
+
+      const totalExisting = currentList.length + newItems.length;
+      let sf9Side: "front" | "back" = totalExisting % 2 === 1 ? "back" : "front";
+      const fLower = f.name.toLowerCase();
+      if (fLower.includes("back") || fLower.includes("side_2") || fLower.includes("side2") || fLower.includes("grades")) {
+        sf9Side = "back";
+      } else if (fLower.includes("front") || fLower.includes("side_1") || fLower.includes("side1") || fLower.includes("identity")) {
+        sf9Side = "front";
+      }
+      const sf9PairId = targetCategory === "sf9" ? `pair-${Math.floor(totalExisting / 2) + 1}` : undefined;
+
+      let upperSectionDataUrl: string | undefined;
+      let processedDataUrl: string | undefined;
+      let rotation = 0;
+      if (targetCategory === "birth_cert" && (f.type.startsWith("image/") || !f.name.endsWith(".pdf"))) {
+        try {
+          const prep = await preprocessPsaImage(dataUrl, { autoRotate: true, rotation: 0 });
+          processedDataUrl = prep.processedDataUrl;
+          upperSectionDataUrl = prep.upperSectionDataUrl;
+          rotation = prep.rotationApplied || 0;
+        } catch (err) {
+          console.warn("[upload] PSA preprocessing failed:", err);
+        }
+      }
 
       newItems.push({
         id: `doc-${targetDocType}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -508,6 +988,14 @@ export default function UnifiedUploadPage() {
         documentType: targetDocType,
         stepCategory: targetCategory,
         uploadedAt: Date.now(),
+        documentSide: targetCategory === "sf9" ? sf9Side : undefined,
+        pairId: sf9PairId,
+        extractionStatus: "pending",
+        originalDataUrl: dataUrl,
+        upperSectionDataUrl,
+        processedDataUrl,
+        previewMode: upperSectionDataUrl ? "upper" : "processed",
+        rotation,
       });
     }
 
@@ -522,6 +1010,11 @@ export default function UnifiedUploadPage() {
     syncAggregatedFiles(nextStepFiles);
     setReplacingFileId(null);
     setErrorMessage(null);
+
+    // Auto-extract immediately on upload for each staged file
+    for (const item of newItems) {
+      extractSingleFile(item, targetCategory);
+    }
   };
 
   // Remove a specific file from current step
@@ -534,6 +1027,24 @@ export default function UnifiedUploadPage() {
     syncAggregatedFiles(nextStepFiles);
   };
 
+  // Toggle SF9 Front/Back side designation for an uploaded file
+  const handleToggleSf9Side = (id: string) => {
+    const list = stepFiles.sf9 || [];
+    const updated = list.map((item) => {
+      if (item.id === id) {
+        const nextSide: "front" | "back" = item.documentSide === "back" ? "front" : "back";
+        return { ...item, documentSide: nextSide };
+      }
+      return item;
+    });
+    const nextStepFiles: Record<UploadDocCategory, WizardDocumentItem[]> = {
+      ...stepFiles,
+      sf9: updated,
+    };
+    setStepFiles(nextStepFiles);
+    syncAggregatedFiles(nextStepFiles);
+  };
+
   // Trigger file replace
   const handleReplaceFile = (id: string) => {
     setReplacingFileId(id);
@@ -541,21 +1052,6 @@ export default function UnifiedUploadPage() {
       fileInputRef.current.value = "";
       fileInputRef.current.click();
     }
-  };
-
-  // SF5 variant selection toggle
-  const handleSelectSf5Variant = (variant: "sf5a" | "sf5b") => {
-    setSf5Variant(variant);
-    const updatedSf5 = (stepFiles.sf5 || []).map((item) => ({
-      ...item,
-      documentType: variant,
-    }));
-    const nextStepFiles: Record<UploadDocCategory, WizardDocumentItem[]> = {
-      ...stepFiles,
-      sf5: updatedSf5,
-    };
-    setStepFiles(nextStepFiles);
-    syncAggregatedFiles(nextStepFiles);
   };
 
   // Drag and drop handlers
@@ -591,8 +1087,8 @@ export default function UnifiedUploadPage() {
 
   const handleSkipPsa = () => {
     setIsCameraOpen(false);
-    // Skip PSA step and move directly to Review (index 6)
-    setCurrentStepIndex(6);
+    // Skip PSA step and move directly to Review (index 5)
+    setCurrentStepIndex(5);
     setErrorMessage(null);
   };
 
@@ -619,44 +1115,43 @@ export default function UnifiedUploadPage() {
         words?: unknown[];
         tables?: unknown[];
         documentType?: ShsDocumentType;
+        documentSide?: "front" | "back";
+        pairId?: string;
       }> = [];
-      const totalFiles = filePreviews.length;
 
-      // Priority 4: Process EVERY uploaded file via OCR/ICR
+      const allWizardFiles: WizardDocumentItem[] = [
+        ...(stepFiles.sf1 || []),
+        ...(stepFiles.sf2 || []),
+        ...(stepFiles.sf9 || []),
+        ...(stepFiles.sf10 || []),
+        ...(stepFiles.birth_cert || []),
+      ];
+      const totalFiles = allWizardFiles.length;
+
+      // Extract any unparsed or failed files before submission (avoids burst OCR loop for already-extracted files)
       for (let fileIdx = 0; fileIdx < totalFiles; fileIdx++) {
-        const currentFile = filePreviews[fileIdx];
-        setStatusMessage(
-          totalFiles > 1
-            ? `Running OCR extraction on file ${fileIdx + 1} of ${totalFiles}: ${currentFile.name}...`
-            : "Staging document and sending to Azure Document Intelligence OCR..."
-        );
-
-        const ocrRes = await fetch("/api/ocr", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image: currentFile.dataUrl,
-            documentType: currentFile.documentType || "sf9",
-            teacherAssignmentId: assignment?.id,
-            assignmentConfirmed: true,
-            selectedSchoolYear: assignment?.school_year || "2024-2025",
-            selectedGradeLevel: assignment?.grade_level || "Grade 11",
-            selectedSection: assignment?.section || "Diamond",
-            extractFields: true,
-          }),
-        });
-
-        if (!ocrRes.ok) {
-          const errJson = (await ocrRes.json().catch(() => ({}))) as Record<string, unknown>;
-          throw new Error(
-            typeof errJson.error === "string"
-              ? errJson.error
-              : `OCR processing failed for "${currentFile.name}" with HTTP status ${ocrRes.status}.`
+        const item = allWizardFiles[fileIdx];
+        if (item.extractionStatus !== "extracted" || (!item.extractedText && !item.rawLayout)) {
+          setStatusMessage(
+            totalFiles > 1
+              ? `Extracting document ${fileIdx + 1} of ${totalFiles}: ${item.name}...`
+              : `Extracting ${item.name}...`
           );
+          await extractSingleFile(item, item.stepCategory);
         }
+      }
 
-        const ocrData = await ocrRes.json();
-        const rawLayout: RawLayoutResult = (ocrData.rawLayout || {}) as RawLayoutResult;
+      // Read finalized files after extraction
+      const finalizedFiles: WizardDocumentItem[] = [
+        ...(stepFiles.sf1 || []),
+        ...(stepFiles.sf2 || []),
+        ...(stepFiles.sf9 || []),
+        ...(stepFiles.sf10 || []),
+        ...(stepFiles.birth_cert || []),
+      ];
+
+      for (const currentFile of finalizedFiles) {
+        const rawLayout: RawLayoutResult = (currentFile.rawLayout || {}) as RawLayoutResult;
         const filePages =
           Array.isArray(rawLayout.pages) && rawLayout.pages.length > 0
             ? rawLayout.pages.map((p: RawPageItem) => ({
@@ -666,13 +1161,15 @@ export default function UnifiedUploadPage() {
                 sourceFileDataUrl: currentFile.dataUrl,
                 text: Array.isArray(p.lines)
                   ? p.lines.map((l) => l.content || "").join("\n")
-                  : (ocrData.text as string) || "",
+                  : (currentFile.extractedText as string) || "",
                 lines: p.lines,
                 words: p.words,
                 tables: Array.isArray(rawLayout.tables)
                   ? rawLayout.tables.filter((t) => t.boundingRegions?.[0]?.pageNumber === p.pageNumber)
                   : [],
                 documentType: currentFile.documentType || "sf9",
+                documentSide: currentFile.documentSide,
+                pairId: currentFile.pairId,
               }))
             : [
                 {
@@ -680,11 +1177,13 @@ export default function UnifiedUploadPage() {
                   originalPageNumber: 1,
                   sourceFileName: currentFile.name,
                   sourceFileDataUrl: currentFile.dataUrl,
-                  text: (ocrData.text as string) || "",
+                  text: (currentFile.extractedText as string) || "",
                   lines: [],
                   words: [],
                   tables: rawLayout.tables || [],
                   documentType: currentFile.documentType || "sf9",
+                  documentSide: currentFile.documentSide,
+                  pairId: currentFile.pairId,
                 },
               ];
 
@@ -707,6 +1206,8 @@ export default function UnifiedUploadPage() {
             type: f.type,
             dataUrl: f.dataUrl,
             size: f.size,
+            documentSide: f.documentSide,
+            pairId: f.pairId,
           })),
           assignmentId: assignment?.id,
           assignmentConfirmed: true,
@@ -833,7 +1334,6 @@ export default function UnifiedUploadPage() {
       sf10: [],
       birth_cert: [],
     });
-    setSf5Variant("sf5a");
     setCurrentStepIndex(0);
     setReplacingFileId(null);
     setIsCameraOpen(false);
@@ -891,7 +1391,7 @@ export default function UnifiedUploadPage() {
             {/* Step-by-Step Document Wizard (idle or error stage) */}
             {(stage === "idle" || stage === "error") && (
               <div className="space-y-6">
-                {/* ── STEPPER PROGRESS INDICATOR: SF1 → SF2 → SF5 → SF9 → SF10 → PSA → Review ── */}
+                {/* ── STEPPER PROGRESS INDICATOR: SF1 → SF2 → SF9 → SF10 → PSA → Review ── */}
                 <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                     <div className="flex items-center gap-2">
@@ -905,9 +1405,9 @@ export default function UnifiedUploadPage() {
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="text-xs font-semibold text-slate-500">
-                        Step {Math.min(currentStepIndex + 1, 7)} of 7:{" "}
+                        Step {Math.min(currentStepIndex + 1, 6)} of 6:{" "}
                         <span className="text-[#174EA6] font-bold">
-                          {currentStepIndex < 6 ? WIZARD_STEPS[currentStepIndex].shortLabel : "Review"}
+                          {currentStepIndex < 5 ? WIZARD_STEPS[currentStepIndex]?.shortLabel : "Review"}
                         </span>
                       </span>
                       <Button
@@ -925,7 +1425,7 @@ export default function UnifiedUploadPage() {
                   </div>
 
                   {/* Horizontal Step Bar */}
-                  <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
+                  <div className="grid grid-cols-6 gap-1.5 sm:gap-2">
                     {WIZARD_STEPS.map((st, idx) => {
                       const filesInStep = stepFiles[st.id] || [];
                       const hasUploaded = filesInStep.length > 0;
@@ -938,7 +1438,6 @@ export default function UnifiedUploadPage() {
                           onClick={() => {
                             if (st.id === "sf1") handleCategoryChange("sf1");
                             else if (st.id === "sf2") handleCategoryChange("sf2");
-                            else if (st.id === "sf5") handleCategoryChange("sf5");
                             else if (st.id === "sf9") handleCategoryChange("sf9");
                             else if (st.id === "sf10") handleCategoryChange("sf10");
                             else if (st.id === "birth_cert") handleCategoryChange("birth_cert");
@@ -966,12 +1465,12 @@ export default function UnifiedUploadPage() {
                       );
                     })}
 
-                    {/* Step 7: Final Review */}
+                    {/* Step 6: Final Review */}
                     <button
                       type="button"
-                      onClick={() => setCurrentStepIndex(6)}
+                      onClick={() => setCurrentStepIndex(5)}
                       className={`flex flex-col items-center p-2 rounded-xl border text-center transition-all cursor-pointer ${
-                        currentStepIndex === 6
+                        currentStepIndex === 5
                           ? "bg-blue-50/80 dark:bg-blue-950/40 border-[#174EA6] text-[#174EA6] dark:text-blue-300 ring-2 ring-blue-500/20 font-bold"
                           : totalUploadedCount > 0
                           ? "bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200"
@@ -979,7 +1478,7 @@ export default function UnifiedUploadPage() {
                       }`}
                     >
                       <div className="flex items-center justify-center w-5 h-5 rounded-full mb-1 text-[11px] font-bold">
-                        <span>7</span>
+                        <span>6</span>
                       </div>
                       <span className="text-xs font-bold leading-none">Review</span>
                       <span className="text-[10px] text-slate-400 mt-0.5 hidden md:inline truncate max-w-full">
@@ -1013,15 +1512,15 @@ export default function UnifiedUploadPage() {
                 )}
 
                 {/* ── STEP CONTENT CONTAINER ── */}
-                {currentStepIndex < 6 ? (
-                  /* STEPS 1-6: Document Upload Card */
+                {currentStepIndex < 5 ? (
+                  /* STEPS 1-5: Document Upload Card */
                   <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-6">
                     {/* Header info for current step */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 dark:bg-blue-950/60 text-[#174EA6] dark:text-blue-300">
-                            STEP {currentStep.stepNumber} of 6
+                            STEP {currentStep.stepNumber} of 5
                           </span>
                           {currentStep.isOptional ? (
                             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
@@ -1050,69 +1549,18 @@ export default function UnifiedUploadPage() {
                       </div>
                     </div>
 
-                    {/* Step 3 Special: SF5 Form Variant Selection (SF5A vs SF5B) */}
-                    {currentStep.id === "sf5" && (
-                      <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/60 rounded-xl p-4 space-y-3">
+                    {/* Step 4 Special: SF9 Two-Sided Pairing Guide */}
+                    {currentStep.id === "sf9" && (
+                      <div className="bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-900/60 rounded-xl p-4 space-y-2 text-xs">
                         <div className="flex items-center gap-2">
-                          <Layers className="w-4 h-4 text-[#174EA6]" />
-                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200">
-                            Select SF5 Form Variant:
+                          <Layers className="w-4 h-4 text-[#174EA6] dark:text-blue-400" />
+                          <h4 className="font-bold text-slate-800 dark:text-slate-200">
+                            Two-Sided SF9 Report Card Pairing Support
                           </h4>
                         </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          <label
-                            onClick={() => handleSelectSf5Variant("sf5a")}
-                            className={`p-3 rounded-xl border cursor-pointer transition-all flex items-start gap-3 ${
-                              sf5Variant === "sf5a"
-                                ? "bg-white dark:bg-slate-900 border-[#174EA6] shadow-xs ring-1 ring-[#174EA6]"
-                                : "bg-white/60 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 hover:border-slate-300"
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name="sf5Variant"
-                              value="sf5a"
-                              checked={sf5Variant === "sf5a"}
-                              onChange={() => handleSelectSf5Variant("sf5a")}
-                              className="mt-0.5 text-[#174EA6] focus:ring-[#174EA6]"
-                            />
-                            <div>
-                              <div className="font-bold text-xs text-slate-900 dark:text-slate-100">
-                                SF5A-SHS — End of Semester Promotion
-                              </div>
-                              <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                                Report on Promotion and Level of Proficiency. Lists promoted learners, general average, and back subjects.
-                              </p>
-                            </div>
-                          </label>
-
-                          <label
-                            onClick={() => handleSelectSf5Variant("sf5b")}
-                            className={`p-3 rounded-xl border cursor-pointer transition-all flex items-start gap-3 ${
-                              sf5Variant === "sf5b"
-                                ? "bg-white dark:bg-slate-900 border-[#174EA6] shadow-xs ring-1 ring-[#174EA6]"
-                                : "bg-white/60 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 hover:border-slate-300"
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name="sf5Variant"
-                              value="sf5b"
-                              checked={sf5Variant === "sf5b"}
-                              onChange={() => handleSelectSf5Variant("sf5b")}
-                              className="mt-0.5 text-[#174EA6] focus:ring-[#174EA6]"
-                            />
-                            <div>
-                              <div className="font-bold text-xs text-slate-900 dark:text-slate-100">
-                                SF5B-SHS — Graduation / TVL Candidates
-                              </div>
-                              <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                                List of Candidates for Complete SHS Program. Includes TVL assessment and diploma completion status.
-                              </p>
-                            </div>
-                          </label>
-                        </div>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-snug">
+                          Upload 2-page PDFs, or upload Front (Identity) and Back (Grades &amp; Attendance) image files per learner. You can toggle each image&apos;s side tag below to ensure accurate pairing.
+                        </p>
                       </div>
                     )}
 
@@ -1234,68 +1682,447 @@ export default function UnifiedUploadPage() {
                           </div>
                         </div>
 
-                        <div className="space-y-2">
+                        <div className="space-y-3">
                           {(stepFiles[currentStep.id] || []).map((item) => (
                             <div
                               key={item.id}
-                              className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 flex items-center justify-between gap-3 text-xs"
+                              className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 space-y-3 text-xs"
                             >
-                              <div className="flex items-center gap-3 overflow-hidden">
-                                <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-950/60 text-[#174EA6] dark:text-blue-400 flex items-center justify-center shrink-0">
-                                  <FileText className="w-5 h-5" />
-                                </div>
-                                <div className="overflow-hidden">
-                                  <div className="font-bold text-slate-800 dark:text-slate-200 truncate">
-                                    {item.name}
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-3 overflow-hidden">
+                                  <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-950/60 text-[#174EA6] dark:text-blue-400 flex items-center justify-center shrink-0">
+                                    <FileText className="w-5 h-5" />
                                   </div>
-                                  <div className="text-slate-400 text-[11px] mt-0.5 flex items-center gap-2">
-                                    <span>{item.size}</span>
-                                    <span>•</span>
-                                    <span>{item.type.toUpperCase().replace("APPLICATION/", "")}</span>
-                                    <span>•</span>
-                                    <span className="font-semibold text-slate-600 dark:text-slate-300">
-                                      {DOCUMENT_TITLES[item.documentType] || item.documentType.toUpperCase()}
+                                  <div className="overflow-hidden">
+                                    <div className="font-bold text-slate-800 dark:text-slate-200 truncate">
+                                      {item.name}
+                                    </div>
+                                    <div className="text-slate-400 text-[11px] mt-0.5 flex items-center gap-2">
+                                      <span>{item.size}</span>
+                                      <span>•</span>
+                                      <span>{item.type.toUpperCase().replace("APPLICATION/", "")}</span>
+                                      <span>•</span>
+                                      <span className="font-semibold text-slate-600 dark:text-slate-300">
+                                        {DOCUMENT_TITLES[item.documentType] || item.documentType.toUpperCase()}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  {item.stepCategory === "sf9" && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleSf9Side(item.id)}
+                                      className={`px-2 py-1 rounded-md text-[11px] font-bold border transition-all cursor-pointer ${
+                                        item.documentSide === "back"
+                                          ? "bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/60 dark:text-purple-300 dark:border-purple-800"
+                                          : "bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800"
+                                      }`}
+                                      title="Click to toggle between Front and Back side"
+                                    >
+                                      {item.documentSide === "back" ? "Back (Grades)" : "Front (Identity)"}
+                                    </button>
+                                  )}
+
+                                  {item.isPreprocessing ? (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 flex items-center gap-1 animate-pulse">
+                                      <Loader2 className="w-3 h-3 animate-spin" /> Preprocessing...
                                     </span>
-                                  </div>
+                                  ) : item.extractionStatus === "extracting" ? (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 flex items-center gap-1 animate-pulse">
+                                      <Loader2 className="w-3 h-3 animate-spin" /> Extracting...
+                                    </span>
+                                  ) : item.extractionStatus === "extracted" ? (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 flex items-center gap-1">
+                                      <Check className="w-3 h-3" /> Extracted ✓
+                                    </span>
+                                  ) : item.extractionStatus === "failed" ? (
+                                    <div className="flex items-center gap-1">
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300 flex items-center gap-1">
+                                        <AlertTriangle className="w-3 h-3" /> Failed
+                                      </span>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => handleRetryFileExtraction(item.id, currentStep.id)}
+                                        className="text-xs h-6 px-1.5 text-red-600 border-red-200 hover:bg-red-50 dark:hover:bg-red-950/40"
+                                        title={item.extractionError || "Retry extraction"}
+                                      >
+                                        <RefreshCw className="w-2.5 h-2.5 mr-0.5" /> Retry
+                                      </Button>
+                                    </div>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 flex items-center gap-1">
+                                      <Clock className="w-3 h-3" /> Queued
+                                    </span>
+                                  )}
+
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      setPreviewModalFile(item);
+                                      if (item.stepCategory === "birth_cert") {
+                                        setModalPsaPreviewMode(item.previewMode || (item.upperSectionDataUrl ? "upper" : "processed"));
+                                      }
+                                    }}
+                                    className="text-xs h-7 px-2.5 text-slate-600 border-slate-200 hover:bg-slate-100"
+                                    title="Preview document"
+                                  >
+                                    <Eye className="w-3.5 h-3.5 mr-1" /> Preview
+                                  </Button>
+
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleReplaceFile(item.id)}
+                                    className="text-xs h-7 px-2.5 text-slate-600 border-slate-200 hover:bg-slate-100"
+                                    title="Replace document"
+                                  >
+                                    <RefreshCw className="w-3 h-3 mr-1" /> Replace
+                                  </Button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile(item.id, currentStep.id)}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40"
+                                    title="Remove document"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 flex items-center gap-1">
-                                  <Check className="w-3 h-3" /> Ready
-                                </span>
+                              {/* Step 5 PSA Specific Controls: Rotation & Preview Mode Tabs */}
+                              {item.stepCategory === "birth_cert" && (
+                                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1 bg-slate-200/80 dark:bg-slate-800 p-0.5 rounded-lg text-[11px] font-medium">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSetPsaPreviewMode(item.id, "upper")}
+                                        className={`px-2 py-1 rounded-md transition-all cursor-pointer ${
+                                          (item.previewMode || "upper") === "upper"
+                                            ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                                            : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                                        }`}
+                                      >
+                                        Upper Section (1-17)
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSetPsaPreviewMode(item.id, "processed")}
+                                        className={`px-2 py-1 rounded-md transition-all cursor-pointer ${
+                                          item.previewMode === "processed"
+                                            ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                                            : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                                        }`}
+                                      >
+                                        B&W Upright
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSetPsaPreviewMode(item.id, "original")}
+                                        className={`px-2 py-1 rounded-md transition-all cursor-pointer ${
+                                          item.previewMode === "original"
+                                            ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                                            : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                                        }`}
+                                      >
+                                        Original
+                                      </button>
+                                    </div>
 
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => setPreviewModalFile(item)}
-                                  className="text-xs h-7 px-2.5 text-slate-600 border-slate-200 hover:bg-slate-100"
-                                  title="Preview document"
-                                >
-                                  <Eye className="w-3.5 h-3.5 mr-1" /> Preview
-                                </Button>
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRotatePsaFile(item.id, -90)}
+                                        disabled={item.isPreprocessing || item.extractionStatus === "extracting"}
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-50 cursor-pointer shadow-xs"
+                                        title="Rotate 90 degrees counter-clockwise"
+                                      >
+                                        <RotateCcw className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                                        <span>90° CCW</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRotatePsaFile(item.id, 90)}
+                                        disabled={item.isPreprocessing || item.extractionStatus === "extracting"}
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-50 cursor-pointer shadow-xs"
+                                        title="Rotate 90 degrees clockwise"
+                                      >
+                                        <RotateCw className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                                        <span>90° CW</span>
+                                      </button>
+                                    </div>
+                                  </div>
 
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleReplaceFile(item.id)}
-                                  className="text-xs h-7 px-2.5 text-slate-600 border-slate-200 hover:bg-slate-100"
-                                  title="Replace document"
-                                >
-                                  <RefreshCw className="w-3 h-3 mr-1" /> Replace
-                                </Button>
+                                  {item.isPreprocessing ? (
+                                    <div className="h-44 flex flex-col items-center justify-center bg-slate-100 dark:bg-slate-950 rounded-lg border border-dashed border-slate-300 dark:border-slate-700 text-slate-500">
+                                      <Loader2 className="w-6 h-6 animate-spin text-blue-600 mb-2" />
+                                      <span className="text-xs font-medium">Preprocessing PSA image &amp; cropping upper section...</span>
+                                    </div>
+                                  ) : (
+                                    <div className="relative max-h-56 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 flex items-center justify-center p-2">
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img
+                                        src={
+                                          (item.previewMode || "upper") === "upper"
+                                            ? item.upperSectionDataUrl || item.processedDataUrl || item.dataUrl
+                                            : item.previewMode === "processed"
+                                            ? item.processedDataUrl || item.dataUrl
+                                            : item.originalDataUrl || item.dataUrl
+                                        }
+                                        alt={`PSA preview (${item.previewMode || "upper"})`}
+                                        className="max-h-52 w-auto object-contain rounded shadow-xs"
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveFile(item.id, currentStep.id)}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40"
-                                  title="Remove document"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
+                              {/* Extracted Civil Identity Summary & Inline Manual Correction for Step 5 (PSA) */}
+                              {item.stepCategory === "birth_cert" && item.extractionStatus === "extracted" && item.extractedFields && (() => {
+                                const fields = item.extractedFields;
+                                const statuses = (fields.field_statuses || {}) as Record<string, PsaFieldStatusItem>;
+                                const correctedFields = (fields.corrected_fields || {}) as Record<string, boolean>;
+                                const isEditingThis = editingPsaFileId === item.id;
+
+                                if (isEditingThis) {
+                                  return (
+                                    <div className="pt-3 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/70 p-4 rounded-xl border border-indigo-200 dark:border-indigo-900/60 space-y-3">
+                                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-100 dark:bg-indigo-950/60 text-[#174EA6] dark:text-blue-300">
+                                            Manual Correction
+                                          </span>
+                                          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                                            Edit Civil Identity Fields
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={handleCancelPsaCorrection}
+                                            className="text-xs h-7 px-2.5 text-slate-600 hover:bg-slate-100"
+                                          >
+                                            Cancel
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            onClick={() => handleSavePsaCorrection(item.id)}
+                                            className="text-xs h-7 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1 shadow-xs"
+                                          >
+                                            <Check className="w-3.5 h-3.5" />
+                                            Save Corrections
+                                          </Button>
+                                        </div>
+                                      </div>
+
+                                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            First Name
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.first_name}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, first_name: e.target.value })}
+                                            placeholder="e.g. JUSTIN"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Middle Name <span className="font-normal text-slate-400 lowercase">(optional)</span>
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.middle_name}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, middle_name: e.target.value })}
+                                            placeholder="(Blank if none)"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Last Name
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.last_name}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, last_name: e.target.value })}
+                                            placeholder="e.g. GOMEZ"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Date of Birth
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.birth_date}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, birth_date: e.target.value })}
+                                            placeholder="YYYY-MM-DD or e.g. 15 MARCH 2008"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Sex
+                                          </label>
+                                          <select
+                                            value={editingPsaForm.sex.toUpperCase().startsWith("F") ? "F" : editingPsaForm.sex.toUpperCase().startsWith("M") ? "M" : editingPsaForm.sex}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, sex: e.target.value })}
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          >
+                                            <option value="">Select Sex</option>
+                                            <option value="M">Male</option>
+                                            <option value="F">Female</option>
+                                          </select>
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Registry / Certificate No.
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.registry_number}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, registry_number: e.target.value })}
+                                            placeholder="e.g. 2008-1234"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-mono font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Mother&apos;s Complete Maiden Name
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.mother_maiden_name}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, mother_maiden_name: e.target.value })}
+                                            placeholder="e.g. MARIA SANTOS LOQUILLANO"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+
+                                        <div>
+                                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+                                            Father&apos;s Complete Name
+                                          </label>
+                                          <input
+                                            type="text"
+                                            value={editingPsaForm.father_name}
+                                            onChange={(e) => setEditingPsaForm({ ...editingPsaForm, father_name: e.target.value })}
+                                            placeholder="e.g. ROBERTO CRUZ GOMEZ"
+                                            className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 font-medium focus:ring-2 focus:ring-blue-500/20 focus:border-[#174EA6]"
+                                          />
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+
+                                const childName = [
+                                  fields.child_first_name || fields.first_name,
+                                  fields.child_middle_name || fields.middle_name,
+                                  fields.child_last_name || fields.last_name,
+                                ].filter(Boolean).join(" ");
+
+                                const fnConf = statuses.first_name?.confidence ?? fields.confidence;
+                                const dobConf = statuses.birth_date?.confidence ?? fields.confidence;
+                                const sexConf = statuses.sex?.confidence ?? fields.confidence;
+                                const regConf = statuses.registry_number?.confidence ?? fields.confidence;
+                                const mConf = statuses.mother_maiden_name?.confidence ?? fields.confidence;
+                                const fConf = statuses.father_name?.confidence ?? fields.confidence;
+
+                                return (
+                                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                          Child &amp; Civil Identity Fields
+                                        </span>
+                                        {fields.manually_corrected && (
+                                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                                            <Check className="w-2.5 h-2.5" />
+                                            Manually Corrected by Teacher
+                                          </span>
+                                        )}
+                                      </div>
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => handleStartPsaCorrection(item)}
+                                        className="text-xs h-7 px-2.5 text-slate-700 dark:text-slate-200 hover:bg-slate-100 flex items-center gap-1.5 font-semibold"
+                                      >
+                                        <Edit3 className="w-3.5 h-3.5 text-[#174EA6] dark:text-blue-400" />
+                                        <span>Manual Correction</span>
+                                      </Button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 bg-white dark:bg-slate-950/50 p-3 rounded-lg border border-slate-200 dark:border-slate-800">
+                                      <div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Child&apos;s Legal Name:</span>
+                                        <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-200 mt-0.5">
+                                          <span>{childName || "Not detected"}</span>
+                                          {renderConfidencePill(fnConf, correctedFields.first_name || correctedFields.last_name || correctedFields.middle_name)}
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Date of Birth &amp; Sex:</span>
+                                        <div className="flex items-center gap-2 font-medium text-slate-800 dark:text-slate-200 mt-0.5">
+                                          <div className="flex items-center gap-1">
+                                            <span>{fields.birth_date || fields.date_of_birth || "Not detected"}</span>
+                                            {renderConfidencePill(dobConf, correctedFields.birth_date)}
+                                          </div>
+                                          <span>•</span>
+                                          <div className="flex items-center gap-1">
+                                            <span>{fields.sex === "M" ? "Male" : fields.sex === "F" ? "Female" : fields.sex || "Not detected"}</span>
+                                            {renderConfidencePill(sexConf, correctedFields.sex)}
+                                          </div>
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Civil Registry / Cert No.:</span>
+                                        <div className="flex items-center gap-1.5 font-medium text-slate-800 dark:text-slate-200 mt-0.5">
+                                          <span className="font-mono">{fields.registry_number || fields.civil_registry_number || "Not detected"}</span>
+                                          {renderConfidencePill(regConf, correctedFields.registry_number)}
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Mother&apos;s Maiden Name:</span>
+                                        <div className="flex items-center gap-1.5 font-medium text-slate-800 dark:text-slate-200 mt-0.5">
+                                          <span>{fields.mother_maiden_name || fields.mother_name || "Not detected"}</span>
+                                          {renderConfidencePill(mConf, correctedFields.mother_maiden_name)}
+                                        </div>
+                                      </div>
+                                      <div>
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase">Father&apos;s Name:</span>
+                                        <div className="flex items-center gap-1.5 font-medium text-slate-800 dark:text-slate-200 mt-0.5">
+                                          <span>{fields.father_name || "Not detected"}</span>
+                                          {renderConfidencePill(fConf, correctedFields.father_name)}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           ))}
                         </div>
@@ -1331,7 +2158,7 @@ export default function UnifiedUploadPage() {
                           onClick={handleNextStep}
                           className="bg-[#174EA6] hover:bg-[#0B1F33] text-white text-xs font-bold px-5"
                         >
-                          {currentStepIndex === 5 ? (
+                          {currentStepIndex === 4 ? (
                             <>
                               Proceed to Review <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
                             </>
@@ -1346,12 +2173,12 @@ export default function UnifiedUploadPage() {
                     </div>
                   </div>
                 ) : (
-                  /* ── STEP 7: FINAL DOCUMENT REVIEW PAGE ── */
+                  /* ── STEP 6: FINAL DOCUMENT REVIEW PAGE ── */
                   <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-6">
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#174EA6] text-white">
-                          FINAL STEP 7 OF 7
+                          FINAL STEP 6 OF 6
                         </span>
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
                           {totalUploadedCount} Total Document{totalUploadedCount === 1 ? "" : "s"} Staged
@@ -1405,11 +2232,6 @@ export default function UnifiedUploadPage() {
                                   <span className="font-bold text-slate-900 dark:text-slate-100">
                                     {stepDef.formCode} — {stepDef.depedName}
                                   </span>
-                                  {stepDef.id === "sf5" && isUploaded && (
-                                    <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
-                                      {sf5Variant.toUpperCase()}
-                                    </span>
-                                  )}
                                 </div>
                                 <div className="text-slate-500 text-[11px] mt-0.5">
                                   {isUploaded ? (
@@ -1451,7 +2273,6 @@ export default function UnifiedUploadPage() {
                                 onClick={() => {
                                   if (stepDef.id === "sf1") handleCategoryChange("sf1");
                                   else if (stepDef.id === "sf2") handleCategoryChange("sf2");
-                                  else if (stepDef.id === "sf5") handleCategoryChange("sf5");
                                   else if (stepDef.id === "sf9") handleCategoryChange("sf9");
                                   else if (stepDef.id === "sf10") handleCategoryChange("sf10");
                                   else if (stepDef.id === "birth_cert") handleCategoryChange("birth_cert");
@@ -1483,7 +2304,7 @@ export default function UnifiedUploadPage() {
                         <Button
                           type="button"
                           variant="outline"
-                          onClick={() => setCurrentStepIndex(5)}
+                          onClick={() => setCurrentStepIndex(4)}
                           className="text-xs font-semibold w-full sm:w-auto"
                         >
                           <ArrowLeft className="w-3.5 h-3.5 mr-1.5" /> Back to PSA Step
@@ -1614,6 +2435,66 @@ export default function UnifiedUploadPage() {
               </button>
             </div>
 
+            {previewModalFile.stepCategory === "birth_cert" && (
+              <div className="px-4 py-2.5 bg-slate-50 dark:bg-slate-900/80 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1 bg-slate-200/80 dark:bg-slate-800 p-0.5 rounded-lg text-xs font-medium">
+                  <button
+                    type="button"
+                    onClick={() => setModalPsaPreviewMode("upper")}
+                    className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
+                      modalPsaPreviewMode === "upper"
+                        ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                        : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                    }`}
+                  >
+                    Upper Section (1-17)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModalPsaPreviewMode("processed")}
+                    className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
+                      modalPsaPreviewMode === "processed"
+                        ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                        : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                    }`}
+                  >
+                    B&W Upright
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModalPsaPreviewMode("original")}
+                    className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
+                      modalPsaPreviewMode === "original"
+                        ? "bg-white dark:bg-slate-900 text-[#174EA6] dark:text-blue-300 font-bold shadow-xs"
+                        : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                    }`}
+                  >
+                    Original
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleRotatePsaFile(previewModalFile.id, -90)}
+                    disabled={previewModalFile.isPreprocessing}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-blue-600" />
+                    <span>90° CCW</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRotatePsaFile(previewModalFile.id, 90)}
+                    disabled={previewModalFile.isPreprocessing}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer disabled:opacity-50"
+                  >
+                    <RotateCw className="w-3.5 h-3.5 text-blue-600" />
+                    <span>90° CW</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="flex-1 p-4 overflow-auto flex items-center justify-center bg-slate-100 dark:bg-slate-950">
               {previewModalFile.type === "application/pdf" || previewModalFile.name.endsWith(".pdf") ? (
                 <iframe
@@ -1624,7 +2505,15 @@ export default function UnifiedUploadPage() {
               ) : (
                 /* eslint-disable-next-line @next/next/no-img-element */
                 <img
-                  src={previewModalFile.dataUrl}
+                  src={
+                    previewModalFile.stepCategory === "birth_cert"
+                      ? modalPsaPreviewMode === "upper"
+                        ? previewModalFile.upperSectionDataUrl || previewModalFile.processedDataUrl || previewModalFile.dataUrl
+                        : modalPsaPreviewMode === "processed"
+                        ? previewModalFile.processedDataUrl || previewModalFile.dataUrl
+                        : previewModalFile.originalDataUrl || previewModalFile.dataUrl
+                      : previewModalFile.dataUrl
+                  }
                   alt={previewModalFile.name}
                   className="max-h-[65vh] w-auto max-w-full object-contain rounded-lg shadow-sm"
                 />

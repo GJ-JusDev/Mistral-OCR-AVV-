@@ -21,14 +21,12 @@ test("AVV System — Unified Batch Document Scanning, Extraction, and Cross-Docu
   // 1. Combined Multi-Page PDF Boundary Segmentation & Classification
   // ---------------------------------------------------------------------------
   await t.test("1. Multi-Page Combined PDF Boundary Identification & Classification", () => {
-    // Simulated 14-page combined PDF:
+    // Simulated 11-page combined PDF:
     // Pages 1-3: SF1 School Register
     // Pages 4-5: SF2 Daily Attendance Report
-    // Pages 6-7: SF5A End of Semester Promotion
-    // Page 8: SF5B Graduation Candidates
-    // Pages 9-10: SF9 Learner Progress Report Card
-    // Pages 11-13: SF10 Student Permanent Record
-    // Page 14: PSA Certificate of Live Birth
+    // Pages 6-7: SF9 Learner Progress Report Card
+    // Pages 8-10: SF10 Student Permanent Record
+    // Page 11: PSA Certificate of Live Birth
     const mockPages = [
       // SF1 Pages 1-3
       {
@@ -52,53 +50,39 @@ test("AVV System — Unified Batch Document Scanning, Extraction, and Cross-Docu
         pageNumber: 5,
         text: "School Form 2 (SF2) Daily Attendance Report (Continuation)\nAverage Daily Attendance: 98%\n2. 109345000002 SANTOS, MARIA L. Present: 20 Absent: 2 Tardy: 1",
       },
-      // SF5A Pages 6-7
+      // SF9 Pages 6-7
       {
         pageNumber: 6,
-        text: "Department of Education\nSchool Form 5A (SF5A) End of Semester Status\nReport on Promotion and Learning Progress & Achievement\nGrade 11 Section: Diamond S.Y. 2024-2025 Semester: 1st Semester\nAction Taken: PROMOTED\n1. 109345000001 DELA CRUZ, CARLOS M. Gen Avg: 90 Status: PROMOTED",
-      },
-      {
-        pageNumber: 7,
-        text: "School Form 5A (SF5A) End of Semester Status (Continuation)\n2. 109345000002 SANTOS, MARIA L. Gen Avg: 88 Status: PROMOTED",
-      },
-      // SF5B Page 8
-      {
-        pageNumber: 8,
-        text: "Department of Education\nSchool Form 5B (SF5B) Graduation Candidates\nReport on School Leavers and Candidates for Graduation\nGrade 12 Section: Diamond\nCandidates for Complete Diplomas\n1. 109345000001 DELA CRUZ, CARLOS M. Track/Strand: STEM Completed SHS Requirements",
-      },
-      // SF9 Pages 9-10
-      {
-        pageNumber: 9,
         text: "Republic of the Philippines\nDepartment of Education\nSchool Form 9 (SF9) Learner Progress Report Card\nForm 138 - Senior High School\nLRN: 109345000001 Name: DELA CRUZ, CARLOS MENDOZA\nGrade 11 Section: Diamond Track/Strand: STEM\nCore Subjects: Oral Communication Q1: 88 Q2: 90 Final: 89\nGeneral Mathematics Q1: 85 Q2: 87 Final: 86\nSemestral General Average: 87.5",
       },
       {
-        pageNumber: 10,
+        pageNumber: 7,
         text: "School Form 9 (SF9) Front Side\nReport on Attendance\nObserved Values\nDear Parent,\nCertificate of Transfer",
       },
-      // SF10 Pages 11-13
+      // SF10 Pages 8-10
       {
-        pageNumber: 11,
+        pageNumber: 8,
         text: "Republic of the Philippines\nDepartment of Education\nSchool Form 10 (SF10) Senior High School Student Permanent Record\nForm 137 - SHS Permanent Academic Record\nLearner's Permanent Academic Record\nLRN: 109345000001 Name: DELA CRUZ, CARLOS MENDOZA\nBirth Date: 2008-03-15 Sex: Male\nGrade 11 1st Semester S.Y. 2024-2025\nOral Communication Final: 89\nGeneral Mathematics Final: 86\nGeneral Average: 87.5",
       },
       {
-        pageNumber: 12,
+        pageNumber: 9,
         text: "School Form 10 (SF10) Page 2 of 3\nSenior High School Student Permanent Record\nGrade 11 2nd Semester\nStatistics and Probability Final: 88\nPhysical Science Final: 89",
       },
       {
-        pageNumber: 13,
+        pageNumber: 10,
         text: "School Form 10 (SF10) Page 3 of 3\nScholastic Record Summary\nEligibility for SHS Enrollment\nRemedial Classes Records",
       },
-      // PSA Page 14
+      // PSA Page 11
       {
-        pageNumber: 14,
+        pageNumber: 11,
         text: "Republic of the Philippines\nOffice of the Civil Registrar General\nPhilippine Statistics Authority (PSA)\nNational Statistics Office\nCertificate of Live Birth\nRegistry No: 2008-123456\nChild: CARLOS MENDOZA DELA CRUZ\nDate of Birth: 15 MARCH 2008 Place of Birth: Legazpi City\nMother: MARIA SANTOS MENDOZA Father: JUAN CASTILLO DELA CRUZ",
       },
     ];
 
     const segments = segmentMultiPageDocument({ pages: mockPages });
 
-    // Must identify exactly 7 document segments
-    assert.equal(segments.length, 7, "Must split into exactly 7 distinct document segments");
+    // Must identify exactly 5 document segments (SF1, SF2, SF9, SF10, PSA)
+    assert.equal(segments.length, 5, "Must split into exactly 5 distinct document segments");
 
     // Segment 1: SF1 (Pages 1-3)
     assert.equal(segments[0].documentType, "sf1");
@@ -110,30 +94,20 @@ test("AVV System — Unified Batch Document Scanning, Extraction, and Cross-Docu
     assert.deepEqual(segments[1].pageNumbers, [4, 5]);
     assert.equal(segments[1].pageCount, 2);
 
-    // Segment 3: SF5A (Pages 6-7)
-    assert.equal(segments[2].documentType, "sf5a");
+    // Segment 3: SF9 (Pages 6-7)
+    assert.equal(segments[2].documentType, "sf9");
     assert.deepEqual(segments[2].pageNumbers, [6, 7]);
     assert.equal(segments[2].pageCount, 2);
 
-    // Segment 4: SF5B (Page 8)
-    assert.equal(segments[3].documentType, "sf5b");
-    assert.deepEqual(segments[3].pageNumbers, [8]);
-    assert.equal(segments[3].pageCount, 1);
+    // Segment 4: SF10 (Pages 8-10)
+    assert.equal(segments[3].documentType, "sf10");
+    assert.deepEqual(segments[3].pageNumbers, [8, 9, 10]);
+    assert.equal(segments[3].pageCount, 3);
 
-    // Segment 5: SF9 (Pages 9-10)
-    assert.equal(segments[4].documentType, "sf9");
-    assert.deepEqual(segments[4].pageNumbers, [9, 10]);
-    assert.equal(segments[4].pageCount, 2);
-
-    // Segment 6: SF10 (Pages 11-13)
-    assert.equal(segments[5].documentType, "sf10");
-    assert.deepEqual(segments[5].pageNumbers, [11, 12, 13]);
-    assert.equal(segments[5].pageCount, 3);
-
-    // Segment 7: PSA (Page 14)
-    assert.equal(segments[6].documentType, "birth_cert");
-    assert.deepEqual(segments[6].pageNumbers, [14]);
-    assert.equal(segments[6].pageCount, 1);
+    // Segment 5: PSA (Page 11)
+    assert.equal(segments[4].documentType, "birth_cert");
+    assert.deepEqual(segments[4].pageNumbers, [11]);
+    assert.equal(segments[4].pageCount, 1);
   });
 
   // ---------------------------------------------------------------------------

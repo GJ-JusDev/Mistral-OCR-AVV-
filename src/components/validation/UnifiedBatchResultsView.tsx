@@ -133,10 +133,6 @@ export default function UnifiedBatchResultsView({
                 ? d.matchedSources.sf1
                 : seg.documentType === "sf2"
                 ? d.matchedSources.sf2
-                : seg.documentType === "sf5a"
-                ? d.matchedSources.sf5a
-                : seg.documentType === "sf5b"
-                ? d.matchedSources.sf5b
                 : null;
             return src?.raw;
           })
@@ -621,24 +617,6 @@ export default function UnifiedBatchResultsView({
                               </span>
                               <span
                                 className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  d.documentPresence.sf5a
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : "bg-slate-100 text-slate-400"
-                                }`}
-                              >
-                                SF5A
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                  d.documentPresence.sf5b
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : "bg-slate-100 text-slate-400"
-                                }`}
-                              >
-                                SF5B
-                              </span>
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                   d.documentPresence.sf9
                                     ? "bg-emerald-100 text-emerald-800"
                                     : "bg-slate-100 text-slate-400"
@@ -935,7 +913,6 @@ export default function UnifiedBatchResultsView({
                                           <th className="py-2 px-2 text-center">PSA</th>
                                           <th className="py-2 px-2 text-center">SF1</th>
                                           <th className="py-2 px-2 text-center">SF2</th>
-                                          <th className="py-2 px-2 text-center">SF5A/B</th>
                                           <th className="py-2 px-2 text-center">SF9</th>
                                           <th className="py-2 px-2 text-center">SF10</th>
                                           <th className="py-2 px-3 text-center">Status</th>
@@ -955,9 +932,6 @@ export default function UnifiedBatchResultsView({
                                             </td>
                                             <td className="py-2 px-2 text-center">
                                               {renderCellValue(row.sf2Value)}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.sf5aValue ?? row.sf5bValue)}
                                             </td>
                                             <td className="py-2 px-2 text-center">
                                               {renderCellValue(row.sf9Value)}

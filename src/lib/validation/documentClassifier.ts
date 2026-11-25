@@ -386,14 +386,14 @@ export function validateSf9CrossSideCompatibility(
   }
 
   // 2. Student Name check across sides (if both sides have Name printed)
-  const name1 = (frontFields.name || frontFields.last_name || "").toLowerCase().replace(/[^a-z]/g, "");
-  const name2 = (backFields.name || backFields.last_name || "").toLowerCase().replace(/[^a-z]/g, "");
+  const name1 = (frontFields.name || (frontFields as any).studentName || (frontFields as any).learner_name || frontFields.last_name || "").toLowerCase().replace(/[^a-z]/g, "");
+  const name2 = (backFields.name || (backFields as any).studentName || (backFields as any).learner_name || backFields.last_name || "").toLowerCase().replace(/[^a-z]/g, "");
 
   if (name1 && name2 && name1.length > 3 && name2.length > 3) {
     if (!name1.includes(name2) && !name2.includes(name1)) {
       isCompatible = false;
       reasons.push(
-        `Conflicting student names detected between SF9 Front ("${frontFields.name}") and Back ("${backFields.name}").`
+        `Conflicting student names detected between SF9 Front ("${frontFields.name || (frontFields as any).studentName || frontFields.last_name}") and Back ("${backFields.name || (backFields as any).studentName || backFields.last_name}").`
       );
     }
   }

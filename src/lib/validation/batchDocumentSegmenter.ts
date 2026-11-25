@@ -15,11 +15,12 @@
  * - PSA — Certificate of Live Birth
  */
 
+import { classifyDocument, validateSf9CrossSideCompatibility } from "./documentClassifier";
+import { parseOcrText } from "../ocr/parser";
+
 export type ShsDocumentType =
   | "sf1"
   | "sf2"
-  | "sf5a"
-  | "sf5b"
   | "sf9"
   | "sf10"
   | "birth_cert"
@@ -173,8 +174,6 @@ const PSA_KEYWORDS = [
 export const DOCUMENT_TITLES: Record<ShsDocumentType, string> = {
   sf1: "SF1-SHS — School Register",
   sf2: "SF2-SHS — Daily Attendance Report",
-  sf5a: "SF5A-SHS — End of Semester Promotion",
-  sf5b: "SF5B-SHS — Graduation Candidates",
   sf9: "SF9-SHS — Progress Report Card",
   sf10: "SF10-SHS — Senior High School Permanent Record",
   birth_cert: "PSA — Certificate of Live Birth",
@@ -278,38 +277,7 @@ export function classifyPageContent(
     };
   }
 
-  // 5. SF5B vs SF5A Promotion Detection
-  if (sf5bScore.count >= 2 || lower.includes("sf5b") || lower.includes("sf-5b") || lower.includes("graduation candidates")) {
-    matchedKeywords.push(...sf5bScore.matched);
-    reasons.push(`Matched SF5B Graduation Candidate markers (${sf5bScore.matched.slice(0, 3).join(", ")})`);
-    return {
-      pageNumber: pageNum,
-      detectedType: "sf5b",
-      confidence: Math.min(0.85 + sf5bScore.count * 0.04, 0.98),
-      reasons,
-      matchedKeywords,
-      isContinuation: false,
-      needsTeacherReview: false,
-      title: DOCUMENT_TITLES.sf5b,
-    };
-  }
-
-  if (sf5aScore.count >= 2 || lower.includes("sf5a") || lower.includes("sf-5a") || (lower.includes("report on promotion") && !lower.includes("sf5b"))) {
-    matchedKeywords.push(...sf5aScore.matched);
-    reasons.push(`Matched SF5A Promotion Status markers (${sf5aScore.matched.slice(0, 3).join(", ")})`);
-    return {
-      pageNumber: pageNum,
-      detectedType: "sf5a",
-      confidence: Math.min(0.85 + sf5aScore.count * 0.04, 0.98),
-      reasons,
-      matchedKeywords,
-      isContinuation: false,
-      needsTeacherReview: false,
-      title: DOCUMENT_TITLES.sf5a,
-    };
-  }
-
-  // 6. SF10 Permanent Record (Checked before SF1 to prevent substring collisions)
+  // 5. SF10 Permanent Record (Checked before SF1 to prevent substring collisions)
   if (sf10Score.count > sf9Score.count || lower.includes("sf10") || lower.includes("sf-10") || lower.includes("permanent record") || lower.includes("form 137")) {
     matchedKeywords.push(...sf10Score.matched);
     reasons.push(`Matched SF10 Permanent Record transcript markers (${sf10Score.matched.slice(0, 3).join(", ")})`);
@@ -389,6 +357,88 @@ export function classifyPageContent(
 }
 
 /**
+ * Determines whether an incoming SF9 page must start a new document segment
+ * rather than being attached as page 2 of the current segment.
+ *
+ * Enforces:
+ * 1. SF9 cards strictly have at most 2 pages (Front and Back). If pageCount >= 2, start new segment.
+ * 2. Explicit pairId mismatch forces a new segment.
+ * 3. Explicit sides: two front sides or two back sides cannot be merged.
+ * 4. Content heuristics: if both are front sides, start new segment (different learners).
+ * 5. Identity validation: if LRNs conflict, or validateSf9CrossSideCompatibility fails, start new segment.
+ */
+export function shouldStartNewSf9Segment(
+  currentSegment: DocumentSegment,
+  incomingPage: { pageNumber: number; text: string; lines?: any[]; words?: any[]; tables?: any[] }
+): boolean {
+  if (currentSegment.pageCount >= 2) {
+    return true;
+  }
+
+  const prevPage = currentSegment.pages?.[0];
+  if (!prevPage) return false;
+
+  const prevAny = prevPage as any;
+  const currAny = incomingPage as any;
+
+  // 1. Explicit pairId / slotId check
+  if (prevAny.pairId && currAny.pairId && prevAny.pairId !== currAny.pairId) {
+    return true;
+  }
+
+  // 2. Explicit side metadata check
+  const prevSide = prevAny.documentSide || prevAny.side;
+  const currSide = currAny.documentSide || currAny.side;
+  if (prevSide === "front" && currSide === "front") {
+    return true; // Two front pages belong to different learners
+  }
+  if (prevSide === "back" && currSide === "back") {
+    return true; // Two back pages cannot be merged together
+  }
+
+  // 3. Side classification heuristics from layout & text markers
+  const prevClass = classifyDocument(prevPage.text || "");
+  const currClass = classifyDocument(incomingPage.text || "");
+
+  if (prevClass.pageSideHint === "front" && currClass.pageSideHint === "front") {
+    return true;
+  }
+  if (prevClass.pageSideHint === "back" && currClass.pageSideHint === "back") {
+    return true;
+  }
+
+  // 4. Identity & LRN Compatibility Check
+  const prevFields = parseOcrText(prevPage.text || "", prevPage);
+  const currFields = parseOcrText(incomingPage.text || "", incomingPage);
+
+  const prevLrn = prevFields.lrn ? String(prevFields.lrn).replace(/[^0-9]/g, "") : "";
+  const currLrn = currFields.lrn ? String(currFields.lrn).replace(/[^0-9]/g, "") : "";
+
+  // If both have 12-digit LRNs and they conflict, they belong to different learners
+  if (prevLrn && currLrn && prevLrn.length === 12 && currLrn.length === 12 && prevLrn !== currLrn) {
+    return true;
+  }
+
+  // Cross-side compatibility (LRN conflict, student name conflict, etc.)
+  const compatibility = validateSf9CrossSideCompatibility(prevFields, currFields);
+  if (!compatibility.isCompatible) {
+    return true;
+  }
+
+  // If previous page was already a complete card with both LRN and grades table
+  const prevLower = (prevPage.text || "").toLowerCase();
+  const currLower = (incomingPage.text || "").toLowerCase();
+  const prevHasGrades = prevLower.includes("final grade") || prevLower.includes("quarter 1") || prevLower.includes("semestral final grade");
+  const currHasFrontMarkers = currLower.includes("certificate of transfer") || currLower.includes("dear parent") || (currLrn.length === 12 && currLower.includes("birth"));
+
+  if (prevHasGrades && currHasFrontMarkers && currLrn && prevLrn && currLrn !== prevLrn) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Organizes a multi-page document or batch of pages into classified document segments
  * by detecting document boundaries across pages.
  */
@@ -432,7 +482,7 @@ export function segmentMultiPageDocument(params: {
       currentSegment.documentType !== detectedType ||
       // Single-learner forms (SF9, PSA) start a new segment if a new student header/LRN appears
       (currentSegment.documentType === "birth_cert" && detectedType === "birth_cert" && currentSegment.pageCount >= 1) ||
-      (currentSegment.documentType === "sf9" && detectedType === "sf9" && currentSegment.pageCount >= 2);
+      (currentSegment.documentType === "sf9" && detectedType === "sf9" && shouldStartNewSf9Segment(currentSegment, page));
 
     if (isNewSegment) {
       if (currentSegment) {

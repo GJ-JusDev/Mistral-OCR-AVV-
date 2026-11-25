@@ -38,6 +38,8 @@ export function parseGradesText(
       mother_maiden_name: psa.identity.mother_maiden_name || undefined,
       father_name: psa.identity.father_name || undefined,
       grades: [],
+      identity: psa.identity,
+      field_statuses: psa.field_statuses,
       field_recognition: psa.field_recognition,
       recognition_summary: psa.recognition_summary,
       has_handwritten_content: psa.recognition_summary?.has_handwriting ?? false,

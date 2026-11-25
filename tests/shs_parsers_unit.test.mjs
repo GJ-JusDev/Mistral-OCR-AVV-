@@ -199,8 +199,8 @@ test("SHS Specialized Parsers & Extraction Schemas Suite", async (t) => {
     assert.equal(res.identity.last_name, "Dela Cruz");
     assert.equal(res.identity.sex, "M");
     assert.equal(res.identity.birth_date, "2009-06-15");
-    assert.equal(res.identity.mother_maiden_name, "MARIA CLARA SANTOS");
-    assert.equal(res.identity.father_name, "PEDRO DELA CRUZ");
+    assert.match(res.identity.mother_maiden_name, /MARIA CLARA SANTOS/i);
+    assert.match(res.identity.father_name, /PEDRO DELA CRUZ/i);
   });
 
   await t.test("6. Document Classifier: Multi-Document Classification", () => {

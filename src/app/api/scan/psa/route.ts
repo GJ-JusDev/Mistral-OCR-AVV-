@@ -135,7 +135,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { image, frontImage, backImage, childSectionImage, childNameImage, rawText, isPreprocessed } = body || {};
+    const { image, frontImage, backImage, upperSectionImage, childSectionImage, childNameImage, rawText, isPreprocessed } = body || {};
 
   // 3. Fast-path: Direct raw text OCR testing (used in synthetic tests or debug)
   if (typeof rawText === "string" && rawText.trim().length > 0) {
@@ -190,6 +190,7 @@ export async function POST(request: NextRequest) {
     let providerName = "azure";
     let modelName = "prebuilt-read";
     let rawLayout: any = undefined;
+    let upperSectionText: string | undefined = undefined;
     let childSectionText: string | undefined = undefined;
     let childNameText: string | undefined = undefined;
 
@@ -236,7 +237,29 @@ export async function POST(request: NextRequest) {
         rawLayout = ocrRes.rawLayout;
       }
 
-      // 5B. Targeted CHILD section crop OCR (Items 1 - 5: Name, Sex, DOB, Place of Birth)
+      // 5B. Targeted UPPER section crop OCR (Header/Registry No. + Items 1 - 17: Child, Mother, Father)
+      if (upperSectionImage && typeof upperSectionImage === "string" && upperSectionImage.startsWith("data:image/")) {
+        if (upperSectionImage === primaryImage) {
+          // If primary image was already the cropped upper section, reuse OCR result directly
+          upperSectionText = combinedText;
+        } else {
+          try {
+            const upperRes = await orchestrator.execute({
+              image: upperSectionImage,
+              extractFields: true,
+              gradeLevel: "PSA",
+              documentSide: "front",
+            });
+            if (upperRes && upperRes.text) {
+              upperSectionText = upperRes.text;
+            }
+          } catch (upperErr) {
+            console.warn("[PSA Scan] Targeted upper section OCR failed, falling back to full document:", upperErr);
+          }
+        }
+      }
+
+      // 5C. Targeted CHILD section crop OCR (Items 1 - 5: Name, Sex, DOB, Place of Birth)
       if (childSectionImage && typeof childSectionImage === "string" && childSectionImage.startsWith("data:image/")) {
         try {
           const sectionRes = await orchestrator.execute({
@@ -253,7 +276,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // 5C. Targeted Item 1 CHILD NAME crop OCR (First, Middle, Last Name only)
+      // 5D. Targeted Item 1 CHILD NAME crop OCR (First, Middle, Last Name only)
       if (childNameImage && typeof childNameImage === "string" && childNameImage.startsWith("data:image/")) {
         try {
           const nameRes = await orchestrator.execute({
@@ -285,6 +308,7 @@ export async function POST(request: NextRequest) {
 
     // 6. Parse PSA fields using authoritative parser with targeted crops
     const parsed = parsePsaBirthCert(combinedText, rawLayout, overallConfidence, {
+      upperSectionText,
       childSectionText,
       childNameText,
     });
@@ -326,6 +350,7 @@ export async function POST(request: NextRequest) {
       provider: providerName,
       field_recognition: parsed.field_recognition,
       recognition_summary: parsed.recognition_summary,
+      upper_section_text: upperSectionText || undefined,
       child_section_text: childSectionText || undefined,
       child_name_text: childNameText || undefined,
       preprocessed: Boolean(isPreprocessed),

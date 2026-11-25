@@ -14,14 +14,14 @@ test("AVV — Step-by-Step Document Upload Wizard Workflow & Integration Suite",
   const uploadWorkflowSrc = fs.readFileSync(uploadWorkflowPath, "utf8");
 
   // ── 1. Document Sequence Verification ──────────────────────────────────────
-  await t.test("1. Correct document sequence: SF1 -> SF2 -> SF5 -> SF9 -> SF10 -> PSA -> Review", () => {
+  await t.test("1. Correct document sequence: SF1 -> SF2 -> SF9 -> SF10 -> PSA -> Review", () => {
     assert.ok(
       uploadPageSrc.includes("export const WIZARD_STEPS: WizardStepDefinition[] = ["),
       "Upload page must define WIZARD_STEPS configuration"
     );
 
-    // Extract WIZARD_STEPS array order
-    const expectedSequence = ["sf1", "sf2", "sf5", "sf9", "sf10", "birth_cert"];
+    // Extract WIZARD_STEPS array order (6 steps total: 5 document steps + Review)
+    const expectedSequence = ["sf1", "sf2", "sf9", "sf10", "birth_cert"];
     for (let i = 0; i < expectedSequence.length; i++) {
       const stepId = expectedSequence[i];
       assert.ok(
@@ -29,11 +29,12 @@ test("AVV — Step-by-Step Document Upload Wizard Workflow & Integration Suite",
         `WIZARD_STEPS must define step "${stepId}"`
       );
     }
+    assert.ok(!uploadPageSrc.includes('id: "sf5"'), "SF5 must not be included in WIZARD_STEPS");
 
-    // Verify stepper indicator contains all 7 steps
+    // Verify stepper indicator contains all 6 steps
     assert.ok(
-      uploadPageSrc.includes("SF1 → SF2 → SF5 → SF9 → SF10 → PSA → Review") ||
-      uploadPageSrc.includes("Step 7: Final Review") ||
+      uploadPageSrc.includes("SF1 → SF2 → SF9 → SF10 → PSA → Review") ||
+      uploadPageSrc.includes("Step 6 of 6") ||
       uploadPageSrc.includes("Review"),
       "Wizard must display progress indicator reaching Review step"
     );
@@ -51,20 +52,19 @@ test("AVV — Step-by-Step Document Upload Wizard Workflow & Integration Suite",
     );
   });
 
-  // ── 3. SF5A and SF5B Selection ─────────────────────────────────────────────
-  await t.test("3. SF5A and SF5B variant selection in Step 3", () => {
+  // ── 3. SF5 Removal & Active 6-Step Workflow ────────────────────────────────
+  await t.test("3. SF5 successfully removed from active upload sequence and UI", () => {
     assert.ok(
-      uploadPageSrc.includes("const [sf5Variant, setSf5Variant] = useState<\"sf5a\" | \"sf5b\">(\"sf5a\");"),
-      "Wizard must support sf5Variant state initialized to 'sf5a'"
+      !uploadPageSrc.includes("const [sf5Variant, setSf5Variant]"),
+      "Wizard must not maintain sf5Variant state"
     );
     assert.ok(
-      uploadPageSrc.includes("handleSelectSf5Variant"),
-      "Wizard must define handleSelectSf5Variant handler"
+      !uploadPageSrc.includes("handleSelectSf5Variant"),
+      "Wizard must not define handleSelectSf5Variant handler"
     );
     assert.ok(
-      uploadPageSrc.includes("SF5A-SHS — End of Semester Promotion") &&
-      uploadPageSrc.includes("SF5B-SHS — Graduation / TVL Candidates"),
-      "Step 3 must display options for both SF5A-SHS and SF5B-SHS"
+      !uploadPageSrc.includes("SF5A-SHS — End of Semester Promotion"),
+      "Step view must not display SF5A/SF5B form options"
     );
   });
 
@@ -243,6 +243,116 @@ test("AVV — Step-by-Step Document Upload Wizard Workflow & Integration Suite",
       batchScanRouteSrc.includes("ADMIN_CANNOT_UPLOAD") &&
       batchScanRouteSrc.includes("PRINCIPAL_READ_ONLY"),
       "Backend batch scan route must block Admin and Principal from uploading"
+    );
+  });
+
+  // ── 17. Step 5 (PSA) Upper Section Crop Default, Rotation & Civil Identity ──
+  await t.test("17. Step 5 (PSA) integrates preprocessing, upper-section default crop, rotation & civil identity preview", () => {
+    // Preprocessing on upload
+    assert.ok(
+      uploadPageSrc.includes("preprocessPsaImage"),
+      "Upload page must import and invoke preprocessPsaImage for Step 5"
+    );
+    assert.ok(
+      uploadPageSrc.includes("previewMode: upperSectionDataUrl ? \"upper\" : \"processed\""),
+      "Default previewMode for PSA must prioritize upper section crop"
+    );
+
+    // Extraction routes through upperSectionDataUrl
+    assert.ok(
+      uploadPageSrc.includes("imageToSend") &&
+      uploadPageSrc.includes("category === \"birth_cert\" && item.upperSectionDataUrl"),
+      "extractSingleFile must route upperSectionDataUrl as primary image for PSA OCR"
+    );
+
+    // Rotation controls and preview switcher tabs
+    assert.ok(
+      uploadPageSrc.includes("handleRotatePsaFile"),
+      "Upload page must implement handleRotatePsaFile for manual rotation"
+    );
+    assert.ok(
+      uploadPageSrc.includes("90° CCW") && uploadPageSrc.includes("90° CW"),
+      "PSA staged card and preview modal must render 90° CCW and 90° CW rotation buttons"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Upper Section (1-17)") &&
+      (uploadPageSrc.includes("B&W Upright") || uploadPageSrc.includes("B&amp;W Upright")) &&
+      uploadPageSrc.includes("Original"),
+      "PSA staged card and preview modal must provide Upper Section, B&W Upright, and Original tabs"
+    );
+
+    // Civil identity display: has confidence pills and excludes Place of Birth
+    assert.ok(
+      uploadPageSrc.includes("renderConfidencePill"),
+      "Upload page must implement renderConfidencePill for honest confidence badges"
+    );
+    assert.ok(
+      (uploadPageSrc.includes("Child's Legal Name:") || uploadPageSrc.includes("Child&apos;s Legal Name:")) &&
+      uploadPageSrc.includes("Civil Registry / Cert No.:"),
+      "PSA staged card must display extracted civil identity fields"
+    );
+    // Ensure no Place of Birth in the PSA staged card
+    assert.ok(
+      !uploadPageSrc.includes("Place of Birth:") &&
+      !uploadPageSrc.includes("place_of_birth"),
+      "PSA staged card must NOT display Place of Birth"
+    );
+  });
+
+  // ── 18. Step 5 (PSA) Inline Manual Correction & SessionStorage Persistence ──
+  await t.test("18. Step 5 (PSA) inline manual correction, field editing, sessionStorage persistence & verified badges", () => {
+    // 1. Manual Correction toggle
+    assert.ok(
+      uploadPageSrc.includes("handleStartPsaCorrection") &&
+      uploadPageSrc.includes("Manual Correction"),
+      "PSA card must render a Manual Correction toggle button"
+    );
+
+    // 2. Editable fields: First Name, Middle Name, Last Name, DOB, Sex, Mother's Name, Father's Name, Registry No.
+    assert.ok(
+      uploadPageSrc.includes("editingPsaForm.first_name") &&
+      uploadPageSrc.includes("editingPsaForm.middle_name") &&
+      uploadPageSrc.includes("editingPsaForm.last_name") &&
+      uploadPageSrc.includes("editingPsaForm.birth_date") &&
+      uploadPageSrc.includes("editingPsaForm.sex") &&
+      uploadPageSrc.includes("editingPsaForm.mother_maiden_name") &&
+      uploadPageSrc.includes("editingPsaForm.father_name") &&
+      uploadPageSrc.includes("editingPsaForm.registry_number"),
+      "Manual correction must support inline editing of all required civil identity fields"
+    );
+
+    // 3. Ensure NO Place of Birth in manual correction form
+    assert.ok(
+      !uploadPageSrc.includes("Place of Birth") &&
+      !uploadPageSrc.includes("place_of_birth"),
+      "Manual correction form must NOT include Place of Birth"
+    );
+
+    // 4. Save Corrections & Cancel buttons
+    assert.ok(
+      uploadPageSrc.includes("handleSavePsaCorrection") &&
+      uploadPageSrc.includes("handleCancelPsaCorrection") &&
+      uploadPageSrc.includes("Save Corrections") &&
+      uploadPageSrc.includes("Cancel"),
+      "Manual correction must provide Cancel and Save Corrections actions"
+    );
+
+    // 5. State & SessionStorage persistence
+    assert.ok(
+      uploadPageSrc.includes("updateFileExtraction(fileId, \"birth_cert\"") &&
+      uploadPageSrc.includes("sessionStorage.setItem(`avv_staged_ocr_${currentBatchId}`"),
+      "Saving corrections must update component state and persist to sessionStorage under avv_staged_ocr_<batchId>"
+    );
+    assert.ok(
+      uploadPageSrc.includes("sessionStorage.getItem(`avv_staged_ocr_${currentBatchId}`"),
+      "Upload page must restore staged OCR records from sessionStorage on refresh"
+    );
+
+    // 6. Corrected badge / indicator
+    assert.ok(
+      uploadPageSrc.includes("Manually Corrected by Teacher") &&
+      uploadPageSrc.includes("Corrected"),
+      "Manually corrected cards and fields must display a Corrected indicator"
     );
   });
 });

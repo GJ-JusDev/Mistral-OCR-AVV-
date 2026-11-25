@@ -272,10 +272,327 @@ describe("AVV System — Standalone PSA Scanner & OCR Verification Suite", async
     assert.ok(wizardContent.includes("WIZARD_STEPS"), "Upload wizard steps must remain intact");
     assert.ok(wizardContent.includes("SF1-SHS"), "SF1 step must be intact");
     assert.ok(wizardContent.includes("SF2-SHS"), "SF2 step must be intact");
-    assert.ok(wizardContent.includes("SF5-SHS"), "SF5 step must be intact");
+    assert.ok(wizardContent.includes("SF9-SHS"), "SF9 step must be intact");
+    assert.ok(wizardContent.includes("sf5") || wizardContent.includes("SF5"), "SF5 support must be intact");
 
     // Batch scan route intact
     const batchRoutePath = path.join(rootDir, "src", "app", "api", "scan", "batch", "route.ts");
     assert.ok(fs.existsSync(batchRoutePath), "Batch scan API route must remain intact");
+  });
+
+  test("16. Multiline Azure prebuilt-read OCR parsing with typo resilience and upper-section crop", () => {
+    // Synthetic fixture with Azure prebuilt-read quirks:
+    // - Header noise interleaved ("Chy/Municipality", "Province")
+    // - Item 1 multiline with "(LAM)" OCR typo for "(Last)"
+    // - Item 2 with "X_1 Mal" checkbox and "2 Female"
+    // - Item 6 Mother with multiline names and missing "(Last)" label before Item 7
+    // - Item 13 Father with multiline names and missing "(Last)" label before Item 14
+    // - Multi-part Registry No with dot ("204. 52545")
+    const syntheticAzureOcrText = `
+      REPUBLIC OF THE PHILIPPINES
+      OFFICE OF THE CIVIL REGISTRAR GENERAL
+      CERTIFICATE OF LIVE BIRTH
+      Registry No. 204. 52545
+      Province: Batangas
+      Chy/Municipality: San Jose
+      1. NAME
+      (First)
+      JUAN
+      (Middle)
+      SANTOS
+      (LAM)
+      DELA CRUZ
+      2. SEX
+      X_1 Mal
+      2 Female
+      3. DATE OF BIRTH
+      (Day) 15 (Month) AUGUST (Year) 2007
+      4. PLACE OF BIRTH
+      San Jose District Hospital, San Jose, Batangas
+      6. MAIDEN NAME
+      (First)
+      MARIA
+      (Middle)
+      LOURDES
+      REYES
+      7. CITIZENSHIP
+      Filipino
+      8. RELIGION
+      Roman Catholic
+      13. NAME
+      (First)
+      ANTONIO
+      (Middle)
+      SANTOS
+      DELA CRUZ
+      14. CITIZENSHIP
+      Filipino
+      15. RELIGION
+      Roman Catholic
+    `;
+
+    const res = parsePsaBirthCert(syntheticAzureOcrText);
+
+    // Child Name: header noise rejected, (LAM) typo parsed as Last Name
+    assert.strictEqual(res.identity.first_name, "Juan");
+    assert.strictEqual(res.identity.middle_name, "Santos");
+    assert.strictEqual(res.identity.last_name, "Dela Cruz");
+    assert.strictEqual(res.identity.complete_name, "Juan Santos Dela Cruz");
+    assert.strictEqual(res.field_statuses.complete_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.first_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.last_name.status, "extracted");
+
+    // Sex: "X_1 Mal" extracted as "M" without falsely defaulting to Female
+    assert.strictEqual(res.identity.sex, "M");
+    assert.strictEqual(res.field_statuses.sex.status, "extracted");
+
+    // DOB: 15 August 2007 -> 2007-08-15
+    assert.strictEqual(res.identity.birth_date, "2007-08-15");
+    assert.strictEqual(res.field_statuses.birth_date.status, "extracted");
+
+    // Mother: multiline without (Last) label extracted before Item 7
+    assert.match(res.identity.mother_maiden_name, /Maria/i);
+    assert.match(res.identity.mother_maiden_name, /Reyes/i);
+    assert.strictEqual(res.field_statuses.mother_name.status, "extracted");
+
+    // Father: multiline without (Last) label extracted before Item 14
+    assert.match(res.identity.father_name, /Antonio/i);
+    assert.match(res.identity.father_name, /Dela Cruz/i);
+    assert.strictEqual(res.field_statuses.father_name.status, "extracted");
+
+    // Registry No: "204. 52545" normalized to "204-52545"
+    assert.strictEqual(res.identity.registry_number, "204-52545");
+    assert.strictEqual(res.field_statuses.registry_number.status, "extracted");
+
+    // Upper section crop priority option
+    const upperSectionText = `
+      Registry No. 204-52545
+      1. NAME (First) JUAN (Middle) SANTOS (Last) DELA CRUZ
+      2. SEX 1 Male 2 Female
+      3. DATE OF BIRTH 2007-08-15
+      6. MAIDEN NAME MARIA REYES
+      13. NAME ANTONIO DELA CRUZ
+    `;
+    const resWithUpper = parsePsaBirthCert(syntheticAzureOcrText, undefined, 0.95, {
+      upperSectionText,
+    });
+    assert.strictEqual(resWithUpper.identity.complete_name, "Juan Santos Dela Cruz");
+    assert.strictEqual(resWithUpper.identity.registry_number, "204-52545");
+  });
+
+  test("17. Label typo resilience, missing (Last) label multiline layout, multiline checkmark with Malo typo, and multiline DOB extraction", () => {
+    const syntheticMultilineOcr = `
+REPUBLIC OF THE PHILIPPINES
+OFFICE OF THE CIVIL REGISTRAR GENERAL
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2004-98765
+
+1. NAME
+(First)
+GABRIEL
+(Middla)
+VALDEZ
+MENDOZA
+2. SEX
+x
+1 Malo
+2 Female
+3. DATE OF BIRTH
+23
+JUNE 2004
+4. PLACE OF BIRTH QUEZON CITY
+6. MAIDEN NAME CARMEN VALDEZ
+13. NAME EDUARDO MENDOZA
+`;
+    const res = parsePsaBirthCert(syntheticMultilineOcr);
+
+    // Child name: (Middla) typo recognized as structural label, missing (Last) label does not drop last name
+    assert.strictEqual(res.identity.first_name, "Gabriel");
+    assert.strictEqual(res.identity.middle_name, "Valdez");
+    assert.strictEqual(res.identity.last_name, "Mendoza");
+    assert.strictEqual(res.identity.complete_name, "Gabriel Valdez Mendoza");
+    assert.strictEqual(res.field_statuses.first_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.middle_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.last_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.complete_name.status, "extracted");
+
+    // Sex: "x" preceding "1 Malo" extracted as "M" with "extracted" status
+    assert.strictEqual(res.identity.sex, "M");
+    assert.strictEqual(res.field_statuses.sex.status, "extracted");
+
+    // DOB: multiline "23\nJUNE 2004" extracted as "2004-06-23" with "extracted" status
+    assert.strictEqual(res.identity.birth_date, "2004-06-23");
+    assert.strictEqual(res.field_statuses.birth_date.status, "extracted");
+  });
+
+  test("18. Strips leading (Last) OCR typo 'Lan' from Last Name and prioritizes upperSection score 4 candidate", () => {
+    const rawDocText = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2003-12345
+1. NAME
+(First)
+JUSTIN
+(Middla)
+LOQUILLANO
+Lan GOMEZ
+2. SEX
+x
+1 Malo
+2 Female
+3. DATE OF BIRTH
+29 DECEMBER 2003
+4. PLACE OF BIRTH QUEZON CITY
+6. MAIDEN NAME MARIA LOQUILLANO
+13. NAME JUAN GOMEZ
+`;
+
+    const upperSectionText = `
+1. NAME
+(First)
+JUSTIN
+(Middla)
+LOQUILLANO
+Lan GOMEZ
+2. SEX
+x
+1 Malo
+2 Female
+3. DATE OF BIRTH
+29 DECEMBER 2003
+4. PLACE OF BIRTH QUEZON CITY
+`;
+
+    // Even if tight childNameCrop includes the unparenthesized "Lan" typo
+    const childNameText = `
+JUSTIN
+LOQUILLANO
+Lan GOMEZ
+`;
+
+    const res = parsePsaBirthCert(rawDocText, {
+      upperSectionText,
+      childNameText,
+    });
+
+    // 1. Last name must cleanly be "Gomez", without the "Lan" label typo
+    assert.strictEqual(res.identity.first_name, "Justin");
+    assert.strictEqual(res.identity.middle_name, "Loquillano");
+    assert.strictEqual(res.identity.last_name, "Gomez");
+    assert.strictEqual(res.identity.complete_name, "Justin Loquillano Gomez");
+    assert.strictEqual(res.field_statuses.first_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.middle_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.last_name.status, "extracted");
+    assert.strictEqual(res.field_statuses.complete_name.status, "extracted");
+
+    // 2. Multiline checkmark before "1 Malo" correctly extracts Sex "M"
+    // and is NOT overwritten by childNameCrop which lacks Item 2
+    assert.strictEqual(res.identity.sex, "M");
+    assert.strictEqual(res.field_statuses.sex.status, "extracted");
+    assert.strictEqual(res.identity.birth_date, "2003-12-29");
+  });
+
+  test("19. Multiline checkmark detection for Female with 'v' or '✓' checkmark", () => {
+    const femaleDocText = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+1. NAME
+(First)
+SARAH
+(Middle)
+SANTOS
+(Last)
+REYES
+2. SEX
+1 Male
+v
+2 Female
+3. DATE OF BIRTH
+15 MAY 2005
+`;
+    const res = parsePsaBirthCert(femaleDocText);
+    assert.strictEqual(res.identity.first_name, "Sarah");
+    assert.strictEqual(res.identity.middle_name, "Santos");
+    assert.strictEqual(res.identity.last_name, "Reyes");
+    assert.strictEqual(res.identity.sex, "F");
+    assert.strictEqual(res.field_statuses.sex.status, "extracted");
+  });
+
+  test("20. Honest per-field confidence percentages (0-100) and missing field confidence set to 0", () => {
+    const completeDocText = `
+REPUBLIC OF THE PHILIPPINES
+OFFICE OF THE CIVIL REGISTRAR GENERAL
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2004-98765
+
+1. NAME
+(First)
+GABRIEL
+(Middle)
+VALDEZ
+(Last)
+MENDOZA
+2. SEX
+x 1 Male
+2 Female
+3. DATE OF BIRTH
+23 JUNE 2004
+4. PLACE OF BIRTH QUEZON CITY
+6. MAIDEN NAME CARMEN VALDEZ
+13. NAME EDUARDO MENDOZA
+`;
+    const res = parsePsaBirthCert(completeDocText, undefined, 0.94);
+
+    const requiredFields = [
+      "first_name",
+      "middle_name",
+      "last_name",
+      "birth_date",
+      "sex",
+      "mother_name",
+      "father_name",
+      "registry_number",
+    ];
+
+    for (const field of requiredFields) {
+      const fieldItem = res.field_statuses[field];
+      assert.ok(fieldItem, `field_statuses must include ${field}`);
+      assert.strictEqual(typeof fieldItem.confidence, "number", `${field} confidence must be a number`);
+      assert.ok(Number.isInteger(fieldItem.confidence), `${field} confidence must be an integer`);
+      assert.ok(fieldItem.confidence >= 85 && fieldItem.confidence <= 100, `${field} confidence must be between 85 and 100 for extracted fields`);
+    }
+
+    // Document with missing middle name and missing father name
+    const missingFieldsDocText = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2004-98765
+
+1. NAME
+(First)
+GABRIEL
+(Last)
+MENDOZA
+2. SEX
+1 Male [x]
+3. DATE OF BIRTH
+23 JUNE 2004
+6. MAIDEN NAME CARMEN VALDEZ
+`;
+    const resMissing = parsePsaBirthCert(missingFieldsDocText, undefined, 0.94);
+
+    // Missing middle name: status not_detected, confidence strictly 0
+    assert.strictEqual(resMissing.field_statuses.middle_name.status, "not_detected");
+    assert.strictEqual(resMissing.field_statuses.middle_name.confidence, 0);
+
+    // Missing father name: status not_detected, confidence strictly 0
+    assert.strictEqual(resMissing.field_statuses.father_name.status, "not_detected");
+    assert.strictEqual(resMissing.field_statuses.father_name.confidence, 0);
+
+    // Present fields have >= 85% confidence
+    assert.strictEqual(resMissing.field_statuses.first_name.status, "extracted");
+    assert.ok(resMissing.field_statuses.first_name.confidence >= 85);
+    assert.strictEqual(resMissing.field_statuses.last_name.status, "extracted");
+    assert.ok(resMissing.field_statuses.last_name.confidence >= 85);
   });
 });

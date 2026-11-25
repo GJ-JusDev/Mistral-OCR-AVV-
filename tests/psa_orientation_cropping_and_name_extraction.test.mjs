@@ -116,6 +116,14 @@ test("AVV PSA — Orientation Correction, Targeted Cropping, and Name Extraction
     assert.strictEqual(crop.height, Math.round((region.bottom - region.top) * h));
   });
 
+  await t.test("2.3 default upperIdentitySection crop cleanly frames Registry No. & Items 1-17 stopping before Item 18", () => {
+    const region = DEFAULT_PSA_CROP_REGIONS.upperIdentitySection;
+    assert.ok(region.top >= 0.02 && region.top <= 0.08, "top offset captures header and registry no");
+    assert.ok(region.bottom >= 0.54 && region.bottom <= 0.60, "bottom offset stops right above Item 18 marriage");
+    assert.ok(region.left >= 0.01 && region.left <= 0.06, "left margin accommodates scan margins");
+    assert.ok(region.right <= 0.85, "right margin excludes right-side OCRG code boxes");
+  });
+
   // =========================================================================
   // 3. CHILD COMPLETE NAME PARSING
   // =========================================================================
@@ -340,6 +348,67 @@ PSA Certificate No. 2005-998877
     const result = await preprocessPsaImage(originalInput, { rotation: 270 });
 
     assert.strictEqual(result.originalDataUrl, originalInput);
+  });
+
+  await t.test("4.5 partial childNameCrop (First Name only) NEVER overwrites full name from upperSectionText", () => {
+    const fullUpperText = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2007-12345
+1. NAME
+(First)
+JUSTIN
+(Middle)
+LOQUILLANO
+(LAM)
+GOMEZ
+2. SEX
+1 Male
+3. DATE OF BIRTH 15 August 2007
+4. PLACE OF BIRTH Manila
+6. MAIDEN NAME MARIA SANTOS
+13. NAME ROBERTO GOMEZ
+`;
+    // Simulating a tight crop that only captured the top line of the name
+    const partialCropText = `
+1. NAME
+(First)
+JUSTIN
+`;
+    const result = parsePsaBirthCert(fullUpperText, undefined, 0.95, {
+      childNameText: partialCropText,
+      upperSectionText: fullUpperText,
+    });
+
+    assert.strictEqual(result.identity.first_name, "Justin");
+    assert.strictEqual(result.identity.middle_name, "Loquillano");
+    assert.strictEqual(result.identity.last_name, "Gomez");
+    assert.strictEqual(result.identity.complete_name, "Justin Loquillano Gomez");
+    assert.strictEqual(result.identity.sex, "M");
+    assert.strictEqual(result.field_statuses.sex.status, "extracted");
+    assert.strictEqual(result.field_statuses.complete_name.status, "extracted");
+  });
+
+  await t.test("4.6 multiline Azure prebuilt-read text with (LAM) typo and Item 2 SEX extracts complete name and valid sex status", () => {
+    const multilineText = `
+1. NAME
+(First)
+JUSTIN
+(Middle)
+LOQUILLANO
+(LAM)
+GOMEZ
+2. SEX
+1 Male
+3. DATE OF BIRTH 2007-08-15
+`;
+    const result = parsePsaBirthCert(multilineText);
+    assert.strictEqual(result.identity.first_name, "Justin");
+    assert.strictEqual(result.identity.middle_name, "Loquillano");
+    assert.strictEqual(result.identity.last_name, "Gomez");
+    assert.strictEqual(result.identity.complete_name, "Justin Loquillano Gomez");
+    assert.strictEqual(result.identity.sex, "M");
+    assert.strictEqual(result.field_statuses.sex.status, "extracted");
   });
 
   // =========================================================================

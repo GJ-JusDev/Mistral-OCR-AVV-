@@ -357,92 +357,6 @@ export function evaluateBatchCrossDocumentValidation(params: {
       }
     }
 
-    // SF5A End of Semester Promotion (Separate from SF5B to eliminate collision)
-    if (seg.documentType === "sf5a" && (Array.isArray(data.learners) || Array.isArray(data.promotion_records))) {
-      const records = data.learners || data.promotion_records;
-      for (const item of records) {
-        const l = getOrCreateLearner(
-          item.lrn,
-          { lastName: item.last_name || item.learner_name, firstName: item.first_name },
-          "sf5a"
-        );
-        const newRec = {
-          pageNumber: item.page_number || pageNum,
-          fileName: item.source_file_name || segFileName,
-          dataUrl: item.source_file_data_url || segDataUrl,
-          documentId: seg.id,
-          raw: {
-            ...item,
-            school_year: item.school_year || data.school_year,
-            grade_level: item.grade_level || data.grade_level,
-            section: item.section || data.section,
-            semester: item.semester || data.semester,
-          },
-        };
-        if (l.sf5aRecord) {
-          const isIdentical =
-            String(l.sf5aRecord.raw?.action_taken || "").toUpperCase() === String(item.action_taken || "").toUpperCase();
-          l.duplicateWarnings.push({
-            documentType: "SF5A-SHS",
-            details: isIdentical
-              ? `Duplicate scan of SF5A promotion report detected (${segFileName}). Original record preserved.`
-              : `Conflicting duplicate scan of SF5A promotion report detected with differing promotion status (${segFileName} vs ${l.sf5aRecord.fileName}).`,
-            existingSource: l.sf5aRecord.fileName || "SF5A Scan 1",
-            newSource: segFileName || "SF5A Scan 2",
-            isIdentical,
-            severity: isIdentical ? "WARNING" : "CRITICAL",
-          });
-        } else {
-          l.sf5aRecord = newRec;
-          if (!l.sf5Record) l.sf5Record = newRec;
-        }
-        l.allSf5aRecords.push(newRec);
-      }
-    }
-
-    // SF5B Graduation List (Grade 12, Separate from SF5A to eliminate collision)
-    if (seg.documentType === "sf5b" && (Array.isArray(data.learners) || Array.isArray(data.promotion_records))) {
-      const records = data.learners || data.promotion_records;
-      for (const item of records) {
-        const l = getOrCreateLearner(
-          item.lrn,
-          { lastName: item.last_name || item.learner_name, firstName: item.first_name },
-          "sf5b"
-        );
-        const newRec = {
-          pageNumber: item.page_number || pageNum,
-          fileName: item.source_file_name || segFileName,
-          dataUrl: item.source_file_data_url || segDataUrl,
-          documentId: seg.id,
-          raw: {
-            ...item,
-            school_year: item.school_year || data.school_year,
-            grade_level: item.grade_level || data.grade_level || "Grade 12",
-            section: item.section || data.section,
-            graduation_status: item.graduation_status || item.action_taken || "GRADUATED",
-          },
-        };
-        if (l.sf5bRecord) {
-          const isIdentical =
-            String(l.sf5bRecord.raw?.graduation_status || "").toUpperCase() === String(newRec.raw.graduation_status || "").toUpperCase();
-          l.duplicateWarnings.push({
-            documentType: "SF5B-SHS",
-            details: isIdentical
-              ? `Duplicate scan of SF5B graduation report detected (${segFileName}). Original record preserved.`
-              : `Conflicting duplicate scan of SF5B graduation report detected with differing graduation status (${segFileName} vs ${l.sf5bRecord.fileName}).`,
-            existingSource: l.sf5bRecord.fileName || "SF5B Scan 1",
-            newSource: segFileName || "SF5B Scan 2",
-            isIdentical,
-            severity: isIdentical ? "WARNING" : "CRITICAL",
-          });
-        } else {
-          l.sf5bRecord = newRec;
-          if (!l.sf5Record) l.sf5Record = newRec;
-        }
-        l.allSf5bRecords.push(newRec);
-      }
-    }
-
     // SF9 Progress Report Card
     if (seg.documentType === "sf9") {
       const l = getOrCreateLearner(
@@ -556,22 +470,27 @@ export function evaluateBatchCrossDocumentValidation(params: {
       (learner.middleName ? ` ${learner.middleName}` : "");
     const displayedLrn = learner.lrn || lrnKey;
 
+    const isSf9FrontOnly = Boolean(
+      learner.sf9Record &&
+      (!Array.isArray(learner.sf9Record.raw?.grades) || learner.sf9Record.raw.grades.length === 0) &&
+      (learner.sf9Record.raw?.general_average === undefined || learner.sf9Record.raw?.general_average === null)
+    );
+    const hasCompleteSf9 = Boolean(learner.sf9Record && !isSf9FrontOnly && !learner.sf9Record.raw?.identity_conflict);
+
     const docPresence = {
       sf1: Boolean(learner.sf1Record),
       sf2: learner.sf2Records.length > 0,
-      sf5: Boolean(learner.sf5aRecord || learner.sf5bRecord || learner.sf5Record),
-      sf5a: Boolean(learner.sf5aRecord),
-      sf5b: Boolean(learner.sf5bRecord),
-      sf9: Boolean(learner.sf9Record),
+      sf5: false,
+      sf5a: false,
+      sf5b: false,
+      sf9: hasCompleteSf9,
       sf10: Boolean(learner.sf10Record),
       psa: Boolean(learner.psaRecord),
       sf2MonthsCount: learner.sf2Records.length,
       totalAvailable: [
         Boolean(learner.sf1Record),
         learner.sf2Records.length > 0,
-        Boolean(learner.sf5aRecord),
-        Boolean(learner.sf5bRecord),
-        Boolean(learner.sf9Record),
+        hasCompleteSf9,
         Boolean(learner.sf10Record),
         Boolean(learner.psaRecord),
       ].filter(Boolean).length,
@@ -579,6 +498,75 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
     const pairwiseResults: PairwiseValidationResult[] = [];
     const learnerDiscrepancies: BatchDiscrepancyItem[] = [];
+
+    // Check for Incomplete SF9 Pairs: Front-only (has identity/LRN but no back page / grades)
+    if (isSf9FrontOnly) {
+      const disc: BatchDiscrepancyItem = {
+        id: `disc-${learnerDiscrepancies.length + 1}-missing-sf9-back`,
+        learnerName: fullName || "Learner with SF9 Front Only",
+        lrn: displayedLrn,
+        field: "Progress Report Card (SF9-SHS)",
+        source1Doc: "SF9-SHS Front / Identity",
+        source1Page: learner.sf9Record?.pageNumber,
+        source1FileName: learner.sf9Record?.fileName,
+        source1DataUrl: learner.sf9Record?.dataUrl,
+        source1Value: "FRONT ONLY (NO GRADES)",
+        source2Doc: "SF9-SHS Back / Grades Side",
+        source2Value: "NOT FOUND IN BATCH",
+        severity: "WARNING",
+        category: "MISSING_DOC",
+        reason: "Missing SF9 Back Page / Grades: Learner has an SF9 front identity page but no back page or subject grades were found in this batch.",
+        recommendedAction: "Upload or scan the back side (Grades and Attendance) of the learner's SF9 report card.",
+      };
+      learnerDiscrepancies.push(disc);
+      allDiscrepancies.push(disc);
+    }
+
+    // Check for Incomplete SF9 Pairs: Back-only (has grades/attendance but no 12-digit LRN / UNREGISTERED)
+    if (!isValidLrn(learner.lrn) && learner.sf9Record) {
+      const disc: BatchDiscrepancyItem = {
+        id: `disc-${learnerDiscrepancies.length + 1}-unmatched-sf9-back`,
+        learnerName: fullName || "Unmatched Student (SF9 Back Page Only)",
+        lrn: displayedLrn,
+        field: "Progress Report Card (SF9-SHS)",
+        source1Doc: "SF9-SHS Back Side",
+        source1Page: learner.sf9Record?.pageNumber,
+        source1FileName: learner.sf9Record?.fileName,
+        source1DataUrl: learner.sf9Record?.dataUrl,
+        source1Value: "BACK ONLY (GRADES WITHOUT LRN)",
+        source2Doc: "SF9-SHS Front / Identity Side",
+        source2Value: "NOT FOUND IN BATCH",
+        severity: "CRITICAL",
+        category: "NEEDS_VERIFICATION",
+        reason: "Unmatched SF9 Back Page — Missing Front Page / LRN: Back page contains subject grades and attendance but no 12-digit LRN or front identity header was found to associate it with a student.",
+        recommendedAction: "Upload or pair the corresponding SF9 front side containing the learner's LRN and official name.",
+      };
+      learnerDiscrepancies.push(disc);
+      allDiscrepancies.push(disc);
+    }
+
+    // Check for Mismatched SF9 Front/Back Identity Conflict
+    if (learner.sf9Record?.raw?.identity_conflict) {
+      const disc: BatchDiscrepancyItem = {
+        id: `disc-${learnerDiscrepancies.length + 1}-sf9-identity-conflict`,
+        learnerName: fullName || "Learner with SF9 Identity Conflict",
+        lrn: displayedLrn,
+        field: "SF9 Identity Pairing",
+        source1Doc: "SF9-SHS Front Side",
+        source1Page: learner.sf9Record?.pageNumber,
+        source1FileName: learner.sf9Record?.fileName,
+        source1DataUrl: learner.sf9Record?.dataUrl,
+        source1Value: "IDENTITY CONFLICT DETECTED",
+        source2Doc: "SF9-SHS Back Side",
+        source2Value: "MISMATCHED LEARNER",
+        severity: "CRITICAL",
+        category: "MISMATCH",
+        reason: `Mismatched SF9 Front/Back: ${((learner.sf9Record.raw.identity_conflicts || []) as string[]).join("; ") || "Conflicting learner identity detected between sides."}`,
+        recommendedAction: "Verify physical card images. Ensure Learner A's front page is not attached to Learner B's back page.",
+      };
+      learnerDiscrepancies.push(disc);
+      allDiscrepancies.push(disc);
+    }
 
     // Check for Incomplete Data (Missing 12-digit LRN)
     if (!learner.lrn || !isValidLrn(learner.lrn)) {
@@ -714,37 +702,6 @@ export function evaluateBatchCrossDocumentValidation(params: {
       }
     }
 
-    // Comparator 3: SF1 ↔ SF5A/SF5B (Enrollment vs Promotion)
-    const activeSf5ForEnrollment = learner.sf5aRecord || learner.sf5bRecord || learner.sf5Record;
-    if (learner.sf1Record && activeSf5ForEnrollment) {
-      const pRes = compareSf1AndSf5(learner.sf1Record.raw, activeSf5ForEnrollment.raw);
-      pairwiseResults.push(pRes);
-      for (const d of pRes.discrepancies) {
-        const disc: BatchDiscrepancyItem = {
-          id: `disc-${learnerDiscrepancies.length + 1}-sf1-sf5-${d.field}`,
-          learnerName: fullName,
-          lrn: displayedLrn,
-          field: d.field,
-          source1Doc: "SF1-SHS School Register",
-          source1Page: learner.sf1Record.pageNumber,
-          source1FileName: learner.sf1Record.fileName,
-          source1DataUrl: learner.sf1Record.dataUrl,
-          source1Value: d.sourceValue,
-          source2Doc: "SF5-SHS Promotion Report",
-          source2Page: activeSf5ForEnrollment.pageNumber,
-          source2FileName: activeSf5ForEnrollment.fileName,
-          source2DataUrl: activeSf5ForEnrollment.dataUrl,
-          source2Value: d.targetValue,
-          severity: d.severity,
-          category: "MISMATCH",
-          reason: d.description,
-          recommendedAction: "Ensure all enrolled learners are accounted for in the end-of-semester promotion status.",
-        };
-        learnerDiscrepancies.push(disc);
-        allDiscrepancies.push(disc);
-      }
-    }
-
     // Comparator 4: SF1 ↔ SF9 (School Register vs Report Card)
     if (learner.sf1Record && learner.sf9Record) {
       const sf9Data = learner.sf9Record.raw;
@@ -837,82 +794,6 @@ export function evaluateBatchCrossDocumentValidation(params: {
           category: "MISMATCH",
           reason: d.description,
           recommendedAction: "Cross-check physical Form 138 with teacher class record and update Form 137 accordingly.",
-        };
-        learnerDiscrepancies.push(disc);
-        allDiscrepancies.push(disc);
-      }
-    }
-
-    // Comparator 6: SF5A ↔ SF9 (Promotion Status vs Failing Grades)
-    const activeSf5a = learner.sf5aRecord || learner.sf5Record;
-    if (activeSf5a && learner.sf9Record) {
-      const sf9Data = learner.sf9Record.raw;
-      const pRes = compareSf5AndSf9(
-        activeSf5a.raw,
-        (sf9Data.grades || []).map((g: any) => ({
-          subject: g.subject,
-          finalGrade: g.final,
-        })),
-        "doc-sf9"
-      );
-      pairwiseResults.push(pRes);
-      for (const d of pRes.discrepancies) {
-        const disc: BatchDiscrepancyItem = {
-          id: `disc-${learnerDiscrepancies.length + 1}-sf5-sf9-${d.field}`,
-          learnerName: fullName,
-          lrn: displayedLrn,
-          field: d.field,
-          source1Doc: "SF5A-SHS Promotion Status",
-          source1Page: activeSf5a.pageNumber,
-          source1FileName: activeSf5a.fileName,
-          source1DataUrl: activeSf5a.dataUrl,
-          source1Value: d.sourceValue,
-          source2Doc: "SF9-SHS Report Card",
-          source2Page: learner.sf9Record.pageNumber,
-          source2FileName: learner.sf9Record.fileName,
-          source2DataUrl: learner.sf9Record.dataUrl,
-          source2Value: d.targetValue,
-          severity: d.severity,
-          category: "MISMATCH",
-          reason: d.description,
-          recommendedAction: "Resolve promotion discrepancy with class adviser: failing grades require remedial classes or conditional status.",
-        };
-        learnerDiscrepancies.push(disc);
-        allDiscrepancies.push(disc);
-      }
-    }
-
-    // Comparator 7: SF5B ↔ SF10 (Graduation Clearance vs Back-Subjects)
-    const activeSf5b = learner.sf5bRecord || learner.sf5Record;
-    if (activeSf5b && learner.sf10Record && (learner.gradeLevel === "Grade 12" || gradeLevel === "Grade 12")) {
-      const sf10Data = learner.sf10Record.raw;
-      const pRes = compareSf5AndSf10(activeSf5b.raw, {
-        document_id: "doc-sf10",
-        completed_semesters: sf10Data.completed_semesters || [],
-        has_unresolved_back_subjects: Boolean(sf10Data.has_unresolved_back_subjects),
-        unresolved_subjects: sf10Data.unresolved_subjects || [],
-      });
-      pairwiseResults.push(pRes);
-      for (const d of pRes.discrepancies) {
-        const disc: BatchDiscrepancyItem = {
-          id: `disc-${learnerDiscrepancies.length + 1}-sf5-sf10-${d.field}`,
-          learnerName: fullName,
-          lrn: displayedLrn,
-          field: d.field,
-          source1Doc: "SF5B-SHS Graduation Candidate",
-          source1Page: activeSf5b.pageNumber,
-          source1FileName: activeSf5b.fileName,
-          source1DataUrl: activeSf5b.dataUrl,
-          source1Value: d.sourceValue,
-          source2Doc: "SF10-SHS Permanent Transcript",
-          source2Page: learner.sf10Record.pageNumber,
-          source2FileName: learner.sf10Record.fileName,
-          source2DataUrl: learner.sf10Record.dataUrl,
-          source2Value: d.targetValue,
-          severity: d.severity,
-          category: "MISMATCH",
-          reason: d.description,
-          recommendedAction: "Graduation clearance requires all SHS curriculum deficiencies to be resolved on SF10.",
         };
         learnerDiscrepancies.push(disc);
         allDiscrepancies.push(disc);
@@ -1110,9 +991,9 @@ export function evaluateBatchCrossDocumentValidation(params: {
       matchedSources: {
         sf1: learner.sf1Record,
         sf2: learner.sf2Records[0],
-        sf5: learner.sf5aRecord || learner.sf5bRecord || learner.sf5Record,
-        sf5a: learner.sf5aRecord,
-        sf5b: learner.sf5bRecord,
+        sf5: undefined,
+        sf5a: undefined,
+        sf5b: undefined,
         sf9: learner.sf9Record,
         sf10: learner.sf10Record,
         psa: learner.psaRecord,

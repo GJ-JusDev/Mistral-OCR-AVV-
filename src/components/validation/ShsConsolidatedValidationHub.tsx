@@ -421,8 +421,6 @@ export default function ShsConsolidatedValidationHub({
                     <th className="py-2.5 px-2 text-center min-w-[85px] bg-purple-50/40 dark:bg-purple-950/20 text-purple-900 dark:text-purple-300">PSA</th>
                     <th className="py-2.5 px-2 text-center min-w-[85px] bg-emerald-50/40 dark:bg-emerald-950/20 text-emerald-900 dark:text-emerald-300">SF1</th>
                     <th className="py-2.5 px-2 text-center min-w-[95px] bg-sky-50/40 dark:bg-sky-950/20 text-sky-900 dark:text-sky-300">SF2</th>
-                    <th className="py-2.5 px-2 text-center min-w-[85px] bg-amber-50/40 dark:bg-amber-950/20 text-amber-900 dark:text-amber-300">SF5A</th>
-                    <th className="py-2.5 px-2 text-center min-w-[85px] bg-orange-50/40 dark:bg-orange-950/20 text-orange-900 dark:text-orange-300">SF5B</th>
                     <th className="py-2.5 px-2 text-center min-w-[95px] bg-indigo-50/40 dark:bg-indigo-950/20 text-indigo-900 dark:text-indigo-300">SF9</th>
                     <th className="py-2.5 px-2 text-center min-w-[95px] bg-blue-50/40 dark:bg-blue-950/20 text-blue-900 dark:text-blue-300">SF10</th>
                     <th className="py-2.5 px-3 text-center min-w-[100px]">Status</th>
@@ -466,8 +464,6 @@ export default function ShsConsolidatedValidationHub({
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.psaValue)}</td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf1Value)}</td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf2Value)}</td>
-                          <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf5aValue)}</td>
-                          <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf5bValue)}</td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf9Value)}</td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf10Value)}</td>
                           <td className="py-2.5 px-3 text-center">

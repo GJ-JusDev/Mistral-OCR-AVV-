@@ -121,11 +121,6 @@ export default function IndividualDocumentExtractionView({
         return "bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/60 dark:text-blue-300 dark:border-blue-800";
       case "sf2":
         return "bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800";
-      case "sf5":
-      case "sf5a":
-        return "bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/60 dark:text-purple-300 dark:border-purple-800";
-      case "sf5b":
-        return "bg-indigo-100 text-indigo-800 border-indigo-300 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-800";
       case "sf9":
         return "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800";
       case "sf10":
@@ -492,8 +487,8 @@ export default function IndividualDocumentExtractionView({
 
           {/* Form Specific Extracted Records */}
 
-          {/* Case 1: Multi-Learner Rosters (SF1, SF2, SF5A, SF5B) */}
-          {["sf1", "sf2", "sf5", "sf5a", "sf5b"].includes(docType) && (
+          {/* Case 1: Multi-Learner Rosters (SF1, SF2) */}
+          {["sf1", "sf2"].includes(docType) && (
             <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
@@ -549,13 +544,6 @@ export default function IndividualDocumentExtractionView({
                             <th className="py-2.5 px-3 text-center">Absent</th>
                             <th className="py-2.5 px-3 text-center">Tardy</th>
                             <th className="py-2.5 px-3">Monthly Remarks</th>
-                          </>
-                        )}
-                        {(docType === "sf5a" || docType === "sf5b") && (
-                          <>
-                            <th className="py-2.5 px-3">Action / Status</th>
-                            <th className="py-2.5 px-3">Incomplete Subjects</th>
-                            <th className="py-2.5 px-3 text-center">Gen. Avg</th>
                           </>
                         )}
                         <th className="py-2.5 px-3 text-right">Traceability</th>
@@ -626,36 +614,6 @@ export default function IndividualDocumentExtractionView({
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-500 text-[11px]">
                                   {row.remarks || "—"}
-                                </td>
-                              </>
-                            )}
-
-                            {/* SF5 Specific Columns */}
-                            {(docType === "sf5a" || docType === "sf5b") && (
-                              <>
-                                <td className="py-2.5 px-3">
-                                  <span
-                                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                      String(row.action_taken || row.graduation_status || "")
-                                        .toUpperCase()
-                                        .includes("PROMOTED") ||
-                                      String(row.action_taken || row.graduation_status || "")
-                                        .toUpperCase()
-                                        .includes("GRADUAT")
-                                        ? "bg-emerald-100 text-emerald-800"
-                                        : "bg-amber-100 text-amber-800"
-                                    }`}
-                                  >
-                                    {row.action_taken || row.graduation_status || "—"}
-                                  </span>
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-500 text-[11px]">
-                                  {Array.isArray(row.incomplete_subjects) && row.incomplete_subjects.length > 0
-                                    ? row.incomplete_subjects.join(", ")
-                                    : "None"}
-                                </td>
-                                <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-800 dark:text-slate-200">
-                                  {row.general_average || "—"}
                                 </td>
                               </>
                             )}
@@ -1178,41 +1136,93 @@ export default function IndividualDocumentExtractionView({
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">
-                    Civil Registry Number
-                  </span>
-                  <span className="font-mono font-bold text-slate-900 dark:text-slate-100 text-sm">
-                    {segmentData.registry_number || "—"}
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                      Civil Registry Number
+                    </span>
+                    <span className="font-mono font-bold text-slate-900 dark:text-slate-100 text-sm">
+                      {segmentData.registry_number || "—"}
+                    </span>
+                  </div>
+                  {segmentData.field_statuses?.registry_number && (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      (segmentData.field_statuses.registry_number.confidence || 0) >= 85
+                        ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                        : (segmentData.field_statuses.registry_number.confidence || 0) >= 60
+                        ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                    }`}>
+                      {Math.round(segmentData.field_statuses.registry_number.confidence > 1 ? segmentData.field_statuses.registry_number.confidence : segmentData.field_statuses.registry_number.confidence * 100)}%
+                    </span>
+                  )}
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">
-                    Registered Child Full Name
-                  </span>
-                  <span className="font-bold text-slate-900 dark:text-slate-100 text-sm">
-                    {segmentData.name ||
-                      [segmentData.last_name, segmentData.first_name, segmentData.middle_name]
-                        .filter(Boolean)
-                        .join(", ") ||
-                      "—"}
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                      Registered Child Full Name
+                    </span>
+                    <span className="font-bold text-slate-900 dark:text-slate-100 text-sm">
+                      {segmentData.name ||
+                        [segmentData.last_name, segmentData.first_name, segmentData.middle_name]
+                          .filter(Boolean)
+                          .join(", ") ||
+                        "—"}
+                    </span>
+                  </div>
+                  {segmentData.field_statuses?.first_name && (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      (segmentData.field_statuses.first_name.confidence || 0) >= 85
+                        ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                        : (segmentData.field_statuses.first_name.confidence || 0) >= 60
+                        ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                    }`}>
+                      {Math.round(segmentData.field_statuses.first_name.confidence > 1 ? segmentData.field_statuses.first_name.confidence : segmentData.field_statuses.first_name.confidence * 100)}%
+                    </span>
+                  )}
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">
-                    Date of Birth & Sex
-                  </span>
-                  <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    {segmentData.birth_date || "—"} • Sex: {segmentData.sex || "—"}
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                      Date of Birth & Sex
+                    </span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {segmentData.birth_date || "—"} • Sex: {segmentData.sex || "—"}
+                    </span>
+                  </div>
+                  {segmentData.field_statuses?.birth_date && (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      (segmentData.field_statuses.birth_date.confidence || 0) >= 85
+                        ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                        : (segmentData.field_statuses.birth_date.confidence || 0) >= 60
+                        ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                    }`}>
+                      {Math.round(segmentData.field_statuses.birth_date.confidence > 1 ? segmentData.field_statuses.birth_date.confidence : segmentData.field_statuses.birth_date.confidence * 100)}%
+                    </span>
+                  )}
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
-                  <span className="text-[10px] font-bold uppercase text-slate-400 block">
-                    Mother Maiden Name & Father
-                  </span>
-                  <span className="font-semibold text-slate-800 dark:text-slate-200 truncate block">
-                    Mother: {segmentData.mother_maiden_name || "—"} • Father: {segmentData.father_name || "—"}
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400 block">
+                      Mother Maiden Name & Father
+                    </span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200 truncate block">
+                      Mother: {segmentData.mother_maiden_name || "—"} • Father: {segmentData.father_name || "—"}
+                    </span>
+                  </div>
+                  {(segmentData.field_statuses?.mother_name || segmentData.field_statuses?.mother_maiden_name) && (
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 85
+                        ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                        : ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 60
+                        ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                    }`}>
+                      {Math.round((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence > 1 ? (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence : (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence * 100)}%
+                    </span>
+                  )}
                 </div>
               </div>
 

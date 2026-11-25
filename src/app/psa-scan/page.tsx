@@ -34,7 +34,7 @@ import {
   FileCheck,
   Sparkles,
 } from "lucide-react";
-import type { PsaFieldStatusMap, FieldStatus } from "@/lib/ocr/psaParser";
+import type { PsaFieldStatusMap, PsaFieldStatusItem, FieldStatus } from "@/lib/ocr/psaParser";
 import { parseApiResponseSafely } from "@/lib/ocr/apiResponseParser";
 import { preprocessPsaImage } from "@/lib/ocr/psaPreprocessing";
 
@@ -80,12 +80,13 @@ export default function PsaScannerPage() {
   const [backOcrPreparedDataUrl, setBackOcrPreparedDataUrl] = useState<string | null>(null);
   const [activeSide, setActiveSide] = useState<"front" | "back">("front");
   const [hasBackPage, setHasBackPage] = useState<boolean>(false);
+  const [upperSectionCropUrl, setUpperSectionCropUrl] = useState<string | null>(null);
   const [childSectionCropUrl, setChildSectionCropUrl] = useState<string | null>(null);
   const [childNameCropUrl, setChildNameCropUrl] = useState<string | null>(null);
   const [isPreprocessing, setIsPreprocessing] = useState<boolean>(false);
   const [preprocessingNote, setPreprocessingNote] = useState<string | null>(null);
-  // Preview Mode: "processed" (Upright B&W) | "cropped" (Item 1 Child Section) | "original" (Raw Upload)
-  const [previewMode, setPreviewMode] = useState<"processed" | "cropped" | "original">("processed");
+  // Preview Mode: "upper" (Default: Upper Section Items 1-17) | "processed" (Upright B&W) | "cropped" (Item 1 Child Section) | "original" (Raw Upload)
+  const [previewMode, setPreviewMode] = useState<"processed" | "upper" | "cropped" | "original">("upper");
 
   // Camera Modal State
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -146,6 +147,9 @@ export default function PsaScannerPage() {
   }, []);
 
   const getDisplayedFrontImage = () => {
+    if (previewMode === "upper") {
+      return upperSectionCropUrl || ocrPreparedDataUrl || previewDataUrl || "";
+    }
     if (previewMode === "cropped") {
       return childNameCropUrl || childSectionCropUrl || ocrPreparedDataUrl || previewDataUrl || "";
     }
@@ -164,9 +168,11 @@ export default function PsaScannerPage() {
         autoRotate: true,
       });
       setOcrPreparedDataUrl(prepRes.processedDataUrl);
+      setUpperSectionCropUrl(prepRes.upperSectionDataUrl || null);
       setChildSectionCropUrl(prepRes.childSectionDataUrl || null);
       setChildNameCropUrl(prepRes.childNameDataUrl || null);
-      setPreviewMode("processed");
+      // Default active preview immediately after upload/preprocessing is the Cropped Upper Section (Items 1-17)
+      setPreviewMode(prepRes.upperSectionDataUrl ? "upper" : "processed");
 
       if (prepRes.rotationApplied && prepRes.rotationApplied !== 0) {
         setRotation(prepRes.rotationApplied);
@@ -180,6 +186,7 @@ export default function PsaScannerPage() {
       }
     } catch {
       setOcrPreparedDataUrl(dataUrl);
+      setUpperSectionCropUrl(null);
       setChildSectionCropUrl(null);
       setChildNameCropUrl(null);
     } finally {
@@ -250,6 +257,7 @@ export default function PsaScannerPage() {
       setSelectedFile(null);
       setPreviewDataUrl(null);
       setOcrPreparedDataUrl(null);
+      setUpperSectionCropUrl(null);
       setChildSectionCropUrl(null);
       setChildNameCropUrl(null);
       setPreprocessingNote(null);
@@ -268,6 +276,7 @@ export default function PsaScannerPage() {
     setSelectedFile(null);
     setPreviewDataUrl(null);
     setOcrPreparedDataUrl(null);
+    setUpperSectionCropUrl(null);
     setChildSectionCropUrl(null);
     setChildNameCropUrl(null);
     setBackFile(null);
@@ -284,6 +293,7 @@ export default function PsaScannerPage() {
     setIsSavedManual(false);
     setZoomLevel(1);
     setRotation(0);
+    setPreviewMode("upper");
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (backFileInputRef.current) backFileInputRef.current.value = "";
   };
@@ -299,13 +309,15 @@ export default function PsaScannerPage() {
     setErrorMessage(null);
 
     try {
-      // Use preprocessed B&W upright image for OCR while original remains untouched in preview
-      const effectiveImage = ocrPreparedDataUrl || previewDataUrl;
+      // Send cropped upright upper section (Items 1-17) as primary OCR image so bottom-half noise never interferes,
+      // falling back to full preprocessed B&W upright image, then preview data URL
+      const effectiveImage = upperSectionCropUrl || ocrPreparedDataUrl || previewDataUrl;
       const effectiveBackImage = backOcrPreparedDataUrl || backPreviewDataUrl;
 
       const payload: any = {
         image: effectiveImage,
         originalImage: previewDataUrl,
+        upperSectionImage: upperSectionCropUrl || undefined,
         childSectionImage: childSectionCropUrl || undefined,
         childNameImage: childNameCropUrl || undefined,
         isPreprocessed: Boolean(ocrPreparedDataUrl && ocrPreparedDataUrl !== previewDataUrl),
@@ -343,6 +355,9 @@ export default function PsaScannerPage() {
       setWarnings(data.warnings || []);
       setIsSavedManual(false);
       setIsEditing(false);
+      if (upperSectionCropUrl) {
+        setPreviewMode("upper");
+      }
     } catch (err: any) {
       setErrorMessage(err.message || "An unexpected error occurred during PSA document extraction.");
     } finally {
@@ -388,28 +403,68 @@ export default function PsaScannerPage() {
     }
   };
 
-  // Helper for status badge
-  const renderStatusBadge = (status?: FieldStatus) => {
-    if (status === "extracted") {
+  // Helper for per-field honest confidence percentage badge (0% to 100%)
+  const renderStatusBadge = (fieldItemOrStatus?: PsaFieldStatusItem | FieldStatus, explicitStatus?: FieldStatus) => {
+    let status: FieldStatus = "not_detected";
+    let pct = 0;
+
+    if (typeof fieldItemOrStatus === "string") {
+      status = fieldItemOrStatus;
+      pct =
+        status === "extracted"
+          ? (confidence ? Math.round(confidence > 1 ? confidence : confidence * 100) : 95)
+          : status === "needs_verification"
+          ? 70
+          : 0;
+    } else if (fieldItemOrStatus) {
+      status = explicitStatus || fieldItemOrStatus.status || "not_detected";
+      if (typeof fieldItemOrStatus.confidence === "number") {
+        pct = Math.round(fieldItemOrStatus.confidence > 1 ? fieldItemOrStatus.confidence : fieldItemOrStatus.confidence * 100);
+      } else {
+        pct = status === "extracted" ? 95 : status === "needs_verification" ? 70 : 0;
+      }
+    }
+
+    if (status === "not_detected") {
+      pct = 0;
+    }
+
+    pct = Math.min(100, Math.max(0, pct));
+
+    const statusLabel =
+      status === "extracted"
+        ? "Successfully extracted"
+        : status === "needs_verification"
+        ? "Needs verification"
+        : "Not detected";
+    const tooltip = `${pct}% — ${statusLabel}`;
+
+    if (pct >= 85) {
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-          <CheckCircle2 className="w-3.5 h-3.5" />
-          Successfully extracted
+        <span
+          title={tooltip}
+          className="inline-flex items-center justify-center min-w-[46px] px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 cursor-default shadow-2xs"
+        >
+          {pct}%
         </span>
       );
     }
-    if (status === "needs_verification") {
+    if (pct >= 60) {
       return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-          <AlertTriangle className="w-3.5 h-3.5" />
-          Needs verification
+        <span
+          title={tooltip}
+          className="inline-flex items-center justify-center min-w-[46px] px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 cursor-default shadow-2xs"
+        >
+          {pct}%
         </span>
       );
     }
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
-        <HelpCircle className="w-3.5 h-3.5" />
-        Not detected
+      <span
+        title={tooltip}
+        className="inline-flex items-center justify-center min-w-[46px] px-2.5 py-0.5 rounded-full text-xs font-bold bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 cursor-default shadow-2xs"
+      >
+        {pct}%
       </span>
     );
   };
@@ -600,6 +655,22 @@ export default function PsaScannerPage() {
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
+                          onClick={() => setPreviewMode("upper")}
+                          disabled={!upperSectionCropUrl}
+                          className={`px-2.5 py-1 rounded font-semibold flex items-center gap-1 transition-colors ${
+                            previewMode === "upper"
+                              ? "bg-indigo-600 text-white shadow-xs"
+                              : !upperSectionCropUrl
+                              ? "opacity-40 cursor-not-allowed bg-zinc-100 text-zinc-400"
+                              : "bg-zinc-200/70 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-600"
+                          }`}
+                          title="View cropped upper section (Header + Items 1 - 17: Child, Mother, Father)"
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          Upper Section (1-17)
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => setPreviewMode("processed")}
                           className={`px-2.5 py-1 rounded font-semibold flex items-center gap-1 transition-colors ${
                             previewMode === "processed"
@@ -678,7 +749,7 @@ export default function PsaScannerPage() {
                     </div>
                     <div className="p-2.5 bg-zinc-50 dark:bg-zinc-800/80 border-t border-zinc-200 dark:border-zinc-700 flex items-center justify-between text-xs">
                       <span className="font-medium truncate max-w-[200px]">
-                        {selectedFile?.name || "Captured Photo"} ({previewMode === "processed" ? "B&W Upright" : previewMode === "cropped" ? "Child Crop" : "Original"})
+                        {selectedFile?.name || "Captured Photo"} ({previewMode === "processed" ? "B&W Upright" : previewMode === "upper" ? "Upper Section (1-17)" : previewMode === "cropped" ? "Child Crop" : "Original"})
                       </span>
                       <Button
                         variant="ghost"
@@ -828,6 +899,22 @@ export default function PsaScannerPage() {
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
+                      onClick={() => setPreviewMode("upper")}
+                      disabled={!upperSectionCropUrl}
+                      className={`px-2 py-0.5 rounded text-xs font-semibold flex items-center gap-1 transition-colors ${
+                        previewMode === "upper"
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : !upperSectionCropUrl
+                          ? "opacity-40 cursor-not-allowed bg-zinc-100 text-zinc-400"
+                          : "bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200"
+                      }`}
+                      title="View cropped upper identity section (Header + Items 1 - 17: Child, Mother, Father)"
+                    >
+                      <Layers className="w-3 h-3" />
+                      Upper Section (1-17)
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setPreviewMode("processed")}
                       className={`px-2 py-0.5 rounded text-xs font-semibold flex items-center gap-1 transition-colors ${
                         previewMode === "processed"
@@ -973,7 +1060,7 @@ export default function PsaScannerPage() {
                     </span>
                     <span className="text-xs text-zinc-500 font-medium">Under RA 10173 Civil Identity</span>
                   </div>
-                  {renderStatusBadge(fieldStatuses?.complete_name?.status)}
+                  {renderStatusBadge(fieldStatuses?.complete_name)}
                 </div>
 
                 <p className="text-xs font-semibold uppercase tracking-wider text-indigo-700 dark:text-indigo-400 mt-3">
@@ -1087,7 +1174,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.first_name?.status)}
+                      {renderStatusBadge(fieldStatuses?.first_name)}
                     </div>
                   </div>
 
@@ -1113,7 +1200,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.middle_name?.status)}
+                      {renderStatusBadge(fieldStatuses?.middle_name)}
                     </div>
                   </div>
 
@@ -1133,7 +1220,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.last_name?.status)}
+                      {renderStatusBadge(fieldStatuses?.last_name)}
                     </div>
                   </div>
 
@@ -1154,7 +1241,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.birth_date?.status)}
+                      {renderStatusBadge(fieldStatuses?.birth_date)}
                     </div>
                   </div>
 
@@ -1180,35 +1267,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.sex?.status)}
-                    </div>
-                  </div>
-
-                  {/* Place of Birth */}
-                  <div className="py-2.5 grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
-                    <span className="sm:col-span-4 text-xs font-semibold text-zinc-500">Place of Birth</span>
-                    <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={editedIdentity?.birth_place?.city_municipality || ""}
-                          onChange={(e) =>
-                            handleFieldChange("birth_place", {
-                              ...editedIdentity?.birth_place,
-                              city_municipality: e.target.value,
-                            })
-                          }
-                          className="w-full text-xs px-2 py-1 rounded border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800"
-                        />
-                      ) : (
-                        extractedIdentity.birth_place?.city_municipality ||
-                        extractedIdentity.birth_place?.raw || (
-                          <span className="text-zinc-400 italic">Not detected</span>
-                        )
-                      )}
-                    </div>
-                    <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.birth_place?.status)}
+                      {renderStatusBadge(fieldStatuses?.sex)}
                     </div>
                   </div>
 
@@ -1234,7 +1293,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.mother_name?.status)}
+                      {renderStatusBadge(fieldStatuses?.mother_name || fieldStatuses?.mother_maiden_name)}
                     </div>
                   </div>
 
@@ -1254,7 +1313,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.father_name?.status)}
+                      {renderStatusBadge(fieldStatuses?.father_name)}
                     </div>
                   </div>
 
@@ -1279,7 +1338,7 @@ export default function PsaScannerPage() {
                       )}
                     </div>
                     <div className="sm:col-span-3 text-right">
-                      {renderStatusBadge(fieldStatuses?.registry_number?.status)}
+                      {renderStatusBadge(fieldStatuses?.registry_number)}
                     </div>
                   </div>
                 </div>
