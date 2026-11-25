@@ -31,7 +31,7 @@ export function parseGradesText(
       first_name: psa.identity.first_name || undefined,
       middle_name: psa.identity.middle_name || undefined,
       suffix: (psa.identity as any).suffix || undefined,
-      name: [psa.identity.last_name, psa.identity.first_name].filter(Boolean).join(", "),
+      name: psa.identity.complete_name || [psa.identity.last_name, psa.identity.first_name].filter(Boolean).join(", "),
       birth_date: psa.identity.birth_date || undefined,
       sex: psa.identity.sex || undefined,
       birth_place: psa.identity.birth_place || undefined,

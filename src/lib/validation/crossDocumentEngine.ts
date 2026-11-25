@@ -78,11 +78,15 @@ export interface ConsolidatedShsEvaluationResult {
     sf1: boolean;
     sf2: boolean;
     sf5: boolean;
+    sf5a?: boolean;
+    sf5b?: boolean;
     sf9: boolean;
     sf10: boolean;
     birth_cert: boolean;
     totalAvailable: number;
     totalRequired: number;
+    requiredAvailable?: number;
+    hasRequiredCoverage?: boolean;
   };
   pairwiseResults: PairwiseValidationResult[];
   criticalDiscrepanciesCount: number;
@@ -674,6 +678,21 @@ export interface AcademicGradeItem {
   remarks?: string;
   sourceDocumentId?: string;
   sourceDocumentIds?: string[];
+  sourceTraces?: ComparisonSourceTrace[];
+}
+
+export interface ComparisonSourceTrace {
+  documentId: string;
+  documentType: string;
+  fieldName?: string;
+  pageNumber?: number;
+  rowIndex?: number;
+  academicContext?: {
+    schoolYear?: string;
+    gradeLevel?: string;
+    section?: string;
+    semester?: string;
+  };
 }
 
 export function compareSf9AndSf10(
@@ -1129,6 +1148,144 @@ export function compareSf5AndSf10(
 }
 
 // -----------------------------------------------------------------------------
+// Required SHS document coverage (single source of truth for engine and UI)
+// -----------------------------------------------------------------------------
+
+export interface RequiredDocumentPresence {
+  sf1?: boolean;
+  sf2?: boolean;
+  sf5a?: boolean;
+  sf5b?: boolean;
+  sf9?: boolean;
+  sf10?: boolean;
+  psa?: boolean;
+}
+
+export interface RequiredDocumentCoverageCategory {
+  key: "sf1" | "sf2" | "sf5" | "sf9" | "sf10";
+  label: string;
+  present: boolean;
+  satisfiedBy: string[];
+}
+
+export interface RequiredDocumentCoverage {
+  categories: RequiredDocumentCoverageCategory[];
+  totalRequired: number;
+  requiredAvailable: number;
+  hasRequiredCoverage: boolean;
+  sf5Satisfied: boolean;
+}
+
+/**
+ * Required school-form coverage: SF1, SF2, (SF5A OR SF5B), SF9, SF10.
+ * SF5A and SF5B are alternative forms for a single requirement; either one alone
+ * satisfies it. PSA is supporting civil evidence and is never required.
+ * Grade-specific applicability of SF5B (Grade 12 only) is enforced separately as a
+ * consistency check in the unified matrix, not as a completeness requirement.
+ */
+export function evaluateRequiredDocumentCoverage(presence: RequiredDocumentPresence): RequiredDocumentCoverage {
+  const sf5Satisfied = Boolean(presence.sf5a) || Boolean(presence.sf5b);
+  const categories: RequiredDocumentCoverageCategory[] = [
+    { key: "sf1", label: "SF1-SHS", present: Boolean(presence.sf1), satisfiedBy: presence.sf1 ? ["SF1-SHS"] : [] },
+    { key: "sf2", label: "SF2-SHS", present: Boolean(presence.sf2), satisfiedBy: presence.sf2 ? ["SF2-SHS"] : [] },
+    {
+      key: "sf5",
+      label: "SF5A-SHS or SF5B-SHS",
+      present: sf5Satisfied,
+      satisfiedBy: [presence.sf5a ? "SF5A-SHS" : null, presence.sf5b ? "SF5B-SHS" : null].filter(
+        (value): value is string => Boolean(value)
+      ),
+    },
+    { key: "sf9", label: "SF9-SHS", present: Boolean(presence.sf9), satisfiedBy: presence.sf9 ? ["SF9-SHS"] : [] },
+    { key: "sf10", label: "SF10-SHS", present: Boolean(presence.sf10), satisfiedBy: presence.sf10 ? ["SF10-SHS"] : [] },
+  ];
+  const requiredAvailable = categories.filter((category) => category.present).length;
+  return {
+    categories,
+    totalRequired: categories.length,
+    requiredAvailable,
+    hasRequiredCoverage: requiredAvailable === categories.length,
+    sf5Satisfied,
+  };
+}
+
+const SOURCE_TYPE_TO_PRESENCE_KEY: Record<string, keyof RequiredDocumentPresence> = {
+  "SF1-SHS": "sf1",
+  "SF2-SHS": "sf2",
+  "SF5A-SHS": "sf5a",
+  "SF5B-SHS": "sf5b",
+  "SF9-SHS": "sf9",
+  "SF10-SHS": "sf10",
+  PSA: "psa",
+};
+
+/** Derives document presence from persisted unified-matrix rows (sourcesPresent / sourceDocumentTypes). */
+export function deriveDocumentPresenceFromMatrix(
+  matrix: Array<{ sourcesPresent?: string[]; sourceDocumentTypes?: string[] }> | null | undefined
+): Required<RequiredDocumentPresence> {
+  const presence: Required<RequiredDocumentPresence> = {
+    sf1: false,
+    sf2: false,
+    sf5a: false,
+    sf5b: false,
+    sf9: false,
+    sf10: false,
+    psa: false,
+  };
+  for (const row of matrix || []) {
+    for (const sourceType of [...(row?.sourceDocumentTypes || []), ...(row?.sourcesPresent || [])]) {
+      const key = SOURCE_TYPE_TO_PRESENCE_KEY[sourceType];
+      if (key) presence[key] = true;
+    }
+  }
+  return presence;
+}
+
+export interface DocumentCompletenessChecklistItem {
+  key: "sf1" | "sf2" | "sf5" | "sf9" | "sf10" | "birth_cert";
+  label: string;
+  present: boolean;
+  required: boolean;
+  satisfiedBy: string[];
+}
+
+/**
+ * UI checklist that follows exactly the engine's required-coverage rule
+ * (SF5A OR SF5B is one requirement; PSA is supporting only).
+ */
+export function buildDocumentCompletenessChecklist(presence: RequiredDocumentPresence): {
+  items: DocumentCompletenessChecklistItem[];
+  coverage: RequiredDocumentCoverage;
+} {
+  const coverage = evaluateRequiredDocumentCoverage(presence);
+  const byKey = new Map(coverage.categories.map((category) => [category.key, category]));
+  const required = (key: RequiredDocumentCoverageCategory["key"], label: string): DocumentCompletenessChecklistItem => ({
+    key,
+    label,
+    present: Boolean(byKey.get(key)?.present),
+    required: true,
+    satisfiedBy: byKey.get(key)?.satisfiedBy || [],
+  });
+  return {
+    coverage,
+    items: [
+      required("sf1", "SHS SF1 School Register"),
+      required("sf2", "SHS SF2 Attendance Sheet"),
+      required("sf5", "SHS SF5A Promotion Report or SF5B Graduation List"),
+      required("sf9", "SHS SF9 Report Card"),
+      required("sf10", "SHS SF10 Permanent Record"),
+      {
+        key: "birth_cert",
+        label: "PSA Birth Certificate",
+        present: Boolean(presence.psa),
+        required: false,
+        satisfiedBy: presence.psa ? ["PSA"] : [],
+      },
+    ],
+  };
+}
+
+// -----------------------------------------------------------------------------
 // 8. 360° Consolidated SHS Evaluation
 // -----------------------------------------------------------------------------
 
@@ -1217,6 +1374,8 @@ export interface SectionSf1Sf2ValidationResult {
   status: CrossDocumentValidationStatus;
   needsHumanReview: boolean;
   hasDiscrepancies: boolean;
+  isPersisted?: boolean;
+  persistenceStatus?: "COMPUTED_ONLY" | "PERSISTED";
   schoolYear: string;
   gradeLevel: string;
   section: string;
@@ -1542,6 +1701,8 @@ export function compareSectionSf1AndSf2(
     status,
     needsHumanReview: hasCritical || hasWarning,
     hasDiscrepancies: discrepancies.length > 0,
+    isPersisted: false,
+    persistenceStatus: "COMPUTED_ONLY",
     schoolYear,
     gradeLevel,
     section,
@@ -1589,6 +1750,7 @@ export interface UnifiedFieldComparisonRow {
   sourceDoc?: string;
   sourceDocumentIds?: string[];
   sourceDocumentTypes?: string[];
+  sourceTraces?: ComparisonSourceTrace[];
   sourcesPresent: string[];
 }
 
@@ -1617,6 +1779,13 @@ export interface UnifiedStudentValidationParams {
     dataUrl?: string;
     documentId?: string;
   };
+  psaRecords?: Array<{
+    raw: any;
+    fileName?: string;
+    pageNumber?: number;
+    dataUrl?: string;
+    documentId?: string;
+  }>;
   sf1?: {
     raw: any;
     fileName?: string;
@@ -1624,6 +1793,13 @@ export interface UnifiedStudentValidationParams {
     dataUrl?: string;
     documentId?: string;
   };
+  sf1Records?: Array<{
+    raw: any;
+    fileName?: string;
+    pageNumber?: number;
+    dataUrl?: string;
+    documentId?: string;
+  }>;
   sf2Records?: Array<{
     raw: any;
     fileName?: string;
@@ -1638,6 +1814,13 @@ export interface UnifiedStudentValidationParams {
     dataUrl?: string;
     documentId?: string;
   };
+  sf5aRecords?: Array<{
+    raw: any;
+    fileName?: string;
+    pageNumber?: number;
+    dataUrl?: string;
+    documentId?: string;
+  }>;
   sf5b?: {
     raw: any;
     fileName?: string;
@@ -1645,12 +1828,20 @@ export interface UnifiedStudentValidationParams {
     dataUrl?: string;
     documentId?: string;
   };
+  sf5bRecords?: Array<{
+    raw: any;
+    fileName?: string;
+    pageNumber?: number;
+    dataUrl?: string;
+    documentId?: string;
+  }>;
   sf9?: {
     raw: any;
     fileName?: string;
     pageNumber?: number;
     dataUrl?: string;
     documentId?: string;
+    schoolId?: string;
   };
   sf9Records?: Array<{
     raw: any;
@@ -1658,6 +1849,7 @@ export interface UnifiedStudentValidationParams {
     pageNumber?: number;
     dataUrl?: string;
     documentId?: string;
+    schoolId?: string;
   }>;
   sf10?: {
     raw: any;
@@ -1665,6 +1857,7 @@ export interface UnifiedStudentValidationParams {
     pageNumber?: number;
     dataUrl?: string;
     documentId?: string;
+    schoolId?: string;
   };
   sf10Records?: Array<{
     raw: any;
@@ -1672,6 +1865,7 @@ export interface UnifiedStudentValidationParams {
     pageNumber?: number;
     dataUrl?: string;
     documentId?: string;
+    schoolId?: string;
   }>;
   duplicateWarnings?: DuplicateScanWarning[];
 }
@@ -1699,6 +1893,8 @@ export interface UnifiedStudentValidationOutcome {
     psa: boolean;
     totalAvailable: number;
     totalRequired: number;
+    requiredAvailable: number;
+    hasRequiredCoverage: boolean;
   };
 }
 
@@ -1825,6 +2021,33 @@ export function extractAcademicGradeRecords(
         gradingPeriod,
         sourceDocumentId: record.documentId || "",
         sourceDocumentIds: record.documentId ? [record.documentId] : [],
+        sourceTraces: record.documentId
+          ? [{
+              documentId: record.documentId,
+              documentType: `${documentType.toUpperCase()}-SHS`,
+              academicContext: {
+                schoolYear,
+                gradeLevel,
+                semester,
+              },
+              pageNumber: [
+                grade.page_number,
+                grade.pageNumber,
+                semesterRecord?.page_number,
+                semesterRecord?.pageNumber,
+                raw.page_number,
+                raw.pageNumber,
+              ].find((value) => typeof value === "number" && Number.isInteger(value) && value > 0) as number | undefined,
+              rowIndex: [
+                grade.row_index,
+                grade.rowIndex,
+                semesterRecord?.row_index,
+                semesterRecord?.rowIndex,
+                raw.row_index,
+                raw.rowIndex,
+              ].find((value) => typeof value === "number" && Number.isInteger(value) && value >= 0) as number | undefined,
+            }]
+          : [],
       });
     }
   }
@@ -1844,6 +2067,15 @@ export function extractAcademicGradeRecords(
     const existing = deduplicated.get(key);
     if (existing) {
       existing.sourceDocumentIds = Array.from(new Set([...existing.sourceDocumentIds, ...grade.sourceDocumentIds]));
+      const sourceTraces = [...(existing.sourceTraces || []), ...(grade.sourceTraces || [])];
+      existing.sourceTraces = sourceTraces.filter((trace, index) =>
+        sourceTraces.findIndex((candidate) =>
+          candidate.documentId === trace.documentId &&
+          candidate.documentType === trace.documentType &&
+          candidate.pageNumber === trace.pageNumber &&
+          candidate.rowIndex === trace.rowIndex
+        ) === index
+      );
     } else {
       deduplicated.set(key, grade);
     }
@@ -1938,13 +2170,148 @@ function parseNameParts(fullName: string | undefined | null): { lastName: string
 function mergeUnifiedDocumentRecords(
   records: Array<{ raw: any; documentId?: string }>,
   documentType: "sf9" | "sf10",
-  fallbackContext?: { schoolYear?: string; gradeLevel?: string }
+  fallbackContext?: UnifiedDocumentContext,
+  conflicts: UnifiedSourceConflict[] = []
 ): Record<string, any> {
-  const rawRecords = records.map((record) => record.raw || {});
+  const contextRecords = records.filter((record) => matchesUnifiedDocumentContext(record, fallbackContext));
+  const rawRecords = contextRecords.map((record) => record.raw || {});
   const primary = rawRecords[0] || {};
-  const grades = extractAcademicGradeRecords(records, documentType, fallbackContext);
+  const grades = extractAcademicGradeRecords(contextRecords, documentType, fallbackContext);
 
   const merged: Record<string, any> = { ...primary, grades };
+  const ignoredScalarFields = new Set([
+    "id",
+    "document_id",
+    "created_at",
+    "updated_at",
+    "file_name",
+    "page_number",
+  ]);
+  const scalarFields = new Set(rawRecords.flatMap((raw) =>
+    Object.entries(raw)
+      .filter(([field, value]) =>
+        !ignoredScalarFields.has(field) &&
+        value !== null &&
+        ["string", "number", "boolean"].includes(typeof value)
+      )
+      .map(([field]) => field)
+  ));
+  for (const field of scalarFields) {
+    const candidates = contextRecords.flatMap((record) => {
+      const value = record.raw?.[field];
+      if (value === undefined || value === null) return [];
+      return [{ value, documentId: record.documentId || record.raw?.document_id }];
+    });
+    if (field === "general_average") {
+      const valuesByContext = new Map<string, Map<string, { value: unknown; sourceDocumentIds: string[] }>>();
+      for (const record of contextRecords) {
+        const value = record.raw?.[field];
+        if (value === undefined || value === null) continue;
+        const raw = record.raw || {};
+        const contextKey = [
+          normalizeAcademicSchoolYear(raw.school_year || fallbackContext?.schoolYear),
+          normalizeAcademicGradeLevel(raw.grade_level || fallbackContext?.gradeLevel),
+          String(raw.section || fallbackContext?.section || "").trim().replace(/\s+/g, " ").toLowerCase(),
+          normalizeGradingPeriod(raw.semester),
+        ].join("|");
+        const values = valuesByContext.get(contextKey) || new Map<string, { value: unknown; sourceDocumentIds: string[] }>();
+        const valueKey = unifiedScalarValueKey(field, value);
+        const entry: { value: unknown; sourceDocumentIds: string[] } = values.get(valueKey) || {
+          value,
+          sourceDocumentIds: [],
+        };
+        const documentId = record.documentId || raw.document_id;
+        if (documentId) entry.sourceDocumentIds.push(String(documentId));
+        values.set(valueKey, entry);
+        valuesByContext.set(contextKey, values);
+      }
+      const conflictingValues = Array.from(valuesByContext.values()).filter((values) => values.size > 1);
+      for (const values of conflictingValues) {
+        conflicts.push({
+          documentType,
+          field,
+          values: Array.from(values.values()).map((entry) => ({
+            ...entry,
+            sourceDocumentIds: Array.from(new Set(entry.sourceDocumentIds)),
+          })),
+        });
+      }
+      const distinctValues = new Set(candidates.map((candidate) => unifiedScalarValueKey(field, candidate.value)));
+      if (conflictingValues.length > 0 || distinctValues.size > 1) delete merged[field];
+      else if (candidates.length > 0) merged[field] = candidates[0].value;
+      continue;
+    }
+
+    if (field === "semester") {
+      const contexts = new Map<string, {
+        schoolYear?: string;
+        gradeLevel?: string;
+        section?: string;
+        semester: unknown;
+        sourceDocumentIds: string[];
+      }>();
+      for (const record of contextRecords) {
+        const raw = record.raw || {};
+        const semester = raw.semester;
+        if (semester === undefined || semester === null || semester === "") continue;
+        const contextKey = [
+          normalizeAcademicSchoolYear(raw.school_year || raw.schoolYear || fallbackContext?.schoolYear),
+          normalizeAcademicGradeLevel(raw.grade_level || raw.gradeLevel || fallbackContext?.gradeLevel),
+          String(raw.section || fallbackContext?.section || "").trim().replace(/\s+/g, " ").toLowerCase(),
+          normalizeGradingPeriod(semester),
+        ].join("|");
+        const context: {
+          schoolYear?: string;
+          gradeLevel?: string;
+          section?: string;
+          semester: unknown;
+          sourceDocumentIds: string[];
+        } = contexts.get(contextKey) || {
+          schoolYear: raw.school_year || raw.schoolYear || fallbackContext?.schoolYear,
+          gradeLevel: raw.grade_level || raw.gradeLevel || fallbackContext?.gradeLevel,
+          section: raw.section || fallbackContext?.section,
+          semester,
+          sourceDocumentIds: [],
+        };
+        const documentId = record.documentId || raw.document_id;
+        if (documentId) context.sourceDocumentIds.push(String(documentId));
+        contexts.set(contextKey, context);
+      }
+
+      if (contexts.size > 1) {
+        delete merged[field];
+        merged.semester_contexts = Array.from(contexts.values()).map((context) => ({
+          ...context,
+          sourceDocumentIds: Array.from(new Set(context.sourceDocumentIds)),
+        }));
+      } else if (candidates.length > 0) {
+        merged[field] = candidates[0].value;
+      }
+      continue;
+    }
+
+    const values = new Map<string, { value: unknown; sourceDocumentIds: string[] }>();
+    for (const candidate of candidates) {
+      const valueKey = unifiedScalarValueKey(field, candidate.value);
+      const entry: { value: unknown; sourceDocumentIds: string[] } =
+        values.get(valueKey) || { value: candidate.value, sourceDocumentIds: [] };
+      if (candidate.documentId) entry.sourceDocumentIds.push(String(candidate.documentId));
+      values.set(valueKey, entry);
+    }
+    if (values.size > 1) {
+      delete merged[field];
+      conflicts.push({
+        documentType,
+        field,
+        values: Array.from(values.values()).map((entry) => ({
+          ...entry,
+          sourceDocumentIds: Array.from(new Set(entry.sourceDocumentIds)),
+        })),
+      });
+    } else if (values.size === 1) {
+      merged[field] = values.values().next().value?.value;
+    }
+  }
 
   if (documentType === "sf9") {
     const attendanceByMonth = new Map<string, {
@@ -2019,7 +2386,7 @@ function mergeUnifiedDocumentRecords(
       });
     }
   } else {
-    const semesters = records.flatMap(({ raw = {}, documentId }) =>
+    const semesters = contextRecords.flatMap(({ raw = {}, documentId }) =>
       (Array.isArray(raw.completed_semesters) ? raw.completed_semesters : []).map((semester: any) => ({
         ...semester,
         sourceDocumentId: documentId || "",
@@ -2032,10 +2399,192 @@ function mergeUnifiedDocumentRecords(
     if (semesters.length > 0) {
       merged.completed_semesters = semesters;
     }
-    merged.has_unresolved_back_subjects = rawRecords.some((raw) => raw.has_unresolved_back_subjects === true);
   }
 
   return merged;
+}
+
+type UnifiedSourceType = "psa" | "sf1" | "sf5a" | "sf5b" | "sf9" | "sf10";
+type UnifiedSourceRecord = { raw: Record<string, unknown>; documentId?: string };
+type UnifiedMergedRaw = Record<string, any>;
+
+interface UnifiedDocumentContext {
+  lrn: string;
+  schoolId?: string;
+  schoolYear?: string;
+  gradeLevel?: string;
+  section?: string;
+}
+
+interface UnifiedSourceConflict {
+  documentType: UnifiedSourceType;
+  field: string;
+  values: Array<{ value: unknown; sourceDocumentIds: string[] }>;
+}
+
+function matchesUnifiedDocumentContext(record: { raw: any; schoolId?: string }, context?: UnifiedDocumentContext): boolean {
+  if (!context) return true;
+  const raw = record.raw || {};
+  const checks: Array<[unknown, string | undefined, (value: unknown) => string]> = [
+    [raw.lrn, context.lrn, (value) => typeof value === "string" ? normalizeLrn(value) : ""],
+    [record.schoolId, context.schoolId, (value) => String(value || "").trim()],
+    [raw.school_year || raw.schoolYear, context.schoolYear, normalizeAcademicSchoolYear],
+    [raw.grade_level || raw.gradeLevel, context.gradeLevel, normalizeAcademicGradeLevel],
+    [raw.section, context.section, (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase()],
+  ];
+  return checks.every(([recordValue, expected, normalize]) => {
+    if (recordValue === undefined || recordValue === null || expected === undefined) return true;
+    const actualKey = normalize(recordValue);
+    const expectedKey = normalize(expected);
+    return Boolean(actualKey) && actualKey === expectedKey;
+  });
+}
+
+function unifiedScalarValueKey(field: string, value: unknown): string {
+  const stringValue = typeof value === "string"
+    ? value
+    : value === undefined || value === null
+    ? undefined
+    : String(value);
+  if (field === "general_average") return normalizeAcademicGradeValue(value);
+  if (field === "school_year") return normalizeAcademicSchoolYear(value);
+  if (field === "grade_level") return normalizeAcademicGradeLevel(value);
+  if (field === "section") return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  if (field === "sex") return normalizeSex(stringValue);
+  if (field === "birth_date") return normalizeDate(stringValue);
+  if (["first_name", "last_name", "middle_name", "mother_name", "mother_maiden_name"].includes(field)) {
+    return normalizeNamePart(stringValue);
+  }
+  return typeof value === "string" ? value.trim().toLowerCase() : stableSourceValue(value);
+}
+
+function sourceRecordContextKey(type: UnifiedSourceType, raw: Record<string, unknown>): string {
+  if (type === "psa") return "identity";
+  const schoolYear = normalizeAcademicSchoolYear(raw.school_year || raw.schoolYear);
+  const gradeLevel = normalizeAcademicGradeLevel(raw.grade_level || raw.gradeLevel);
+  const section = String(raw.section || "").trim().replace(/\s+/g, " ").toLowerCase();
+  const semester = type === "sf5a" ? normalizeGradingPeriod(raw.semester) : "";
+  return [schoolYear, gradeLevel, section, semester].join("|");
+}
+
+function stableSourceValue(value: unknown): string {
+  if (value === undefined) return "";
+  if (value === null) return "null";
+  if (typeof value !== "object") return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableSourceValue).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${key}:${stableSourceValue(record[key])}`).join(",")}}`;
+}
+
+function mergeUnifiedSourceRecords(
+  type: UnifiedSourceType,
+  records: UnifiedSourceRecord[]
+): { raw: UnifiedMergedRaw; conflicts: UnifiedSourceConflict[]; duplicateWarnings: DuplicateScanWarning[] } {
+  const groups = new Map<string, UnifiedSourceRecord[]>();
+  for (const record of records) {
+    const raw = record.raw || {};
+    const key = sourceRecordContextKey(type, raw);
+    groups.set(key, [...(groups.get(key) || []), record]);
+  }
+
+  const ignoredFields = new Set([
+    "id",
+    "document_id",
+    "created_at",
+    "updated_at",
+    "row_index",
+    "file_name",
+    "page_number",
+    "data_url",
+  ]);
+  const fields = new Set(records.flatMap((record) =>
+    Object.keys(record.raw || {}).filter((field) => !ignoredFields.has(field))
+  ));
+  const merged: UnifiedMergedRaw = {};
+  const conflicts: UnifiedSourceConflict[] = [];
+  const duplicateWarnings: DuplicateScanWarning[] = [];
+
+  for (const groupRecords of groups.values()) {
+    const signatures = new Set(groupRecords.map((record) =>
+      stableSourceValue(Object.fromEntries(
+        Object.entries(record.raw || {}).filter(([field]) => !ignoredFields.has(field))
+      ))
+    ));
+    if (groupRecords.length > 1) {
+      const sourceNames = groupRecords.map((record) => record.documentId || record.raw?.document_id || record.raw?.id || "unknown source");
+      duplicateWarnings.push({
+        documentType: type === "psa" ? "PSA" : `${type.toUpperCase()}-SHS`,
+        details: signatures.size === 1
+          ? `Identical ${type.toUpperCase()} records occur more than once in the same academic context.`
+          : `Conflicting ${type.toUpperCase()} records occur in the same academic context.`,
+        existingSource: String(sourceNames[0]),
+        newSource: String(sourceNames[1]),
+        isIdentical: signatures.size === 1,
+        severity: "WARNING",
+      });
+    }
+
+    for (const field of fields) {
+      const candidates = groupRecords
+        .map((record) => ({ value: record.raw?.[field], documentId: record.documentId || record.raw?.document_id }))
+        .filter((entry) => entry.value !== undefined && entry.value !== null && entry.value !== "");
+      const values = new Map<string, { value: unknown; sourceDocumentIds: string[] }>();
+      for (const candidate of candidates) {
+        const key = stableSourceValue(candidate.value);
+        const value = values.get(key) || { value: candidate.value, sourceDocumentIds: [] };
+        if (candidate.documentId) value.sourceDocumentIds.push(String(candidate.documentId));
+        values.set(key, value);
+      }
+      if (values.size > 1) {
+        conflicts.push({
+          documentType: type,
+          field,
+          values: Array.from(values.values()).map((entry) => ({
+            ...entry,
+            sourceDocumentIds: Array.from(new Set(entry.sourceDocumentIds)),
+          })),
+        });
+      }
+    }
+  }
+
+  if (type === "sf5a" || type === "sf5b") {
+    for (const field of ["lrn", "last_name", "first_name", "middle_name", "birth_date", "sex"]) {
+      const values = new Map<string, { value: unknown; sourceDocumentIds: string[] }>();
+      for (const record of records) {
+        const value = record.raw?.[field];
+        if (value === undefined || value === null || value === "") continue;
+        const key = stableSourceValue(value);
+        const entry = values.get(key) || { value, sourceDocumentIds: [] };
+        const documentId = record.documentId || record.raw?.document_id;
+        if (documentId) entry.sourceDocumentIds.push(String(documentId));
+        values.set(key, entry);
+      }
+      if (values.size > 1 && !conflicts.some((conflict) => conflict.field === field)) {
+        conflicts.push({
+          documentType: type,
+          field,
+          values: Array.from(values.values()).map((entry) => ({
+            ...entry,
+            sourceDocumentIds: Array.from(new Set(entry.sourceDocumentIds)),
+          })),
+        });
+      }
+    }
+  }
+
+  for (const field of fields) {
+    const values = new Map<string, unknown>();
+    for (const record of records) {
+      const value = record.raw?.[field];
+      if (value !== undefined && value !== null && value !== "") {
+        values.set(stableSourceValue(value), value);
+      }
+    }
+    if (values.size === 1) merged[field] = values.values().next().value;
+  }
+
+  return { raw: merged, conflicts, duplicateWarnings };
 }
 
 export function evaluateUnifiedStudentValidation(
@@ -2049,27 +2598,78 @@ export function evaluateUnifiedStudentValidation(
     schoolYear: initialSchoolYear = "2024-2025",
     gradeLevel: initialGradeLevel = "Grade 11",
     section: initialSection,
-    trackStrand: initialTrackStrand,
-    psa,
-    sf1,
+    psa: singlePsa,
+    psaRecords: suppliedPsaRecords,
+    sf1: singleSf1,
+    sf1Records: suppliedSf1Records,
     sf2Records = [],
-    sf5a,
-    sf5b,
-    duplicateWarnings = [],
+    sf5a: singleSf5a,
+    sf5aRecords: suppliedSf5aRecords,
+    sf5b: singleSf5b,
+    sf5bRecords: suppliedSf5bRecords,
+    duplicateWarnings: suppliedDuplicateWarnings = [],
   } = params;
 
-  const sf9Records = params.sf9Records?.length ? params.sf9Records : params.sf9 ? [params.sf9] : [];
-  const sf10Records = params.sf10Records?.length ? params.sf10Records : params.sf10 ? [params.sf10] : [];
+  const psaRecords = suppliedPsaRecords?.length ? suppliedPsaRecords : singlePsa ? [singlePsa] : [];
+  const sf1Records = suppliedSf1Records?.length ? suppliedSf1Records : singleSf1 ? [singleSf1] : [];
+  const sf5aRecords = suppliedSf5aRecords?.length ? suppliedSf5aRecords : singleSf5a ? [singleSf5a] : [];
+  const sf5bRecords = suppliedSf5bRecords?.length ? suppliedSf5bRecords : singleSf5b ? [singleSf5b] : [];
+  const psaMerged = mergeUnifiedSourceRecords("psa", psaRecords);
+  const sf1Merged = mergeUnifiedSourceRecords("sf1", sf1Records);
+  const sf5aMerged = mergeUnifiedSourceRecords("sf5a", sf5aRecords);
+  const sf5bMerged = mergeUnifiedSourceRecords("sf5b", sf5bRecords);
+  const psa = psaRecords.length ? { ...psaRecords[0], raw: psaMerged.raw } : undefined;
+  const sf1 = sf1Records.length ? { ...sf1Records[0], raw: sf1Merged.raw } : undefined;
+  const sf5a = sf5aRecords.length ? { ...sf5aRecords[0], raw: sf5aMerged.raw } : undefined;
+  const sf5b = sf5bRecords.length ? { ...sf5bRecords[0], raw: sf5bMerged.raw } : undefined;
+  const duplicateWarnings = [
+    ...suppliedDuplicateWarnings,
+    ...psaMerged.duplicateWarnings,
+    ...sf1Merged.duplicateWarnings,
+    ...sf5aMerged.duplicateWarnings,
+    ...sf5bMerged.duplicateWarnings,
+  ];
+
+  const documentContext: UnifiedDocumentContext = {
+    lrn,
+    schoolId,
+    schoolYear: initialSchoolYear,
+    gradeLevel: initialGradeLevel,
+    section: initialSection,
+  };
+  const sf9Records = (params.sf9Records?.length ? params.sf9Records : params.sf9 ? [params.sf9] : [])
+    .filter((record) => matchesUnifiedDocumentContext(record, documentContext));
+  const sf10Records = (params.sf10Records?.length ? params.sf10Records : params.sf10 ? [params.sf10] : [])
+    .filter((record) => matchesUnifiedDocumentContext(record, documentContext));
   const sf9 = sf9Records[0];
   const sf10 = sf10Records[0];
-  const sf9Raw = mergeUnifiedDocumentRecords(sf9Records, "sf9", {
-    schoolYear: initialSchoolYear,
-    gradeLevel: initialGradeLevel,
-  });
-  const sf10Raw = mergeUnifiedDocumentRecords(sf10Records, "sf10", {
-    schoolYear: initialSchoolYear,
-    gradeLevel: initialGradeLevel,
-  });
+  const sf9ScalarConflicts: UnifiedSourceConflict[] = [];
+  const sf10ScalarConflicts: UnifiedSourceConflict[] = [];
+  const sf9Raw = mergeUnifiedDocumentRecords(
+    sf9Records,
+    "sf9",
+    documentContext,
+    sf9ScalarConflicts
+  );
+  const sf10Raw = mergeUnifiedDocumentRecords(
+    sf10Records,
+    "sf10",
+    documentContext,
+    sf10ScalarConflicts
+  );
+  const sourceConflicts = [
+    ...psaMerged.conflicts,
+    ...sf1Merged.conflicts,
+    ...sf5aMerged.conflicts,
+    ...sf5bMerged.conflicts,
+    ...sf9ScalarConflicts,
+    ...sf10ScalarConflicts,
+  ].filter((conflict) =>
+    !(
+      (conflict.documentType === "sf5a" && conflict.field === "action_taken") ||
+      (conflict.documentType === "sf5b" && conflict.field === "action_taken")
+    )
+  );
   const discrepancies: DiscrepancyItem[] = [];
   const fieldsMatrix: UnifiedFieldComparisonRow[] = [];
 
@@ -2083,7 +2683,16 @@ export function evaluateUnifiedStudentValidation(
   const hasPsa = Boolean(psa?.raw);
 
   const totalAvailable = [hasSf1, hasSf2, hasSf5a, hasSf5b, hasSf9, hasSf10, hasPsa].filter(Boolean).length;
-  const totalRequired = 5; // SF1, SF2, (SF5A or SF5B), SF9, SF10 are standard academic pipeline; PSA is supporting civil evidence
+  // SF1, SF2, (SF5A or SF5B), SF9, SF10 are the standard academic pipeline; PSA is supporting civil evidence.
+  const { totalRequired, requiredAvailable, hasRequiredCoverage } = evaluateRequiredDocumentCoverage({
+    sf1: hasSf1,
+    sf2: hasSf2,
+    sf5a: hasSf5a,
+    sf5b: hasSf5b,
+    sf9: hasSf9,
+    sf10: hasSf10,
+    psa: hasPsa,
+  });
 
   // Resolve best Learner Name
   const sf1Raw = sf1?.raw || {};
@@ -2958,28 +3567,105 @@ export function evaluateUnifiedStudentValidation(
     type: string;
     schoolYear?: string;
     gradeLevel?: string;
+    section?: string;
     semester?: string;
     val?: number;
+    sourceDocumentId?: string;
+    pageNumber?: number;
+    rowIndex?: number;
   }> = [
-    { doc: "SF5A-SHS", type: "SF5A", schoolYear: sf5aRaw.school_year, gradeLevel: sf5aRaw.grade_level, semester: sf5aRaw.semester, val: sf5aGenAvg },
-    { doc: "SF5B-SHS", type: "SF5B", schoolYear: sf5bRaw.school_year, gradeLevel: sf5bRaw.grade_level, semester: sf5bRaw.semester, val: sf5bGenAvg },
+    ...sf5aRecords.map((record, index) => ({
+      doc: `SF5A-SHS${index > 0 ? ` (${record.documentId || index + 1})` : ""}`,
+      type: "SF5A",
+      schoolYear: record.raw?.school_year,
+      gradeLevel: record.raw?.grade_level,
+      section: record.raw?.section,
+      semester: record.raw?.semester,
+      val: parseNumericVal(record.raw?.general_average),
+      sourceDocumentId: record.documentId,
+      pageNumber: record.raw?.page_number,
+      rowIndex: record.raw?.row_index,
+    })),
+    ...sf5bRecords.map((record, index) => ({
+      doc: `SF5B-SHS${index > 0 ? ` (${record.documentId || index + 1})` : ""}`,
+      type: "SF5B",
+      schoolYear: record.raw?.school_year,
+      gradeLevel: record.raw?.grade_level,
+      section: record.raw?.section,
+      semester: record.raw?.semester,
+      val: parseNumericVal(record.raw?.general_average),
+      sourceDocumentId: record.documentId,
+      pageNumber: record.raw?.page_number,
+      rowIndex: record.raw?.row_index,
+    })),
     ...sf9Records.map((record, index) => ({
       doc: `SF9-SHS${index > 0 ? ` (${record.documentId || index + 1})` : ""}`,
       type: "SF9",
       schoolYear: record.raw?.school_year,
       gradeLevel: record.raw?.grade_level,
+      section: record.raw?.section,
       semester: record.raw?.semester,
       val: parseNumericVal(record.raw?.general_average),
+      sourceDocumentId: record.documentId,
+      pageNumber: record.raw?.page_number,
+      rowIndex: record.raw?.row_index,
     })),
     ...sf10Records.map((record, index) => ({
       doc: `SF10-SHS${index > 0 ? ` (${record.documentId || index + 1})` : ""}`,
       type: "SF10",
       schoolYear: record.raw?.school_year,
       gradeLevel: record.raw?.grade_level,
+      section: record.raw?.section,
       semester: record.raw?.semester,
       val: parseNumericVal(record.raw?.general_average),
+      sourceDocumentId: record.documentId,
+      pageNumber: record.raw?.page_number,
+      rowIndex: record.raw?.row_index,
     })),
   ].filter((source) => source.val !== undefined);
+
+  const displayGeneralAverage = (type: "SF9" | "SF10", fallbackValue?: number) => {
+    const sources = genAvgSources.filter((source) => source.type === type);
+    if (sources.length === 0) return undefined;
+    if (sources.length === 1) return sources[0].val;
+
+    const contexts = new Map<string, {
+      label: string;
+      values: Map<number, string[]>;
+    }>();
+    for (const source of sources) {
+      const contextKey = [
+        normalizeAcademicSchoolYear(source.schoolYear),
+        normalizeAcademicGradeLevel(source.gradeLevel),
+        String(source.section || "").trim().replace(/\s+/g, " ").toLowerCase(),
+        normalizeGradingPeriod(source.semester),
+      ].join("|");
+      const label = [
+        source.schoolYear || "School year unspecified",
+        source.gradeLevel || "Grade unspecified",
+        source.semester || "Period unspecified",
+      ].join(" / ");
+      const context = contexts.get(contextKey) || { label, values: new Map<number, string[]>() };
+      const documentIds = context.values.get(source.val!) || [];
+      if (source.sourceDocumentId && !documentIds.includes(source.sourceDocumentId)) {
+        documentIds.push(source.sourceDocumentId);
+      }
+      context.values.set(source.val!, documentIds);
+      contexts.set(contextKey, context);
+    }
+
+    if (contexts.size === 1 && Array.from(contexts.values())[0].values.size === 1) {
+      return fallbackValue ?? sources[0].val;
+    }
+    return Array.from(contexts.values())
+      .map((context) => {
+        const values = Array.from(context.values.entries())
+          .map(([value, documentIds]) => `${value}${documentIds.length ? ` [${documentIds.join(", ")}]` : ""}`)
+          .join(" vs ");
+        return `${context.label}: ${values}`;
+      })
+      .join("; ");
+  };
 
   const genAvgRow: UnifiedFieldComparisonRow = {
     field: "general_average",
@@ -2987,11 +3673,34 @@ export function evaluateUnifiedStudentValidation(
     label: "Semestral / Annual General Average",
     sf5aValue: sf5aGenAvg,
     sf5bValue: sf5bGenAvg,
-    sf9Value: sf9GenAvg,
-    sf10Value: sf10GenAvg,
+    sf9Value: displayGeneralAverage("SF9", sf9GenAvg),
+    sf10Value: displayGeneralAverage("SF10", sf10GenAvg),
     status: "MATCH",
     isMatch: true,
     sourcesPresent: genAvgSources.map((s) => s.doc),
+    sourceDocumentIds: Array.from(new Set([
+      ...sf5aRecords,
+      ...sf5bRecords,
+      ...sf9Records,
+      ...sf10Records,
+    ].filter((record) => parseNumericVal(record.raw?.general_average) !== undefined)
+      .map((record) => record.documentId)
+      .filter(Boolean) as string[])),
+    sourceTraces: genAvgSources.flatMap((source) => source.sourceDocumentId
+    ? [{
+        documentId: source.sourceDocumentId,
+        documentType: `${source.type}-SHS`,
+        fieldName: "general_average",
+        pageNumber: source.pageNumber,
+        rowIndex: source.rowIndex,
+        academicContext: {
+          schoolYear: source.schoolYear,
+          gradeLevel: source.gradeLevel,
+          section: source.section,
+          semester: source.semester,
+        },
+      }]
+    : []),
     notes: "General average reconciled across academic records.",
   };
 
@@ -3128,6 +3837,10 @@ export function evaluateUnifiedStudentValidation(
       status = "NOT_APPLICABLE";
       notes = "No SF10 grades were available for this academic context; no cross-context mismatch was reported.";
       sf10Value = undefined;
+    } else {
+      status = "NOT_APPLICABLE";
+      notes = "No SF10 source record was available; the comparison remains incomplete.";
+      sf10Value = undefined;
     }
 
     fieldsMatrix.push({
@@ -3142,6 +3855,10 @@ export function evaluateUnifiedStudentValidation(
       isMatch: status === "MATCH",
       notes,
       sourceDocumentIds,
+      sourceTraces: [
+        ...sf9Candidates.flatMap((grade) => grade.sourceTraces || []),
+        ...matchingSf10.flatMap((grade) => grade.sourceTraces || []),
+      ].map((trace) => ({ ...trace, fieldName: field })),
       sourcesPresent: ["SF9-SHS", ...(matchingSf10.length ? ["SF10-SHS"] : [])],
     });
   }
@@ -3150,99 +3867,189 @@ export function evaluateUnifiedStudentValidation(
   // E. PROMOTION MATRIX (SF5A End of Semester Promotion vs SF9 Failing Grades)
   // ---------------------------------------------------------------------------
   if (hasSf5a) {
-    const actionTaken = (sf5aRaw.action_taken || "COMPLETE").toUpperCase();
-    const incompleteSubjects: any[] = Array.isArray(sf5aRaw.incomplete_subjects) ? sf5aRaw.incomplete_subjects : [];
-    const sf5aContext: AcademicGradeItem = {
-      subject: "",
-      schoolYear: sf5aRaw.school_year,
-      gradeLevel: sf5aRaw.grade_level,
-      semester: sf5aRaw.semester,
-    };
-    const sf9GradesForSf5a = sf9Grades.filter((grade) => sameAcademicGradeContext(sf5aContext, grade));
-    const failingSf9 = sf9GradesForSf5a.filter((g) => {
-      const f = parseNumericVal(g.finalGrade);
-      return f !== undefined && f < 75;
-    });
-    const hasApplicableSf9Grades = sf9GradesForSf5a.length > 0;
+    const groups = new Map<string, UnifiedSourceRecord[]>();
+    for (const record of sf5aRecords) {
+      const raw = record.raw || {};
+      const key = [
+        normalizeAcademicSchoolYear(raw.school_year || initialSchoolYear),
+        normalizeAcademicGradeLevel(raw.grade_level || initialGradeLevel),
+        normalizeGradingPeriod(raw.semester),
+      ].join("|");
+      groups.set(key, [...(groups.get(key) || []), record]);
+    }
 
-    const promRow: UnifiedFieldComparisonRow = {
-      field: "promotion_status_sf5a",
-      category: "PROMOTION",
-      label: "SF5A End-of-Semester Status",
-      sf5aValue: actionTaken,
-      sf9Value: failingSf9.length === 0 ? "0 failing subjects" : `${failingSf9.length} failing subject(s)`,
-      status: hasApplicableSf9Grades ? "MATCH" : "NEEDS_VERIFICATION",
-      isMatch: hasApplicableSf9Grades,
-      sourcesPresent: ["SF5A-SHS", "SF9-SHS"],
-      notes: hasApplicableSf9Grades
-        ? "Promotion status verified against SF9 grades in the same academic context."
-        : "No SF9 grades were available for the SF5A school year, grade level, and semester.",
-    };
+    for (const [contextKey, records] of groups) {
+      const representative = records[0].raw || {};
+      const actions = Array.from(new Set(records.map((record) =>
+        String(record.raw?.action_taken || "COMPLETE").toUpperCase()
+      )));
+      const actionTaken = actions.length === 1 ? actions[0] : undefined;
+      const sf5aContext: AcademicGradeItem = {
+        subject: "",
+        schoolYear: String(representative.school_year || initialSchoolYear),
+        gradeLevel: String(representative.grade_level || initialGradeLevel),
+        semester: typeof representative.semester === "string" ? representative.semester : undefined,
+      };
+      const sf9GradesForSf5a = sf9Grades.filter((grade) => sameAcademicGradeContext(sf5aContext, grade));
+      const failingSf9 = sf9GradesForSf5a.filter((grade) => {
+        const finalGrade = parseNumericVal(grade.finalGrade);
+        return finalGrade !== undefined && finalGrade < 75;
+      });
+      const hasApplicableSf9Grades = sf9GradesForSf5a.length > 0;
+      const incompleteSubjects = records.flatMap((record) =>
+        Array.isArray(record.raw?.incomplete_subjects) ? record.raw.incomplete_subjects : []
+      );
+      const hasConflictingActions = actions.length > 1;
+      const field = groups.size === 1
+        ? "promotion_status_sf5a"
+        : `promotion_status_sf5a_${contextKey.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
+      const promRow: UnifiedFieldComparisonRow = {
+        field,
+        category: "PROMOTION",
+        label: `SF5A End-of-Semester Status${groups.size > 1 ? ` — ${representative.semester || representative.school_year || "Academic context"}` : ""}`,
+        sf5aValue: hasConflictingActions
+          ? records.map((record) => `${record.raw?.action_taken || "COMPLETE"} [${record.documentId || "unknown source"}]`).join("; ")
+          : actionTaken,
+        sf9Value: failingSf9.length === 0 ? "0 failing subjects" : `${failingSf9.length} failing subject(s)`,
+        status: hasApplicableSf9Grades ? "MATCH" : "NEEDS_VERIFICATION",
+        isMatch: hasApplicableSf9Grades,
+        sourcesPresent: ["SF5A-SHS", ...(hasApplicableSf9Grades ? ["SF9-SHS"] : [])],
+        sourceDocumentIds: Array.from(new Set([
+          ...records.map((record) => record.documentId).filter(Boolean),
+          ...failingSf9.flatMap((grade) => grade.sourceDocumentIds || []),
+        ] as string[])),
+        notes: hasApplicableSf9Grades
+          ? "Promotion status verified against SF9 grades in the same academic context."
+          : "No SF9 grades were available for the SF5A school year, grade level, and semester.",
+      };
 
-    if (actionTaken === "COMPLETE") {
-      if (failingSf9.length > 0) {
+      if (hasConflictingActions) {
+        promRow.status = "NEEDS_VERIFICATION";
+        promRow.isMatch = false;
+        promRow.notes = "Conflicting SF5A action values exist in the same school year, grade, and semester.";
+        discrepancies.push({
+          field: `duplicate_sf5a_action_${contextKey.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`,
+          sourceValue: records.map((record) => ({
+            actionTaken: record.raw?.action_taken,
+            sourceDocumentId: record.documentId,
+          })),
+          targetValue: "One consistent SF5A action for this academic context",
+          severity: "WARNING",
+          category: "NEEDS_VERIFICATION",
+          description: "Conflicting SF5A promotion records require review.",
+        });
+      } else if (actionTaken === "COMPLETE" && failingSf9.length > 0) {
         promRow.status = "MISMATCH";
         promRow.isMatch = false;
         promRow.notes = `Contradiction: SF5A marked COMPLETE but SF9 has ${failingSf9.length} failing subject(s).`;
-        for (const fSubj of failingSf9) {
+        for (const failedSubject of failingSf9) {
           discrepancies.push({
             field: "sf5a_completion_conflict",
-            sourceValue: `Failing Grade: ${fSubj.finalGrade}`,
+            sourceValue: `Failing Grade: ${failedSubject.finalGrade}`,
             targetValue: "COMPLETE",
             severity: "CRITICAL",
-            description: `Promotion conflict: SF5A marks learner as "COMPLETE", but SF9 contains failing grade in "${fSubj.subject}" (${fSubj.finalGrade}). Remedial class required.`,
+            description: `Promotion conflict: SF5A marks learner as "COMPLETE", but SF9 contains failing grade in "${failedSubject.subject}" (${failedSubject.finalGrade}). Remedial class required.`,
           });
         }
-      }
-    } else if (actionTaken === "INCOMPLETE") {
-      const recordedDeficiencies = incompleteSubjects.map((s) => {
-        const name = typeof s === "string" ? s : s.subject || "";
-        return normalizeSubjectName(name);
-      });
+      } else if (actionTaken === "INCOMPLETE") {
+        const recordedDeficiencies = incompleteSubjects.map((subject) => {
+          const name = typeof subject === "string" ? subject : subject.subject || "";
+          return normalizeSubjectName(name);
+        });
 
-      for (const fSubj of failingSf9) {
-        const normF = normalizeSubjectName(fSubj.subject || "");
-        const isRecorded = recordedDeficiencies.some((d) => d.includes(normF) || normF.includes(d));
-        if (!isRecorded) {
-          promRow.status = "MISMATCH";
-          promRow.isMatch = false;
-          promRow.notes = `Unrecorded deficiency: Failing subject "${fSubj.subject}" (${fSubj.finalGrade}) missing from SF5A incomplete list.`;
-          discrepancies.push({
-            field: `unrecorded_deficiency_${normF}`,
-            sourceValue: `SF9 Grade: ${fSubj.finalGrade}`,
-            targetValue: "Missing in SF5A",
-            severity: "CRITICAL",
-            description: `SF5A incomplete list omission: Failing subject "${fSubj.subject}" (${fSubj.finalGrade}) on report card is missing from official SF5A back-subjects declaration.`,
-          });
+        for (const failedSubject of failingSf9) {
+          const normalizedSubject = normalizeSubjectName(failedSubject.subject || "");
+          const isRecorded = recordedDeficiencies.some((deficiency) =>
+            deficiency.includes(normalizedSubject) || normalizedSubject.includes(deficiency)
+          );
+          if (!isRecorded) {
+            promRow.status = "MISMATCH";
+            promRow.isMatch = false;
+            promRow.notes = `Unrecorded deficiency: Failing subject "${failedSubject.subject}" (${failedSubject.finalGrade}) missing from SF5A incomplete list.`;
+            discrepancies.push({
+              field: `unrecorded_deficiency_${normalizedSubject}`,
+              sourceValue: `SF9 Grade: ${failedSubject.finalGrade}`,
+              targetValue: "Missing in SF5A",
+              severity: "CRITICAL",
+              description: `SF5A incomplete list omission: Failing subject "${failedSubject.subject}" (${failedSubject.finalGrade}) on report card is missing from official SF5A back-subjects declaration.`,
+            });
+          }
         }
       }
+      fieldsMatrix.push(promRow);
     }
-    fieldsMatrix.push(promRow);
   }
 
   // ---------------------------------------------------------------------------
   // F. GRADUATION MATRIX (SF5B Candidates for Graduation vs SF10 Transcript)
   // ---------------------------------------------------------------------------
   if (hasSf5b) {
-    const gradAction = (sf5bRaw.action_taken || "GRADUATING").toUpperCase();
+    const groups = new Map<string, UnifiedSourceRecord[]>();
+    for (const record of sf5bRecords) {
+      const raw = record.raw || {};
+      const key = [
+        normalizeAcademicSchoolYear(raw.school_year || initialSchoolYear),
+        normalizeAcademicGradeLevel(raw.grade_level || initialGradeLevel),
+        String(raw.section || "").trim().replace(/\s+/g, " ").toLowerCase(),
+      ].join("|");
+      groups.set(key, [...(groups.get(key) || []), record]);
+    }
+    const completedSemesterKeys = new Set(
+      (Array.isArray(sf10Raw.completed_semesters) ? sf10Raw.completed_semesters : []).map((semester: any) =>
+        [
+          normalizeAcademicSchoolYear(semester.school_year || semester.schoolYear || sf10Raw.school_year),
+          normalizeAcademicGradeLevel(semester.grade_level || semester.gradeLevel),
+          normalizeGradingPeriod(semester.semester),
+        ].join("|")
+      )
+    );
     const hasUnresolvedBackSubjects = sf10Raw.has_unresolved_back_subjects === true;
-    const completedSemestersCount = Array.isArray(sf10Raw.completed_semesters) ? sf10Raw.completed_semesters.length : 0;
 
-    const gradRow: UnifiedFieldComparisonRow = {
-      field: "graduation_clearance_sf5b",
-      category: "GRADUATION",
-      label: "SF5B Senior High School Graduation Clearance",
-      sf5bValue: gradAction,
-      sf10Value: hasSf10 ? (hasUnresolvedBackSubjects ? "Unresolved Deficiencies Pending" : `Completed ${completedSemestersCount} Semesters`) : "SF10 Transcript Required",
-      status: "MATCH",
-      isMatch: true,
-      sourcesPresent: ["SF5B-SHS"],
-      notes: "Graduation candidacy evaluated against cumulative scholastic transcript.",
-    };
-    if (hasSf10) gradRow.sourcesPresent.push("SF10-SHS");
-
-    if (gradAction === "GRADUATING" && hasSf10) {
-      if (hasUnresolvedBackSubjects) {
+    for (const [contextKey, records] of groups) {
+      const actions = Array.from(new Set(records.map((record) =>
+        String(record.raw?.action_taken || "GRADUATING").toUpperCase()
+      )));
+      const conflictingActions = actions.length > 1;
+      const gradAction = actions.length === 1 ? actions[0] : undefined;
+      const field = groups.size === 1
+        ? "graduation_clearance_sf5b"
+        : `graduation_clearance_sf5b_${contextKey.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`;
+      const gradRow: UnifiedFieldComparisonRow = {
+        field,
+        category: "GRADUATION",
+        label: `SF5B Senior High School Graduation Clearance${groups.size > 1 ? ` — ${records[0].raw?.school_year || "Academic context"}` : ""}`,
+        sf5bValue: conflictingActions
+          ? records.map((record) => `${record.raw?.action_taken || "GRADUATING"} [${record.documentId || "unknown source"}]`).join("; ")
+          : gradAction,
+        sf10Value: hasSf10
+          ? (hasUnresolvedBackSubjects
+            ? "Unresolved Deficiencies Pending"
+            : `Completed ${completedSemesterKeys.size} Semesters`)
+          : "SF10 Transcript Required",
+        status: conflictingActions ? "NEEDS_VERIFICATION" : "MATCH",
+        isMatch: !conflictingActions,
+        sourcesPresent: ["SF5B-SHS", ...(hasSf10 ? ["SF10-SHS"] : [])],
+        sourceDocumentIds: Array.from(new Set([
+          ...records.map((record) => record.documentId).filter(Boolean),
+          ...sf10Records.map((record) => record.documentId).filter(Boolean),
+        ] as string[])),
+        notes: conflictingActions
+          ? "Conflicting SF5B graduation statuses require review."
+          : "Graduation candidacy evaluated against cumulative scholastic transcript.",
+      };
+      if (conflictingActions) {
+        discrepancies.push({
+          field: `duplicate_sf5b_action_${contextKey.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`,
+          sourceValue: records.map((record) => ({
+            actionTaken: record.raw?.action_taken,
+            sourceDocumentId: record.documentId,
+          })),
+          targetValue: "One consistent SF5B graduation status for this academic context",
+          severity: "WARNING",
+          category: "NEEDS_VERIFICATION",
+          description: "Conflicting SF5B graduation records require review.",
+        });
+      } else if (gradAction === "GRADUATING" && hasSf10 && hasUnresolvedBackSubjects) {
         gradRow.status = "MISMATCH";
         gradRow.isMatch = false;
         gradRow.notes = "Graduation clearance blocked: SF10 indicates unresolved back-subjects.";
@@ -3254,8 +4061,78 @@ export function evaluateUnifiedStudentValidation(
           description: "Graduation clearance conflict: Learner listed as \"GRADUATING\" on SF5B-SHS, but SF10 permanent record documents unresolved back-subjects.",
         });
       }
+      fieldsMatrix.push(gradRow);
     }
-    fieldsMatrix.push(gradRow);
+  }
+
+  const sourceTypeLabels: Record<UnifiedSourceType, string> = {
+    psa: "PSA",
+    sf1: "SF1-SHS",
+    sf5a: "SF5A-SHS",
+    sf5b: "SF5B-SHS",
+    sf9: "SF9-SHS",
+    sf10: "SF10-SHS",
+  };
+  const matrixFieldForConflict = (conflict: UnifiedSourceConflict) => {
+    if (conflict.documentType === "sf5a") {
+      if (["action_taken", "incomplete_subjects"].includes(conflict.field)) return "promotion_status_sf5a";
+      if (conflict.field === "general_average") return "general_average";
+    }
+    if (conflict.documentType === "sf5b") {
+      if (conflict.field === "action_taken") return "graduation_clearance_sf5b";
+      if (conflict.field === "general_average") return "general_average";
+    }
+    if (conflict.documentType === "sf9" || conflict.documentType === "sf10") {
+      if (conflict.field === "mother_name") return "mother_maiden_name";
+      if (conflict.field === "has_unresolved_back_subjects") return "graduation_clearance_sf5b";
+    }
+    const aliases: Record<string, string> = {
+      track: "track_strand",
+      track_strand: "track_strand",
+      strand: "track_strand",
+    };
+    return aliases[conflict.field] || conflict.field;
+  };
+
+  for (const conflict of sourceConflicts) {
+    const sourceValues = conflict.values.map((entry) => ({
+      value: entry.value,
+      sourceDocumentIds: entry.sourceDocumentIds,
+    }));
+    const sourceIds = Array.from(new Set(sourceValues.flatMap((entry) => entry.sourceDocumentIds)));
+    const matchingRows = fieldsMatrix.filter((row) =>
+      row.field === matrixFieldForConflict(conflict) ||
+      (conflict.documentType === "sf5a" && row.field.startsWith("promotion_status_sf5a_")) ||
+      (conflict.documentType === "sf5b" && row.field.startsWith("graduation_clearance_sf5b_"))
+    );
+    for (const row of matchingRows) {
+      if (row.status === "MATCH" || row.status === "NOT_APPLICABLE") {
+        row.status = "NEEDS_VERIFICATION";
+        row.isMatch = false;
+      }
+      const displayedValues = sourceValues
+        .map((entry) => `${String(entry.value)} [${entry.sourceDocumentIds.join(", ") || "unknown source"}]`)
+        .join("; ");
+      if (conflict.documentType === "psa") row.psaValue = displayedValues;
+      if (conflict.documentType === "sf1") row.sf1Value = displayedValues;
+      if (conflict.documentType === "sf5a") row.sf5aValue = displayedValues;
+      if (conflict.documentType === "sf5b") row.sf5bValue = displayedValues;
+      if (conflict.documentType === "sf9" && conflict.field !== "general_average") row.sf9Value = displayedValues;
+      if (conflict.documentType === "sf10" && conflict.field !== "general_average") row.sf10Value = displayedValues;
+      row.sourceDocumentIds = Array.from(new Set([...(row.sourceDocumentIds || []), ...sourceIds]));
+      row.sourcesPresent = Array.from(new Set([...row.sourcesPresent, sourceTypeLabels[conflict.documentType]]));
+      row.notes = [row.notes, `Conflicting ${sourceTypeLabels[conflict.documentType]} ${conflict.field} values require review.`]
+        .filter(Boolean)
+        .join(" ");
+    }
+    discrepancies.push({
+      field: `conflicting_${conflict.documentType}_${conflict.field}`,
+      sourceValue: sourceValues,
+      targetValue: `One consistent ${conflict.field} value per academic context`,
+      severity: "WARNING",
+      category: "NEEDS_VERIFICATION",
+      description: `Conflicting ${sourceTypeLabels[conflict.documentType]} records contain different "${conflict.field}" values.`,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -3287,18 +4164,21 @@ export function evaluateUnifiedStudentValidation(
   } else if (hasWarning || fieldsMatrix.some((r) => r.status === "NEEDS_VERIFICATION")) {
     overallStatus = "NEEDS_VERIFICATION";
     needsHumanReview = true;
-  } else if (totalAvailable < 2) {
+  } else if (!hasRequiredCoverage) {
     overallStatus = "NOT_APPLICABLE";
   }
 
+  const incompleteCoverageMessage = hasRequiredCoverage
+    ? ""
+    : ` Required document coverage is incomplete (${requiredAvailable}/${totalRequired} categories available).`;
   const summaryMessage =
     overallStatus === "MATCH"
       ? `Unified validation certified across ${totalAvailable} available school forms with 100% field consistency.`
       : overallStatus === "MISMATCH"
-      ? `Unified validation identified ${discrepancies.filter((d) => d.severity === "CRITICAL").length} critical mismatch(es) across submitted forms. Teacher verification required.`
+      ? `Unified validation identified ${discrepancies.filter((d) => d.severity === "CRITICAL").length} critical mismatch(es) across submitted forms. Teacher verification required.${incompleteCoverageMessage}`
       : overallStatus === "NEEDS_VERIFICATION"
-      ? `Unified validation requires teacher verification due to ${discrepancies.length} item(s) (attendance variance, unreadable marks, or warnings).`
-      : `Insufficient documents available (${totalAvailable}/${totalRequired}) for comprehensive cross-validation.`;
+      ? `Unified validation requires teacher verification due to ${discrepancies.length} item(s) (attendance variance, unreadable marks, or warnings).${incompleteCoverageMessage}`
+      : `Incomplete required document coverage (${requiredAvailable}/${totalRequired} categories available). Available comparisons remain visible; missing documents are not treated as mismatches.`;
 
   return {
     lrn,
@@ -3323,6 +4203,8 @@ export function evaluateUnifiedStudentValidation(
       psa: hasPsa,
       totalAvailable,
       totalRequired,
+      requiredAvailable,
+      hasRequiredCoverage,
     },
   };
 }

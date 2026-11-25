@@ -135,7 +135,7 @@ export function evaluateSubjectRemediation(input: SubjectRemedialInput): Remedia
     ? (typeof remMarkVal === "number" ? remMarkVal : parseFloat(String(remMarkVal).trim()))
     : undefined;
 
-  let computedFinal = typeof input.recomputedFinalGrade === "number"
+  const computedFinal = typeof input.recomputedFinalGrade === "number"
     ? input.recomputedFinalGrade
     : (remMarkNum !== undefined && !isNaN(remMarkNum) ? computeDepEdRecomputedGrade(origNum, remMarkNum) : undefined);
 

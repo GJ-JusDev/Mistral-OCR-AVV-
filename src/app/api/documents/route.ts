@@ -47,6 +47,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
     }
 
+    const userRole = (roleRow.role || "").toLowerCase().trim();
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role cannot access document records. Documents module has been removed from Admin experience.",
+          code: "ADMIN_DOCUMENTS_REMOVED",
+        },
+        { status: 403 }
+      );
+    }
+
     let query = supabase
       .from('documents')
       .select('*')

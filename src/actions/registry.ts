@@ -121,7 +121,7 @@ export async function getRegistryTeachers(filters?: {
 
   // Also fetch details of linked users if any
   const linkedIds = results.map((r) => r.linked_user_id).filter(Boolean) as string[];
-  let linkedUsersMap: Record<string, { email?: string; status?: string }> = {};
+  const linkedUsersMap: Record<string, { email?: string; status?: string }> = {};
 
   if (linkedIds.length > 0) {
     const { data: usersData } = await adminClient

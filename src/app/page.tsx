@@ -2,18 +2,17 @@ import { createClient } from "@/lib/supabase/server";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import { StatCard } from "@/components/ui/StatCard";
-import { StatsGrid } from "@/components/dashboard/StatsGrid";
 import { DashboardCard } from "@/components/ui/DashboardCard";
-import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ValidationActivityChart } from "@/components/dashboard/ValidationActivityChart";
 import { ValidationResultsChart } from "@/components/dashboard/ValidationResultsChart";
-import { FileText, AlertTriangle, CheckCircle, XCircle, ArrowRight, ShieldAlert, Sparkles, Upload } from "lucide-react";
+import { FileText, AlertTriangle, CheckCircle, XCircle, ArrowRight, Upload } from "lucide-react";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/Table";
 import DocumentStatusBadge from "@/components/documents/DocumentStatusBadge";
 import Link from "next/link";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import type { ExtractedFields } from "@/types/validation";
 import PrincipalDashboard from "@/components/principal/PrincipalDashboard";
+import AdminDashboard from "@/components/admin/AdminDashboard";
 import { getPrincipalDashboardData } from "@/actions/principal";
 import TeacherAssignmentOverview from "@/components/teacher/TeacherAssignmentOverview";
 import { getMyTeacherDashboardData } from "@/actions/assignments";
@@ -98,6 +97,49 @@ export default async function DashboardPage({
       .join(" ") || "Principal";
 
     return <PrincipalDashboard data={dashboardData} userName={principalName} />;
+  }
+
+  // Route Admin directly to dedicated institutional administration dashboard
+  if (role === "admin") {
+    const [
+      { count: totalUsers },
+      { count: pendingUsers },
+      { count: registeredTeachers },
+      { count: activeAssignments },
+      { data: recentAuditLogs },
+      { data: pendingUsersList },
+    ] = await Promise.all([
+      supabase.from("user_roles").select("*", { count: "exact", head: true }),
+      supabase.from("user_roles").select("*", { count: "exact", head: true }).eq("account_status", "Pending"),
+      supabase.from("school_teacher_registry").select("*", { count: "exact", head: true }),
+      (supabase.from as unknown as (table: string) => ReturnType<typeof supabase.from>)("teacher_assignments").select("*", { count: "exact", head: true }).eq("assignment_status", "active"),
+      supabase.from("audit_logs").select("id, action, category, outcome, created_at, actor_email, actor_role").order("created_at", { ascending: false }).limit(5),
+      supabase.from("user_roles").select("id, user_id, role, account_status, created_at").eq("account_status", "Pending").limit(5),
+    ]);
+
+    const adminName = [user?.user_metadata?.first_name, user?.user_metadata?.last_name]
+      .filter(Boolean)
+      .join(" ") || "Administrator";
+
+    return (
+      <AdminDashboard
+        data={{
+          userName: adminName,
+          totalUsers: totalUsers ?? 0,
+          pendingUsers: pendingUsers ?? 0,
+          registeredTeachers: registeredTeachers ?? 0,
+          activeAssignments: activeAssignments ?? 0,
+          recentAuditLogs: recentAuditLogs || [],
+          pendingUsersList: (pendingUsersList || []).map((u) => ({
+            id: u.id,
+            user_id: u.user_id,
+            role: u.role || "Faculty",
+            account_status: u.account_status,
+            created_at: u.created_at || undefined,
+          })),
+        }}
+      />
+    );
   }
 
   const teacherName = [user?.user_metadata?.first_name, user?.user_metadata?.last_name]
@@ -188,6 +230,10 @@ export default async function DashboardPage({
     });
   }
 
+  const hasApprovedAdvisory = Boolean(
+    teacherModuleData && teacherModuleData.summary.advisoryClasses.length > 0
+  );
+
   return (
     <PageContainer>
       <Header 
@@ -196,15 +242,31 @@ export default async function DashboardPage({
         roleBadge={{ role: role || "teacher", label: "Faculty Validator" }}
         schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
-          <Link href="/upload">
-            <Button
-              size="sm"
-              leftIcon={<Upload className="h-4 w-4" />}
-              className="bg-[#174EA6] hover:bg-[#0B1F33] text-white shadow-sm"
+          hasApprovedAdvisory ? (
+            <Link href="/upload">
+              <Button
+                size="sm"
+                leftIcon={<Upload className="h-4 w-4" />}
+                className="bg-[#174EA6] hover:bg-[#0B1F33] text-white shadow-sm"
+              >
+                Upload Form
+              </Button>
+            </Link>
+          ) : (
+            <span
+              title="Approved advisory assignment required before scanning or uploading documents"
+              className="inline-block"
             >
-              Upload Form
-            </Button>
-          </Link>
+              <Button
+                size="sm"
+                disabled
+                leftIcon={<Upload className="h-4 w-4" />}
+                className="bg-slate-200 text-slate-500 cursor-not-allowed shadow-none border border-slate-300"
+              >
+                Upload Form (Locked)
+              </Button>
+            </span>
+          )
         }
       />
       
@@ -218,6 +280,7 @@ export default async function DashboardPage({
             pendingDocuments={teacherModuleData.pendingDocuments}
             policy={teacherModuleData.policy}
             canScanAny={teacherModuleData.summary.canScanAny}
+            requestedAdvisory={(teacherModuleData as any).requestedAdvisory}
           />
         )}
 
@@ -351,7 +414,7 @@ export default async function DashboardPage({
                 {!attentionDocs || attentionDocs.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center py-8 text-center">
                     <CheckCircle className="h-10 w-10 text-emerald-500 mb-2 opacity-80" />
-                    <p className="text-sm font-semibold text-slate-800">You're all caught up!</p>
+                    <p className="text-sm font-semibold text-slate-800">You&apos;re all caught up!</p>
                     <p className="text-xs text-slate-500 mt-0.5">No flagged discrepancies require review.</p>
                   </div>
                 ) : (

@@ -19,6 +19,104 @@ const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
 ]);
 
+/**
+ * Safely extracts detailed error information from Azure Document Intelligence response.
+ *
+ * Priority:
+ * 1. innererror.message
+ * 2. details[0].message
+ * 3. topLevel message (if not generic "Invalid request.")
+ * 4. Fallback default message
+ *
+ * Diagnostic code priority:
+ * 1. innererror.code
+ * 2. details[0].code
+ * 3. topLevel code
+ * 4. default code
+ */
+export function extractAzureErrorInfo(
+  errorData: any,
+  defaultMsg: string = "Invalid document request.",
+  defaultCode: string = "BAD_REQUEST"
+): {
+  message: string;
+  azureErrorCode?: string;
+  innerCode?: string;
+  diagnosticCode?: string;
+} {
+  const err = errorData?.error || errorData || {};
+  const topLevelCode = typeof err.code === "string" ? err.code : undefined;
+  const topLevelMsg = typeof err.message === "string" ? err.message.trim() : "";
+
+  const innerCode = typeof err.innererror?.code === "string" ? err.innererror.code : undefined;
+  const innerMsg = typeof err.innererror?.message === "string" ? err.innererror.message.trim() : "";
+
+  const firstDetail = Array.isArray(err.details) && err.details.length > 0 ? err.details[0] : undefined;
+  const detailCode = typeof firstDetail?.code === "string" ? firstDetail.code : undefined;
+  const detailMsg = typeof firstDetail?.message === "string" ? firstDetail.message.trim() : "";
+
+  let chosenMsg = innerMsg || detailMsg;
+  if (!chosenMsg) {
+    if (topLevelMsg && !/^invalid request\.?$/i.test(topLevelMsg)) {
+      chosenMsg = topLevelMsg;
+    } else {
+      chosenMsg = topLevelMsg || defaultMsg;
+    }
+  }
+
+  // Redact URLs and tokens to prevent leaking sensitive information
+  const safeMsg = chosenMsg.replace(/https?:\/\/[^\s]+/g, "[redacted-url]");
+  const diagnosticCode = innerCode || detailCode || topLevelCode || defaultCode;
+
+  return {
+    message: safeMsg,
+    azureErrorCode: topLevelCode,
+    innerCode: innerCode || detailCode,
+    diagnosticCode,
+  };
+}
+
+/**
+ * Extracts width and height for PNG and JPEG image buffers without native dependencies.
+ */
+export function getImageDimensionsFromBuffer(
+  buffer: Buffer,
+  mimeType: string
+): { width: number; height: number } | null {
+  if (mimeType === "image/png" && buffer.length >= 24) {
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+      return {
+        width: buffer.readUInt32BE(16),
+        height: buffer.readUInt32BE(20),
+      };
+    }
+  } else if ((mimeType === "image/jpeg" || mimeType === "image/jpg") && buffer.length >= 4) {
+    if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+      let offset = 2;
+      while (offset < buffer.length - 8) {
+        if (buffer[offset] !== 0xff) {
+          offset++;
+          continue;
+        }
+        const marker = buffer[offset + 1];
+        if (
+          (marker >= 0xc0 && marker <= 0xc3) ||
+          (marker >= 0xc5 && marker <= 0xc7) ||
+          (marker >= 0xc9 && marker <= 0xcb) ||
+          (marker >= 0xcd && marker <= 0xcf)
+        ) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          return { width, height };
+        }
+        const length = buffer.readUInt16BE(offset + 2);
+        offset += 2 + length;
+      }
+    }
+  }
+  return null;
+}
+
 export class AzureDocumentIntelligenceProvider implements IOcrProvider {
   public readonly name = "azure" as const;
   private endpoint?: string;
@@ -131,21 +229,87 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
       });
     }
 
-    // 15MB limit check (base64 string length ~22MB)
-    if (base64Content.length > 22 * 1024 * 1024) {
+    // Azure Document Intelligence service limit check (50MB binary ceiling for images, ~68MB base64)
+    const binarySizeEstimate = Math.floor((base64Content.length * 3) / 4);
+    if (binarySizeEstimate > 50 * 1024 * 1024) {
       throw new OcrProviderError(
-        "Document payload exceeds the maximum size limit of 15MB.",
+        "The input image is too large. Refer to documentation for the maximum file size.",
         {
           provider: "azure",
           status: 400,
           code: "BAD_REQUEST",
+          diagnosticCode: "InvalidContentLength",
+          innerCode: "InvalidContentLength",
+          azureErrorCode: "InvalidRequest",
         }
       );
     }
 
-    const cleanEndpoint = endpoint.replace(/\/+$/, "");
-    const effectiveModelId = input.modelId || (input.documentSide === "back" ? "prebuilt-layout" : this.modelId);
-    const analyzeUrl = `${cleanEndpoint}/documentintelligence/documentModels/${effectiveModelId}:analyze?api-version=${this.apiVersion}`;
+    let cleanEndpoint = endpoint.replace(/\/+$/, "");
+    if ((cleanEndpoint.startsWith('"') && cleanEndpoint.endsWith('"')) || (cleanEndpoint.startsWith("'") && cleanEndpoint.endsWith("'"))) {
+      cleanEndpoint = cleanEndpoint.slice(1, -1).trim().replace(/\/+$/, "");
+    }
+    try {
+      const parsedUrl = new URL(cleanEndpoint);
+      if (!/^https?:$/.test(parsedUrl.protocol)) {
+        throw new Error("Invalid protocol");
+      }
+    } catch {
+      throw new OcrProviderError(
+        "Invalid Azure Document Intelligence endpoint format. Expected a valid HTTPS URL.",
+        {
+          provider: "azure",
+          status: 500,
+          code: "BAD_REQUEST",
+          diagnosticCode: "INVALID_ENDPOINT_FORMAT",
+        }
+      );
+    }
+
+    let apiVersion = (this.apiVersion || "").trim();
+    if ((apiVersion.startsWith('"') && apiVersion.endsWith('"')) || (apiVersion.startsWith("'") && apiVersion.endsWith("'"))) {
+      apiVersion = apiVersion.slice(1, -1).trim();
+    }
+    if (!/^\d{4}-\d{2}-\d{2}(-preview)?$/.test(apiVersion)) {
+      throw new OcrProviderError(
+        `Invalid Azure Document Intelligence API version format (${apiVersion}). Expected YYYY-MM-DD or YYYY-MM-DD-preview (e.g. '2024-11-30').`,
+        {
+          provider: "azure",
+          status: 500,
+          code: "BAD_REQUEST",
+          diagnosticCode: "INVALID_API_VERSION",
+        }
+      );
+    }
+
+    const isStructuredTableDoc =
+      input.documentType?.toLowerCase() === "sf9" ||
+      input.documentType?.toLowerCase() === "sf10" ||
+      input.documentSide === "back";
+    let effectiveModelId = (
+      input.modelId ||
+      (isStructuredTableDoc && !process.env.AZURE_DOCUMENT_INTELLIGENCE_MODEL ? "prebuilt-layout" : this.modelId) ||
+      ""
+    ).trim();
+    if ((effectiveModelId.startsWith('"') && effectiveModelId.endsWith('"')) || (effectiveModelId.startsWith("'") && effectiveModelId.endsWith("'"))) {
+      effectiveModelId = effectiveModelId.slice(1, -1).trim();
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(effectiveModelId)) {
+      throw new OcrProviderError(
+        `Invalid Azure Document Intelligence model ID (${effectiveModelId}). Expected a valid model identifier.`,
+        {
+          provider: "azure",
+          status: 500,
+          code: "BAD_REQUEST",
+          diagnosticCode: "INVALID_MODEL_ID",
+        }
+      );
+    }
+
+    const apiBasePath = apiVersion.startsWith("2022-") || apiVersion.startsWith("2023-07")
+      ? "formrecognizer"
+      : "documentintelligence";
+    const analyzeUrl = `${cleanEndpoint}/${apiBasePath}/documentModels/${effectiveModelId}:analyze?api-version=${apiVersion}`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -165,6 +329,37 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
       const effectiveContentType = validAzureMimes.has(normalizedMime)
         ? normalizedMime
         : "application/octet-stream";
+
+      // Application-level dimension validation for image payloads
+      const dimensions = getImageDimensionsFromBuffer(binaryBody, normalizedMime);
+      if (dimensions) {
+        if (dimensions.width < 50 || dimensions.height < 50) {
+          throw new OcrProviderError(
+            `The input image dimensions (${dimensions.width}x${dimensions.height}) are too small: minimum supported dimension is 50x50 pixels.`,
+            {
+              provider: "azure",
+              status: 400,
+              code: "BAD_REQUEST",
+              diagnosticCode: "InvalidContentDimensions",
+              innerCode: "InvalidContentDimensions",
+              azureErrorCode: "InvalidRequest",
+            }
+          );
+        }
+        if (dimensions.width > 10000 || dimensions.height > 10000) {
+          throw new OcrProviderError(
+            `The input image dimensions (${dimensions.width}x${dimensions.height}) exceed Azure Document Intelligence maximum limit of 10000x10000 pixels.`,
+            {
+              provider: "azure",
+              status: 400,
+              code: "BAD_REQUEST",
+              diagnosticCode: "InvalidContentDimensions",
+              innerCode: "InvalidContentDimensions",
+              azureErrorCode: "InvalidRequest",
+            }
+          );
+        }
+      }
 
       const submitRes = await fetch(analyzeUrl, {
         method: "POST",
@@ -202,26 +397,33 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
 
       if (submitRes.status === 400) {
         const errorData = await submitRes.json().catch(() => ({}));
-        const rawMsg = errorData.error?.message || errorData.error?.innererror?.message || "Invalid document request.";
-        // Sanitize message to ensure no credentials or sensitive URLs leak
-        const safeMsg = rawMsg.replace(/https?:\/\/[^\s]+/g, "[redacted-url]");
-        throw new OcrProviderError(safeMsg, {
+        const extracted = extractAzureErrorInfo(errorData, "Invalid document request.", "BAD_REQUEST");
+        throw new OcrProviderError(extracted.message, {
           provider: "azure",
           status: 400,
           code: "BAD_REQUEST",
+          diagnosticCode: extracted.diagnosticCode,
+          innerCode: extracted.innerCode,
+          azureErrorCode: extracted.azureErrorCode,
         });
       }
 
       if (!submitRes.ok) {
         const status = submitRes.status;
-        throw new OcrProviderError(
+        const errorData = await submitRes.json().catch(() => ({}));
+        const extracted = extractAzureErrorInfo(
+          errorData,
           `Azure Document Intelligence submission failed with HTTP status ${status}.`,
-          {
-            provider: "azure",
-            status: status >= 500 ? status : 502,
-            code: "UPSTREAM_ERROR",
-          }
+          "UPSTREAM_ERROR"
         );
+        throw new OcrProviderError(extracted.message, {
+          provider: "azure",
+          status: status >= 500 ? status : 502,
+          code: "UPSTREAM_ERROR",
+          diagnosticCode: extracted.diagnosticCode,
+          innerCode: extracted.innerCode,
+          azureErrorCode: extracted.azureErrorCode,
+        });
       }
 
       // Step 2: Read Operation-Location Header
@@ -285,12 +487,18 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
 
         if (opStatus === "failed") {
           clearTimeout(timeoutId);
-          const errDetail = pollData.error?.message || "Azure Document Intelligence operation reported failure.";
-          const safeMsg = errDetail.replace(/https?:\/\/[^\s]+/g, "[redacted-url]");
-          throw new OcrProviderError(safeMsg, {
+          const extracted = extractAzureErrorInfo(
+            pollData,
+            "Azure Document Intelligence operation reported failure.",
+            "UPSTREAM_ERROR"
+          );
+          throw new OcrProviderError(extracted.message, {
             provider: "azure",
             status: 502,
             code: "UPSTREAM_ERROR",
+            diagnosticCode: extracted.diagnosticCode,
+            innerCode: extracted.innerCode,
+            azureErrorCode: extracted.azureErrorCode,
           });
         }
 

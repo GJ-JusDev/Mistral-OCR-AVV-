@@ -25,7 +25,9 @@ async function getAuthenticatedUserContext() {
 
   const { data: roleRow } = await supabase
     .from("user_roles")
-    .select("user_id, role, account_status, school_id, matched_registry_id")
+    .select(
+      "user_id, role, account_status, school_id, matched_registry_id, requested_grade_level, requested_strand, requested_section, requested_strand_id, requested_section_id, request_status, request_submitted_at"
+    )
     .eq("user_id", user.id)
     .maybeSingle();
 
@@ -194,6 +196,27 @@ export async function createTeacherAssignmentAction(input: {
     }
 
     const sb = ctx.supabase as any;
+
+    if (input.assignment_type === "class_adviser" && assignmentStatus === "active") {
+      const { data: existingAdvisers } = await sb
+        .from("teacher_assignments")
+        .select("id, teacher_user_id")
+        .eq("school_id", schoolId)
+        .eq("school_year", schoolYear)
+        .eq("section", section)
+        .eq("assignment_type", "class_adviser")
+        .eq("assignment_status", "active");
+
+      if (existingAdvisers && existingAdvisers.length > 0) {
+        const conflict = existingAdvisers.find((a: any) => a.teacher_user_id !== input.teacher_user_id);
+        if (conflict) {
+          return {
+            error: `Conflict: Section '${section}' already has an active Class Adviser for School Year ${schoolYear}. Please deactivate the existing adviser first.`,
+          };
+        }
+      }
+    }
+
     const { data, error } = await sb
       .from("teacher_assignments")
       .insert({
@@ -260,6 +283,35 @@ export async function updateTeacherAssignmentStatusAction(
     }
 
     const sb = ctx.supabase as any;
+
+    if (nextStatus === "active") {
+      const { data: targetAssignment } = await sb
+        .from("teacher_assignments")
+        .select("school_id, school_year, section, assignment_type, teacher_user_id")
+        .eq("id", assignmentId)
+        .maybeSingle();
+
+      if (targetAssignment && targetAssignment.assignment_type === "class_adviser") {
+        const { data: conflicts } = await sb
+          .from("teacher_assignments")
+          .select("id, teacher_user_id")
+          .eq("school_id", targetAssignment.school_id)
+          .eq("school_year", targetAssignment.school_year)
+          .eq("section", targetAssignment.section)
+          .eq("assignment_type", "class_adviser")
+          .eq("assignment_status", "active");
+
+        if (conflicts && conflicts.length > 0) {
+          const conflict = conflicts.find((c: any) => c.teacher_user_id !== targetAssignment.teacher_user_id && c.id !== assignmentId);
+          if (conflict) {
+            return {
+              error: `Conflict: Section '${targetAssignment.section}' already has an active Class Adviser for School Year ${targetAssignment.school_year}. Deactivate the current adviser before activating this assignment.`,
+            };
+          }
+        }
+      }
+    }
+
     const { data, error } = await sb
       .from("teacher_assignments")
       .update({
@@ -481,5 +533,14 @@ export async function getMyTeacherDashboardData() {
     pendingDocuments,
     documents: docs,
     summary,
+    requestedAdvisory: {
+      requested_grade_level: (ctx.roleRow as any)?.requested_grade_level || null,
+      requested_strand: (ctx.roleRow as any)?.requested_strand || null,
+      requested_section: (ctx.roleRow as any)?.requested_section || null,
+      requested_strand_id: (ctx.roleRow as any)?.requested_strand_id || null,
+      requested_section_id: (ctx.roleRow as any)?.requested_section_id || null,
+      request_status: (ctx.roleRow as any)?.request_status || null,
+      request_submitted_at: (ctx.roleRow as any)?.request_submitted_at || null,
+    },
   };
 }

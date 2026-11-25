@@ -412,6 +412,76 @@ test("AVV System — Unified Cross-Document Validation Engine Regression Suite",
     });
   });
 
+  test("unified status distinguishes incomplete coverage from successful comparisons", () => {
+    const context = {
+      lrn: "109345000001",
+      fullName: "Carlos Dela Cruz",
+      studentId: "student-1",
+      schoolId: "school-1",
+      schoolYear: "2024-2025",
+      gradeLevel: "Grade 11",
+      section: "Diamond",
+    };
+    const record = (documentId, extra = {}) => ({
+      raw: {
+        lrn: context.lrn,
+        school_id: context.schoolId,
+        school_year: context.schoolYear,
+        grade_level: context.gradeLevel,
+        section: context.section,
+        ...extra,
+      },
+      documentId,
+      schoolId: context.schoolId,
+    });
+    const completeInput = () => ({
+      ...context,
+      sf1Records: [record("sf1")],
+      sf2Records: [record("sf2", { month: "August", days_present: 20, days_absent: 1 })],
+      sf5aRecords: [record("sf5a", { semester: "1st Semester", action_taken: "COMPLETE" })],
+      sf9Records: [record("sf9", { semester: "1st Semester", grades: [] })],
+      sf10Records: [record("sf10", { semester: "1st Semester", grades: [] })],
+    });
+
+    const onlyTwoCategories = evaluateUnifiedStudentValidation({
+      ...context,
+      sf1Records: [record("sf1")],
+      sf2Records: [record("sf2", { month: "August" })],
+    });
+    assert.equal(onlyTwoCategories.overallStatus, "NOT_APPLICABLE");
+    assert.equal(onlyTwoCategories.documentCompleteness.requiredAvailable, 2);
+    assert.equal(onlyTwoCategories.documentCompleteness.hasRequiredCoverage, false);
+    assert.equal(onlyTwoCategories.discrepancies.some((item) => item.severity === "CRITICAL"), false);
+
+    for (const [missingType, input] of [
+      ["SF9", (() => { const value = completeInput(); delete value.sf9Records; return value; })()],
+      ["SF10", (() => { const value = completeInput(); delete value.sf10Records; return value; })()],
+      ["SF2", (() => { const value = completeInput(); delete value.sf2Records; return value; })()],
+    ]) {
+      const result = evaluateUnifiedStudentValidation(input);
+      assert.notEqual(result.overallStatus, "MATCH", `Missing ${missingType} must be incomplete, not MATCH.`);
+      assert.equal(result.documentCompleteness.hasRequiredCoverage, false);
+      assert.equal(result.summaryMessage.includes("100% field consistency"), false);
+      assert.match(result.summaryMessage, /coverage is incomplete/i);
+    }
+
+    const complete = evaluateUnifiedStudentValidation(completeInput());
+    assert.equal(complete.documentCompleteness.requiredAvailable, 5);
+    assert.equal(complete.documentCompleteness.hasRequiredCoverage, true);
+    assert.notEqual(complete.overallStatus, "NOT_APPLICABLE");
+
+    const conflictingButIncompleteInput = completeInput();
+    delete conflictingButIncompleteInput.sf10Records;
+    conflictingButIncompleteInput.sf9Records = [
+      record("sf9-a", { father_name: "JUAN DELA CRUZ" }),
+      record("sf9-b", { father_name: "PEDRO DELA CRUZ" }),
+    ];
+    const conflictingButIncomplete = evaluateUnifiedStudentValidation(conflictingButIncompleteInput);
+    assert.equal(conflictingButIncomplete.documentCompleteness.hasRequiredCoverage, false);
+    assert.notEqual(conflictingButIncomplete.overallStatus, "MATCH");
+    assert.ok(conflictingButIncomplete.discrepancies.some((item) => item.field === "conflicting_sf9_father_name"));
+  });
+
   // ===========================================================================
   // 4. Complete 7-Document Unified Learner Comparison
   // ===========================================================================

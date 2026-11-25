@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import {
+  fetchStudentDetail,
+  getStudentDetailErrorResponse,
+} from "@/lib/students/studentDetailService";
 
 export async function GET(
   request: NextRequest,
@@ -15,92 +19,37 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { id } = await props.params;
-
-    // Fetch primary student profile
-    const { data: student, error: studentError } = await supabase
-      .from("students")
-      .select("*, schools(id, name, school_id)")
-      .eq("id", id)
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role, account_status")
+      .eq("user_id", user.id)
       .maybeSingle();
 
-    if (studentError || !student) {
-      return NextResponse.json({ error: studentError?.message || "Student not found" }, { status: 404 });
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
     }
 
-    const { data: enrollments, error: enrollmentError } = await (supabase as any)
-      .from("student_enrollments")
-      .select("school_year, grade_level, section, strand_or_track, is_current, enrollment_status, updated_at")
-      .eq("student_id", id)
-      .eq("school_id", student.school_id)
-      .order("is_current", { ascending: false })
-      .order("updated_at", { ascending: false });
-    if (enrollmentError) {
-      throw new Error(`Failed to load learner enrollment contexts: ${enrollmentError.message}`);
+    const userRole = (roleRow.role || "").toLowerCase().trim();
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role cannot access students directory. Students module has been removed from Admin experience.",
+          code: "ADMIN_STUDENTS_REMOVED",
+        },
+        { status: 403 }
+      );
     }
 
-    // Direct attached documents (SF9, SF10, PSA)
-    const { data: directDocs } = await supabase
-      .from("documents")
-      .select("*")
-      .eq("student_id", id)
-      .order("created_at", { ascending: false });
+    const { id } = await props.params;
+    const detail = await fetchStudentDetail(supabase, id);
+    if (!detail) {
+      return NextResponse.json({ error: "Student not found" }, { status: 404 });
+    }
 
-    // Multi-learner roster linkages
-    const { data: sf1Entries } = await (supabase as any)
-      .from("sf1_roster_entries")
-      .select("*, documents(id, original_filename, document_type, school_year, grade_level, section)")
-      .or(`student_id.eq.${id},lrn.eq.${student.lrn}`);
-
-    const { data: sf2Entries } = await (supabase as any)
-      .from("sf2_attendance_entries")
-      .select("*, documents(id, original_filename, document_type, school_year, grade_level, section)")
-      .or(`student_id.eq.${id},lrn.eq.${student.lrn}`);
-
-    const { data: sf5Entries } = await (supabase as any)
-      .from("sf5_promotion_entries")
-      .select("*, documents(id, original_filename, document_type, school_year, grade_level, section)")
-      .or(`student_id.eq.${id},lrn.eq.${student.lrn}`);
-
-    const { data: psaRecords } = await (supabase as any)
-      .from("psa_identity_records")
-      .select("*, documents(id, original_filename, document_type)")
-      .eq("student_id", id);
-
-    // Subject grades & attendance
-    const { data: grades } = await supabase
-      .from("subject_grades")
-      .select("*")
-      .eq("student_id", id)
-      .order("subject", { ascending: true });
-
-    const { data: attendance } = await (supabase as any)
-      .from("attendance_summaries")
-      .select("*")
-      .eq("student_id", id);
-
-    // Cross-document validation history
-    const { data: crossValidations } = await (supabase as any)
-      .from("cross_document_validations")
-      .select("*")
-      .eq("student_id", id)
-      .order("created_at", { ascending: false });
-
-    return NextResponse.json({
-      student,
-      enrollments: enrollments || [],
-      documents: directDocs || [],
-      rosters: {
-        sf1: sf1Entries || [],
-        sf2: sf2Entries || [],
-        sf5: sf5Entries || [],
-        psa: psaRecords || [],
-      },
-      grades: grades || [],
-      attendance: attendance || [],
-      cross_document_validations: crossValidations || [],
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || "Failed to load student" }, { status: 500 });
+    return NextResponse.json(detail);
+  } catch (error) {
+    console.error("[api/students/:id] Failed to load student detail:", error);
+    const response = getStudentDetailErrorResponse();
+    return NextResponse.json(response.body, { status: response.status });
   }
 }

@@ -52,43 +52,40 @@ export function useImageProcessor(
   );
 
   useEffect(() => {
-    if (!rawImage) {
-      setProcessedImage(null);
-      setIsProcessing(false);
-      return;
-    }
-
-    if (!rawImage.startsWith("data:image/")) {
-      setProcessedImage(null);
-      setIsProcessing(false);
-      return;
-    }
-
     let cancelled = false;
-    setIsProcessing(true);
-
-    const img = new Image();
-    img.onload = () => {
-      if (cancelled) return;
-      // We wrap in setTimeout to allow the UI to show the processing state
-      setTimeout(() => {
-        if (cancelled) return;
-        const resolved = lockDefaults
-          ? DEFAULT_ADJUSTMENTS
-          : resolveEffectiveAdjustments(debouncedAdjustments);
-        setProcessedImage(processImage(img, resolved));
+    const timer = setTimeout(() => {
+      if (!rawImage || !rawImage.startsWith("data:image/")) {
+        setProcessedImage(null);
         setIsProcessing(false);
-      }, 0);
-    };
-    img.onerror = () => {
-      if (cancelled) return;
-      setProcessedImage(null);
-      setIsProcessing(false);
-    };
-    img.src = rawImage;
+        return;
+      }
+
+      setIsProcessing(true);
+
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled) return;
+        // We wrap in setTimeout to allow the UI to show the processing state
+        setTimeout(() => {
+          if (cancelled) return;
+          const resolved = lockDefaults
+            ? DEFAULT_ADJUSTMENTS
+            : resolveEffectiveAdjustments(debouncedAdjustments);
+          setProcessedImage(processImage(img, resolved));
+          setIsProcessing(false);
+        }, 0);
+      };
+      img.onerror = () => {
+        if (cancelled) return;
+        setProcessedImage(null);
+        setIsProcessing(false);
+      };
+      img.src = rawImage;
+    }, 0);
     
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [rawImage, debouncedAdjustments, lockDefaults]);
 

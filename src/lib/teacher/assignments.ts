@@ -12,6 +12,8 @@ export interface TeacherAssignmentRecord {
   grade_level: string;
   section: string;
   strand_or_track: string | null;
+  strand_id?: string | null;
+  section_id?: string | null;
   subject_taught: string | null;
   semester: string | null;
   assignment_type: AssignmentType;

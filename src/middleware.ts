@@ -84,10 +84,12 @@ export async function middleware(request: NextRequest) {
     const needsRoleCheck = 
       pathname.startsWith('/admin') || 
       pathname.startsWith('/principal') || 
-      pathname.startsWith('/upload') || 
+      pathname.startsWith('/upload') ||
+      pathname.startsWith('/psa-scan') ||
       pathname.startsWith('/review') ||
       pathname.startsWith('/documents') ||
       pathname.startsWith('/students') ||
+      pathname.startsWith('/compare') ||
       pathname.startsWith('/settings');
 
     if (needsRoleCheck) {
@@ -126,8 +128,25 @@ export async function middleware(request: NextRequest) {
       }
 
       // 3.3 Principal accounts are monitoring-only:
-      // Mahigpit na binablock ang Principal sa /upload at /review para maiwasan ang self-encoding
-      if (role === 'principal' && (pathname.startsWith('/upload') || pathname.startsWith('/review'))) {
+      // Mahigpit na binablock ang Principal sa /upload, /psa-scan, at /review para maiwasan ang self-encoding
+      if (role === 'principal' && (pathname.startsWith('/upload') || pathname.startsWith('/review') || pathname.startsWith('/psa-scan'))) {
+        const url = request.nextUrl.clone();
+        url.pathname = '/';
+        return NextResponse.redirect(url);
+      }
+
+      // 3.4 Admin accounts:
+      // Mahigpit na binablock ang Admin sa mga tinanggal na module: Documents, Comparison, Review Queue, Students, Upload, at PSA Scanner
+      // Dinadala sila pabalik sa default landing page (Dashboard: '/')
+      if (
+        role === 'admin' &&
+        (pathname.startsWith('/documents') ||
+         pathname.startsWith('/compare') ||
+         pathname.startsWith('/review') ||
+         pathname.startsWith('/students') ||
+         pathname.startsWith('/upload') ||
+         pathname.startsWith('/psa-scan'))
+      ) {
         const url = request.nextUrl.clone();
         url.pathname = '/';
         return NextResponse.redirect(url);

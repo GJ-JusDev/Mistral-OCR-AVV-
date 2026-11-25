@@ -196,18 +196,17 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
     let dobCol = -1;
     let ageCol = -1;
     let religionCol = -1;
-    let addressCol = -1;
-    let parentsCol = -1;
     let remarksCol = -1;
 
-    // Build row map with content and polygon
-    const rowMap = new Map<number, Map<number, { content: string; polygon?: number[] }>>();
+    // Build row map with content, polygon, and pageNumber
+    const rowMap = new Map<number, Map<number, { content: string; polygon?: number[]; pageNumber?: number }>>();
     for (const cell of table.cells) {
       const r = cell.rowIndex;
       const c = cell.columnIndex;
       if (!rowMap.has(r)) rowMap.set(r, new Map());
       const poly = cell.boundingRegions?.[0]?.polygon || cell.polygon || undefined;
-      rowMap.get(r)!.set(c, { content: cell.content?.trim() || "", polygon: poly });
+      const pageNum = cell.boundingRegions?.[0]?.pageNumber || cell.pageNumber || undefined;
+      rowMap.get(r)!.set(c, { content: cell.content?.trim() || "", polygon: poly, pageNumber: pageNum });
     }
 
     const sortedRows = Array.from(rowMap.keys()).sort((a, b) => a - b);
@@ -235,8 +234,6 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
           else if (v.includes("birth") || v.includes("kapanganakan")) dobCol = c;
           else if (v.includes("age") || v.includes("edad")) ageCol = c;
           else if (v.includes("religion") || v.includes("relihiyon")) religionCol = c;
-          else if (v.includes("address") || v.includes("tirahan")) addressCol = c;
-          else if (v.includes("parent") || v.includes("father") || v.includes("mother")) parentsCol = c;
           else if (v.includes("remark") || v.includes("puna")) remarksCol = c;
         }
         continue;
@@ -304,7 +301,7 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
       const tablePageNum =
         table._pageNumber ||
         table.boundingRegions?.[0]?.pageNumber ||
-        rowCells.get(nameCol)?.polygon?.[0]?.pageNumber ||
+        rowCells.get(nameCol)?.pageNumber ||
         1;
 
       learners.push({
@@ -510,7 +507,7 @@ export function splitLearnerName(raw: string): {
   const tokens = withoutSuffix.split(/\s+/);
   if (tokens.length === 1) {
     const val = toTitleCase(tokens[0]);
-    return { lastName: val, firstName: val, suffix };
+    return { lastName: "Unknown", firstName: val, suffix };
   }
   if (tokens.length === 2) {
     return { lastName: toTitleCase(tokens[1]), firstName: toTitleCase(tokens[0]), suffix };

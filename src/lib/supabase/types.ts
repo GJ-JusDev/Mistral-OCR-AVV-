@@ -463,6 +463,13 @@ export interface Database {
           middle_name: string | null
           middle_initial: string | null
           has_no_middle_name: boolean | null
+          requested_grade_level: string | null
+          requested_strand: string | null
+          requested_section: string | null
+          requested_strand_id: string | null
+          requested_section_id: string | null
+          request_status: string | null
+          request_submitted_at: string | null
           created_at: string | null
         }
         Insert: {
@@ -487,6 +494,13 @@ export interface Database {
           middle_name?: string | null
           middle_initial?: string | null
           has_no_middle_name?: boolean | null
+          requested_grade_level?: string | null
+          requested_strand?: string | null
+          requested_section?: string | null
+          requested_strand_id?: string | null
+          requested_section_id?: string | null
+          request_status?: string | null
+          request_submitted_at?: string | null
           created_at?: string | null
         }
         Update: {
@@ -511,6 +525,13 @@ export interface Database {
           middle_name?: string | null
           middle_initial?: string | null
           has_no_middle_name?: boolean | null
+          requested_grade_level?: string | null
+          requested_strand?: string | null
+          requested_section?: string | null
+          requested_strand_id?: string | null
+          requested_section_id?: string | null
+          request_status?: string | null
+          request_submitted_at?: string | null
           created_at?: string | null
         }
         Relationships: any[]
@@ -866,6 +887,8 @@ export interface Database {
           grade_level: string
           section: string
           strand_or_track: string | null
+          strand_id: string | null
+          section_id: string | null
           subject_taught: string | null
           semester: string | null
           assignment_type: "class_adviser" | "subject_teacher"
@@ -883,6 +906,8 @@ export interface Database {
           grade_level: string
           section: string
           strand_or_track?: string | null
+          strand_id?: string | null
+          section_id?: string | null
           subject_taught?: string | null
           semester?: string | null
           assignment_type: "class_adviser" | "subject_teacher"
@@ -900,12 +925,80 @@ export interface Database {
           grade_level?: string
           section?: string
           strand_or_track?: string | null
+          strand_id?: string | null
+          section_id?: string | null
           subject_taught?: string | null
           semester?: string | null
           assignment_type?: "class_adviser" | "subject_teacher"
           assignment_status?: "active" | "inactive"
           created_by?: string | null
           updated_by?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      school_strands: {
+        Row: {
+          id: string
+          school_id: string
+          name: string
+          code: string
+          description: string | null
+          is_active: boolean
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          school_id: string
+          name: string
+          code: string
+          description?: string | null
+          is_active?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          school_id?: string
+          name?: string
+          code?: string
+          description?: string | null
+          is_active?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: any[]
+      }
+      school_sections: {
+        Row: {
+          id: string
+          school_id: string
+          strand_id: string
+          name: string
+          capacity: number
+          is_active: boolean
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          school_id: string
+          strand_id: string
+          name: string
+          capacity?: number
+          is_active?: boolean
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          school_id?: string
+          strand_id?: string
+          name?: string
+          capacity?: number
+          is_active?: boolean
           created_at?: string
           updated_at?: string
         }

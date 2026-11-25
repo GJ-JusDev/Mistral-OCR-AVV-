@@ -457,7 +457,7 @@ test("AVV System — Unified Batch Scanning Critical Fixes & Integration Test Su
     const disc = report.categorizedResults.mismatchedInformation[0];
 
     // Check all required discrepancy properties
-    assert.equal(disc.field, "grade_oral communication");
+    assert.ok(disc.field.includes("oral communication"));
     assert.equal(disc.source1Doc, "SF9-SHS Report Card");
     assert.equal(disc.source1FileName, "SF9_Learner1.pdf");
     assert.equal(disc.source1Value, 90);

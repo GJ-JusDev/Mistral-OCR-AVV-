@@ -112,11 +112,91 @@ export class OcrOrchestrator {
   }
 
   /**
+   * FALLBACK ELIGIBILITY CHECK
+   *
+   * Azure AI Document Intelligence MUST remain the primary OCR provider throughout the AVV System.
+   * Azure is ALWAYS attempted first.
+   *
+   * Only specifically identified Azure provider limitations that Mistral OCR can reasonably
+   * handle (such as Azure-specific image-dimension boundaries or Azure format rejections)
+   * are eligible for fallback.
+   *
+   * Strictly EXCLUDED from fallback:
+   * - Authentication errors (401, 403, INVALID_API_KEY)
+   * - Missing required Azure configuration
+   * - Malformed application payloads (bad JSON, missing image data, corrupt data URLs)
+   * - Unsupported user upload types (e.g., text/plain, audio)
+   * - Generic 400 Bad Requests without an eligible Azure restriction code
+   */
+  public isEligibleForFallback(error: any): boolean {
+    if (!error) return false;
+
+    // 1. Never fallback for authentication, permission, or missing configuration errors
+    if (
+      error.status === 401 ||
+      error.status === 403 ||
+      error.code === "INVALID_API_KEY" ||
+      error.code === "UNAUTHORIZED" ||
+      error.code === "FORBIDDEN" ||
+      /authentication failed|not configured|invalid api key|invalid endpoint format|invalid api version/i.test(
+        error.message || ""
+      )
+    ) {
+      return false;
+    }
+
+    // 2. Never fallback for client payload validation errors or unsupported upload formats
+    if (
+      error.code === "UNSUPPORTED_FORMAT" ||
+      /invalid data url|payload cannot be empty|unsupported document format|valid image or document payload is required/i.test(
+        error.message || ""
+      )
+    ) {
+      return false;
+    }
+
+    // 3. Transient server errors, rate limits, timeouts, and network connection drops remain eligible
+    if (this.isRetriableError(error)) {
+      return true;
+    }
+
+    // 4. Specifically identified Azure-specific 400 restrictions that Mistral can reasonably handle:
+    // e.g. Azure image dimension limits (min 50x50, max 10000x10000), Azure tier file-size limits
+    // (e.g. Free Tier 4MB limit / sync limits), or Azure-specific content/format constraints
+    if (error.status === 400 && error.provider === "azure") {
+      const codeStr = `${error.diagnosticCode || ""} ${error.innerCode || ""} ${error.azureErrorCode || ""}`.toLowerCase();
+      const msgStr = (error.message || "").toLowerCase();
+
+      const isAzureServiceLimitOrFormatRestriction =
+        codeStr.includes("invalidcontentdimensions") ||
+        codeStr.includes("invalidcontentlength") ||
+        codeStr.includes("invalidimagesize") ||
+        codeStr.includes("invalidimage") ||
+        codeStr.includes("invalidcontent") ||
+        codeStr.includes("invalidpayload") ||
+        codeStr.includes("unsupportedmediatype") ||
+        msgStr.includes("dimension") ||
+        msgStr.includes("dimensions are out of range") ||
+        msgStr.includes("input image dimensions") ||
+        msgStr.includes("too large") ||
+        msgStr.includes("maximum file size") ||
+        msgStr.includes("file size") ||
+        msgStr.includes("content length");
+
+      if (isAzureServiceLimitOrFormatRestriction) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * EXECUTE OCR PIPELINE WITH DIRECT FAILOVER
    *
-   * 1. Attempts Primary Provider (Azure AI Document Intelligence).
-   * 2. On retriable failure (rate limit 429, timeout, service down), falls directly
-   *    back to Mistral OCR without contacting any deleted local service.
+   * 1. Attempts Primary Provider (Azure AI Document Intelligence) first.
+   * 2. On eligible failure (rate limit 429, timeout, service down, or eligible Azure dimension restriction),
+   *    falls directly back to Mistral OCR.
    * 3. Seamlessly returns extracted text and candidate fields to maintain review pipeline.
    */
   public async execute(input: OcrInput): Promise<OcrProviderResult> {
@@ -124,9 +204,9 @@ export class OcrOrchestrator {
       // Step 1: Attempt Primary Provider (Azure AI Document Intelligence)
       return await this.primary.recognize(input);
     } catch (primaryError: any) {
-      const isRetriable = this.enableFallback && this.isRetriableError(primaryError);
+      const canFallback = this.enableFallback && this.isEligibleForFallback(primaryError);
 
-      if (!isRetriable) {
+      if (!canFallback) {
         throw primaryError;
       }
 

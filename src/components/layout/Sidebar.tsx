@@ -17,14 +17,15 @@ import {
   X,
   UserCheck,
   ShieldCheck,
-  School,
-  ArrowLeftRight
+  ArrowLeftRight,
+  FileCheck
 } from "lucide-react";
 import { LogoutButton } from "@/components/auth/LogoutButton";
 
 const teacherNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Upload Document", href: "/upload", icon: Upload },
+  { name: "PSA Scanner", href: "/psa-scan", icon: FileCheck },
   { name: "Documents", href: "/documents", icon: FileText },
   { name: "Document Comparison", href: "/compare", icon: ArrowLeftRight },
   { name: "Review Queue", href: "/review", icon: CheckSquare },
@@ -34,10 +35,6 @@ const teacherNavigation = [
 
 const adminNavigation = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
-  { name: "Documents", href: "/documents", icon: FileText },
-  { name: "Document Comparison", href: "/compare", icon: ArrowLeftRight },
-  { name: "Review Queue", href: "/review", icon: CheckSquare },
-  { name: "Students", href: "/students", icon: Users },
   { name: "Institutional Reports", href: "/reports", icon: BarChart3 },
   { name: "User Management", href: "/admin/users", icon: UserCheck },
   { name: "Teacher Registry", href: "/admin/teacher-registry", icon: GraduationCap },

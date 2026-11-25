@@ -13,13 +13,10 @@ import {
   FileText,
   ArrowLeftRight,
   Search,
-  Filter,
-  ShieldCheck,
   Eye,
   RefreshCw,
-  ExternalLink,
 } from "lucide-react";
-import type { SectionSf1Sf2ValidationResult, DiscrepancyItem } from "@/lib/validation/crossDocumentEngine";
+import type { SectionSf1Sf2ValidationResult } from "@/lib/validation/crossDocumentEngine";
 
 interface Sf1Sf2CrossValidationViewProps {
   initialSf1Id?: string;
@@ -34,7 +31,6 @@ export default function Sf1Sf2CrossValidationView({
   const [sf2Documents, setSf2Documents] = useState<any[]>([]);
   const [selectedSf1Id, setSelectedSf1Id] = useState<string>(initialSf1Id || "");
   const [selectedSf2Id, setSelectedSf2Id] = useState<string>(initialSf2Id || "");
-  const [isLoadingDocs, setIsLoadingDocs] = useState(true);
 
   const [isValidating, setIsValidating] = useState(false);
   const [validationResult, setValidationResult] = useState<SectionSf1Sf2ValidationResult | null>(null);
@@ -47,7 +43,6 @@ export default function Sf1Sf2CrossValidationView({
   // Fetch teacher's available SF1 and SF2 documents
   useEffect(() => {
     async function loadDocuments() {
-      setIsLoadingDocs(true);
       try {
         const res = await fetch("/api/documents?limit=100");
         if (res.ok) {
@@ -67,8 +62,6 @@ export default function Sf1Sf2CrossValidationView({
         }
       } catch (err: any) {
         console.error("Failed to load section documents:", err);
-      } finally {
-        setIsLoadingDocs(false);
       }
     }
     loadDocuments();
@@ -117,7 +110,10 @@ export default function Sf1Sf2CrossValidationView({
   // Trigger automatically if IDs were provided in props
   useEffect(() => {
     if (initialSf1Id && initialSf2Id && !validationResult) {
-      runCrossValidation();
+      const timer = setTimeout(() => {
+        void runCrossValidation();
+      }, 0);
+      return () => clearTimeout(timer);
     }
   }, [initialSf1Id, initialSf2Id]);
 
@@ -341,9 +337,14 @@ export default function Sf1Sf2CrossValidationView({
                 <p className="text-xs opacity-90 mt-0.5">{validationResult.summaryMessage}</p>
               </div>
             </div>
-            <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full uppercase self-start sm:self-auto border bg-white/60 dark:bg-zinc-900/60">
-              {validationResult.status}
-            </span>
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+                On-Demand Audit (Not Persisted)
+              </span>
+              <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full uppercase border bg-white/60 dark:bg-zinc-900/60">
+                {validationResult.status}
+              </span>
+            </div>
           </div>
 
           {/* Metrics Summary Grid */}

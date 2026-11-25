@@ -3,14 +3,13 @@ import { createClient as createSupabaseServiceClient } from "@supabase/supabase-
 import { createClient } from "@/lib/supabase/server";
 import {
   segmentMultiPageDocument,
-  reclassifyDocumentSegment,
   DOCUMENT_TITLES,
   type DocumentSegment,
   type ShsDocumentType,
 } from "@/lib/validation/batchDocumentSegmenter";
 import {
   evaluateBatchCrossDocumentValidation,
-  type BatchValidationReport,
+  rebuildBatchValidationReportFromPersistedResults,
 } from "@/lib/validation/batchCrossDocumentValidator";
 import { parseGradesText } from "@/lib/ocr/gradesParser";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
@@ -27,6 +26,7 @@ import {
 import { isValidLrn, normalizeLrn, normalizeSex } from "@/lib/validation/patterns";
 import { normalizeDate } from "@/lib/validation/nameComparison";
 import {
+  buildPersistedValidationResponse,
   evaluateStudentValidation,
   fetchStudentValidationRecords,
   persistStudentValidation,
@@ -152,6 +152,11 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const assignmentId = searchParams.get("assignmentId");
+    const requestedBatchId = (
+      searchParams.get("batchId") ||
+      searchParams.get("batch_id") ||
+      ""
+    ).trim();
 
     // 3. Strict Mandatory assignmentId Check
     if (!assignmentId || typeof assignmentId !== "string" || !assignmentId.trim()) {
@@ -159,6 +164,15 @@ export async function GET(request: NextRequest) {
         { error: "Forbidden: assignmentId is required to retrieve batch scan results.", code: "ASSIGNMENT_REQUIRED" },
         { status: 403 }
       );
+    }
+
+    // If client explicitly indicated a new batch or requested no saved batch, do not restore previous batch
+    if (requestedBatchId === "new" || requestedBatchId === "none") {
+      return NextResponse.json({
+        hasSavedBatch: false,
+        batchId: null,
+        message: "New batch active. No previous batch restored.",
+      });
     }
 
     const { data: assignmentData } = await supabase
@@ -195,7 +209,7 @@ export async function GET(request: NextRequest) {
     const verifiedSection = assignmentData.section || "";
 
     // Fetch active documents created by this teacher for this section
-    const { data: docs, error: docError } = await supabase
+    let docQuery = supabase
       .from("documents")
       .select("*")
       .eq("school_id", roleRow.school_id)
@@ -206,14 +220,40 @@ export async function GET(request: NextRequest) {
       .not("status", "in", '("archived","rejected")')
       .order("created_at", { ascending: false });
 
+    if (requestedBatchId && typeof (docQuery as any).contains === "function") {
+      docQuery = (docQuery as any).contains("extracted_fields", { batch_id: requestedBatchId });
+    }
+
+    const { data: rawDocs, error: docError } = await docQuery;
+
     if (docError) {
       return NextResponse.json({ error: docError.message }, { status: 500 });
+    }
+
+    let docs = (rawDocs || []) as any[];
+
+    // Enforce strict batch isolation
+    if (requestedBatchId) {
+      docs = docs.filter((d: any) => {
+        const ef = (d.extracted_fields as any) || {};
+        return ef.batch_id === requestedBatchId;
+      });
+    } else {
+      // If no explicit batchId was requested, isolate to the most recent batch's batch_id
+      // to prevent historical batches from leaking across sessions
+      const latestBatchId = (docs[0]?.extracted_fields as any)?.batch_id;
+      if (latestBatchId) {
+        docs = docs.filter((d: any) => (d.extracted_fields as any)?.batch_id === latestBatchId);
+      }
     }
 
     if (!docs || docs.length === 0) {
       return NextResponse.json({
         hasSavedBatch: false,
-        message: "No previous batch validation found for this assigned section.",
+        batchId: requestedBatchId || null,
+        message: requestedBatchId
+          ? `No saved documents found for batch ${requestedBatchId}.`
+          : "No previous batch validation found for this assigned section.",
       });
     }
 
@@ -300,9 +340,12 @@ export async function GET(request: NextRequest) {
       extractedData[segId] = ef;
     }
 
+    const activeBatchId =
+      requestedBatchId || (docs[0]?.extracted_fields as any)?.batch_id || `batch-${verifiedSection}`;
+
     // Evaluate cross-document validation for the restored records
     const report = evaluateBatchCrossDocumentValidation({
-      batchId: (docs[0]?.extracted_fields as any)?.batch_id || `batch-${verifiedSection}`,
+      batchId: activeBatchId,
       schoolYear: verifiedSchoolYear,
       gradeLevel: verifiedGradeLevel,
       section: verifiedSection,
@@ -312,6 +355,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       hasSavedBatch: true,
+      batchId: activeBatchId,
       report,
       segments,
       extractedData,
@@ -568,7 +612,7 @@ export async function POST(request: NextRequest) {
       // Satisfies Migration 026 RLS policy: folder 1 = auth.uid(), folder 2 = active assignment UUID
       const storagePath = `${user.id}/${assignment.id}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeFilename}`;
 
-      const { data: uploadData, error: uploadErr } = await supabase.storage
+      const { error: uploadErr } = await supabase.storage
         .from("documents")
         .upload(storagePath, fileObj.buffer, {
           contentType: fileObj.mimeType,
@@ -1162,18 +1206,29 @@ export async function POST(request: NextRequest) {
           const fullEvaluation = evaluateStudentValidation(validationContext, savedRecords, {
             duplicateWarnings: dossier.duplicateWarnings,
           });
-          await persistStudentValidation(verifiedCrossValDb, validationContext, fullEvaluation);
+          const persistedRows = await persistStudentValidation(verifiedCrossValDb, validationContext, fullEvaluation);
+          const persistedValidation = buildPersistedValidationResponse(persistedRows);
+          const persistedConsolidated = persistedValidation.consolidated;
+          if (!persistedConsolidated) {
+            throw new Error("Persisted consolidated validation record was not returned after batch persistence.");
+          }
 
-          dossier.unifiedMatrix = fullEvaluation.unifiedResult.fieldsMatrix;
-          dossier.pairwiseResults = fullEvaluation.pairwiseResults;
+          dossier.unifiedMatrix = persistedValidation.matrix;
+          dossier.persistedDiscrepancies = persistedValidation.discrepancies;
+          dossier.pairwiseResults = persistedValidation.pairwiseResults;
           dossier.overallStatus =
-            fullEvaluation.unifiedResult.overallStatus === "MISMATCH"
+            persistedConsolidated.status === "MISMATCH"
               ? "MISMATCH"
-              : fullEvaluation.unifiedResult.overallStatus === "MATCH"
+              : persistedConsolidated.status === "MATCH" || persistedConsolidated.status === "RESOLVED"
               ? "MATCH"
-              : fullEvaluation.unifiedResult.overallStatus === "NOT_APPLICABLE"
+              : persistedConsolidated.status === "NOT_APPLICABLE"
               ? "INCOMPLETE"
               : "NEEDS_REVIEW";
+          dossier.validationPersistence = {
+            status: "PERSISTED",
+            consolidatedValidationId: persistedConsolidated.id || null,
+            persistedStatus: persistedConsolidated.status,
+          };
           dossier.documentPresence = {
             ...dossier.documentPresence,
             sf1: savedRecords.sf1Entries.length > 0,
@@ -1203,33 +1258,35 @@ export async function POST(request: NextRequest) {
             raw: doc.extracted_fields || {},
             fileName: doc.original_filename || undefined,
           }));
-
-          for (const [index, discrepancy] of fullEvaluation.unifiedResult.discrepancies.entries()) {
-            if (dossier.discrepancies.some((item) => item.field === discrepancy.field && item.reason === discrepancy.description)) {
-              continue;
-            }
-            dossier.discrepancies.push({
-              id: `cross-batch-${index}-${discrepancy.field}`,
-              learnerName: dossier.fullName,
-              lrn: dossier.lrn,
-              field: discrepancy.field,
-              source1Doc: "Unified Cross-Document Matrix",
-              source1Value: discrepancy.sourceValue,
-              source2Doc: "Referenced DepEd Record",
-              source2Value: discrepancy.targetValue,
-              severity: discrepancy.severity === "ERROR" ? "WARNING" : discrepancy.severity,
-              category: discrepancy.severity === "CRITICAL" ? "MISMATCH" : "NEEDS_VERIFICATION",
-              reason: discrepancy.description,
-              recommendedAction: "Review the complete learner validation matrix and source documents.",
-            });
-          }
         } catch (crossErr) {
           const message = crossErr instanceof Error ? crossErr.message : String(crossErr);
           console.error(`[scan/batch] Cross-validation persistence failed for LRN ${dossier.lrn}:`, message);
           crossValidationPersistenceErrors.push({ lrn: dossier.lrn, error: message });
+          dossier.validationPersistence = {
+            status: "REQUIRES_IDENTITY_RESOLUTION",
+            reason: `Cross-validation persistence failed: ${message}`,
+            recommendedAction: "Review student record in database and retry batch validation.",
+          };
+          dossier.overallStatus = "NEEDS_REVIEW";
+          dossier.unifiedMatrix = [];
+          dossier.persistedDiscrepancies = [];
+          dossier.pairwiseResults = [];
         }
+      } else {
+        dossier.validationPersistence = {
+          status: "REQUIRES_IDENTITY_RESOLUTION",
+          reason: "Missing or invalid 12-digit LRN prevents database persistence and canonical student linking.",
+          recommendedAction: "Resolve learner identity manually by inspecting the original scanned document and assigning a valid 12-digit LRN.",
+        };
+        dossier.overallStatus = "NEEDS_REVIEW";
+        dossier.unifiedMatrix = [];
+        dossier.persistedDiscrepancies = [];
+        dossier.pairwiseResults = [];
       }
     }
+
+    // Rebuild the report categories and summary metrics strictly from persisted validation data
+    rebuildBatchValidationReportFromPersistedResults(validationReport);
 
     // -------------------------------------------------------------------------
     // Phase 4: Audit Logging
@@ -1281,6 +1338,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      batchId: validationReport.batchId || batchId,
       report: validationReport,
       segments,
       extractedData: extractedSegmentData,

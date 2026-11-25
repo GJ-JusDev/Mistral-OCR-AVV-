@@ -90,6 +90,9 @@ export default function PreScanAssignmentGate({
       }
     }
     load();
+    return () => {
+      active = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -163,8 +166,18 @@ export default function PreScanAssignmentGate({
             <p className="mt-1">
               {hasSubjectAssignments
                 ? "Only an officially assigned and active Class Adviser may scan SF9/SF10 documents or perform OCR extraction. You currently hold Subject Teacher assignment(s) only, which permit reviewing and editing grades for your assigned subjects without document scanning."
-                : "You must hold an active Class Adviser assignment from your school administrator before scanning SF9 or SF10 documents. Please request an advisory assignment from your administrator."}
+                : "You must hold an active, approved Class Adviser assignment before scanning SHS documents. Please select and request an advisory section from your dashboard, or await administrator approval."}
             </p>
+            {!hasSubjectAssignments && (
+              <div className="mt-3">
+                <a
+                  href="/"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold shadow-xs transition-colors"
+                >
+                  Go to Dashboard &amp; Select Advisory
+                </a>
+              </div>
+            )}
           </div>
         </div>
       </div>

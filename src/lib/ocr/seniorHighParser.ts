@@ -152,6 +152,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       if (tableResult.general_average !== undefined) {
         fields.general_average = tableResult.general_average;
       }
+      Object.assign(fields, updateExtractedFieldsAverages(fields));
 
       // FIX 3: Before returning early with Azure academic grades, fallback to text
       // if Azure layout tables did not detect the Observed Values or Grading Scale tables
@@ -299,11 +300,11 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         let totalVal: string | undefined = undefined;
 
         if (attendanceTotalColIdx > 0 && attendanceTotalColIdx < cells.length) {
-          values = cells.slice(1, attendanceTotalColIdx).map(c => c.replace(/[^0-9.]/g, '').trim());
-          const rawTotal = cells[attendanceTotalColIdx]?.replace(/[^0-9.]/g, '').trim();
-          totalVal = rawTotal !== "" ? rawTotal : undefined;
+          values = cells.slice(1, attendanceTotalColIdx).map(c => c.trim());
+          const rawTotal = cells[attendanceTotalColIdx]?.trim();
+          totalVal = rawTotal && rawTotal !== "" && rawTotal !== "-" && rawTotal !== "—" ? rawTotal : undefined;
         } else {
-          values = cells.slice(1).map(c => c.replace(/[^0-9.]/g, '').trim());
+          values = cells.slice(1).map(c => c.trim());
         }
 
         attendance.push({
@@ -544,6 +545,239 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         else grades.push(record);
         continue;
       }
+
+      // Pattern 3: Subject line with inline numbers, e.g. "Oral Communication 88 88 88" or "Oral Communication 88 88"
+      const inlineNumsMatch = cleanedPlain.match(
+        /^([A-Za-z0-9\s\-\/\(\)&,\.]{3,}?)\s+(\d{2}(?:\.\d+)?)\s+(\d{2}(?:\.\d+)?)(?:\s+(\d{2}(?:\.\d+)?))?$/
+      );
+      if (
+        inlineNumsMatch &&
+        !/^(?:general\s+average|gen\.?\s*ave|quarter|semester|subjects?)/i.test(inlineNumsMatch[1].trim()) &&
+        !EXCLUDED_OBSERVED_VALUES_KEYWORDS.some(kw => inlineNumsMatch[1].toLowerCase().includes(kw)) &&
+        !EXCLUDED_GRADING_SCALE_KEYWORDS.some(kw => inlineNumsMatch[1].toLowerCase().includes(kw))
+      ) {
+        const subject = inlineNumsMatch[1].trim();
+        const numA = parseFloat(inlineNumsMatch[2]);
+        const numB = parseFloat(inlineNumsMatch[3]);
+        const numC = inlineNumsMatch[4] !== undefined ? parseFloat(inlineNumsMatch[4]) : undefined;
+        const semForLine = currentSemester || "1st Semester";
+
+        let qA: number | undefined;
+        let qB: number | undefined;
+        let finalVal: number | undefined;
+
+        if (numC !== undefined) {
+          qA = numA;
+          qB = numB;
+          finalVal = numC;
+        } else {
+          qA = numA;
+          qB = numB;
+          finalVal = undefined;
+        }
+
+        const isSem2 = semForLine === "2nd Semester";
+        const record: GradeRecord = {
+          category: currentCategory || undefined,
+          subject,
+          semester: semForLine,
+          grade_level: currentGradeLevel,
+          grading_period_scheme: "quarterly_semestral",
+          q1: !isSem2 ? qA : undefined,
+          q2: !isSem2 ? qB : undefined,
+          q3: isSem2 ? qA : undefined,
+          q4: isSem2 ? qB : undefined,
+          final: finalVal,
+          sem1_final_grade: !isSem2 ? finalVal : undefined,
+          sem2_final_grade: isSem2 ? finalVal : undefined,
+          status: finalVal !== undefined ? (finalVal < 75 ? "Failed" : "Passed") : "Missing",
+          needsVerification: finalVal === undefined || (finalVal >= 72 && finalVal <= 77),
+        };
+
+        const existingIdx = grades.findIndex(
+          g =>
+            g.grade_level === currentGradeLevel &&
+            g.semester === semForLine &&
+            g.subject.toLowerCase() === subject.toLowerCase()
+        );
+        if (existingIdx >= 0) grades[existingIdx] = record;
+        else grades.push(record);
+        continue;
+      }
+
+      // Pattern 4: Plain multiline list where Subject is on line i, and consecutive numbers are on lines i+1, i+2, i+3
+      // e.g.:
+      // Oral Communication
+      // 88
+      // 88
+      // 88
+      if (
+        currentSemester &&
+        /^[A-Za-z]/.test(cleanedPlain) &&
+        cleanedPlain.length >= 3 &&
+        !/^\d+$/.test(cleanedPlain) &&
+        !cleanedPlain.includes(":") &&
+        !CATEGORY_KEYWORDS.some(kw => cleanedPlain.toLowerCase() === kw || cleanedPlain.toLowerCase().includes(kw)) &&
+        !EXCLUDED_OBSERVED_VALUES_KEYWORDS.some(kw => cleanedPlain.toLowerCase().includes(kw)) &&
+        !EXCLUDED_GRADING_SCALE_KEYWORDS.some(kw => cleanedPlain.toLowerCase().includes(kw)) &&
+        !/^(?:general\s+average|gen\.?\s*ave|quarter|subjects?|semester\s+final\s+grade|first\s+semester|second\s+semester)/i.test(cleanedPlain)
+      ) {
+        const subject = cleanedPlain;
+        const nums: (number | string)[] = [];
+        let j = i + 1;
+        while (j < lines.length && nums.length < 3) {
+          const nextLine = lines[j].trim();
+          if (/^\d{2}(?:\.\d+)?$/.test(nextLine)) {
+            nums.push(parseFloat(nextLine));
+            j++;
+          } else if (nextLine.toUpperCase() === "INC" || nextLine.toUpperCase() === "DRP") {
+            nums.push(nextLine.toUpperCase());
+            j++;
+          } else {
+            break;
+          }
+        }
+
+        if (nums.length >= 1) {
+          const semForLine = currentSemester;
+          const isSem2 = semForLine === "2nd Semester";
+          let qA: number | undefined;
+          let qB: number | undefined;
+          let finalVal: number | string | undefined;
+
+          if (nums.length >= 3) {
+            qA = typeof nums[0] === "number" ? nums[0] : undefined;
+            qB = typeof nums[1] === "number" ? nums[1] : undefined;
+            finalVal = nums[2];
+          } else if (nums.length === 2) {
+            qA = typeof nums[0] === "number" ? nums[0] : undefined;
+            qB = typeof nums[1] === "number" ? nums[1] : undefined;
+            finalVal = undefined;
+          } else if (nums.length === 1) {
+            finalVal = nums[0];
+          }
+
+          const isNum = typeof finalVal === "number" && !isNaN(finalVal);
+          const record: GradeRecord = {
+            category: currentCategory || undefined,
+            subject,
+            semester: semForLine,
+            grade_level: currentGradeLevel,
+            grading_period_scheme: "quarterly_semestral",
+            q1: !isSem2 ? qA : undefined,
+            q2: !isSem2 ? qB : undefined,
+            q3: isSem2 ? qA : undefined,
+            q4: isSem2 ? qB : undefined,
+            final: finalVal,
+            sem1_final_grade: !isSem2 ? (isNum ? (finalVal as number) : undefined) : undefined,
+            sem2_final_grade: isSem2 ? (isNum ? (finalVal as number) : undefined) : undefined,
+            status: finalVal !== undefined ? (isNum ? ((finalVal as number) < 75 ? "Failed" : "Passed") : "Missing") : "Missing",
+            needsVerification: finalVal === undefined || (!isNum) || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
+          };
+
+          const existingIdx = grades.findIndex(
+            g =>
+              g.grade_level === currentGradeLevel &&
+              g.semester === semForLine &&
+              g.subject.toLowerCase() === subject.toLowerCase()
+          );
+          if (existingIdx >= 0) grades[existingIdx] = record;
+          else grades.push(record);
+
+          i = j - 1; // Advance loop past consumed numeric lines
+          continue;
+        }
+      }
+    }
+  }
+
+  // Multiline Attendance Extraction Fallback (when attendance tables were not markdown pipes)
+  if (attendance.length === 0) {
+    const monthKeywords = ["jun", "jon", "jul", "aug", "sept", "sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may"];
+    let detectedMonths: string[] = [];
+
+    for (let idx = 0; idx < lines.length; idx++) {
+      const lower = lines[idx].toLowerCase();
+      if (lower.includes("report on attendance") || lower.includes("attendance")) {
+        for (let j = idx + 1; j < Math.min(idx + 25, lines.length); j++) {
+          const tokens = lines[j].trim().split(/\s+/);
+          for (const tok of tokens) {
+            const cMonth = tok.toLowerCase().replace(/[^a-z]/g, "");
+            if (monthKeywords.includes(cMonth)) {
+              const norm = cMonth === "jon" ? "Jun" : tok;
+              if (!detectedMonths.includes(norm)) {
+                detectedMonths.push(norm);
+              }
+            } else if (cMonth === "total") {
+              break;
+            }
+          }
+          if (lines[j].toLowerCase().includes("no. of school days") || detectedMonths.length >= 10) {
+            break;
+          }
+        }
+      }
+
+      const isMetric = [
+        "no. of school days",
+        "school days",
+        "days present",
+        "no. of days present",
+        "days absent",
+        "no. of days absent",
+      ].some((m) => lower === m || lower.startsWith(m));
+
+      if (isMetric && detectedMonths.length > 0) {
+        const label = lines[idx];
+        const values: string[] = [];
+        let totalVal: string | undefined = undefined;
+
+        let j = idx + 1;
+        while (j < lines.length) {
+          const next = lines[j].trim();
+          if (!next) {
+            j++;
+            continue;
+          }
+          // Handle repeated 0s e.g. "000000000000"
+          if (/^0{5,}$/.test(next)) {
+            for (let k = 0; k < detectedMonths.length; k++) {
+              values.push("0");
+            }
+            totalVal = "0";
+            j++;
+            break;
+          }
+
+          const tokens = next.split(/\s+/);
+          const isAttendanceToken = (tok: string) =>
+            /^\d+(?:\.\d+)?$/.test(tok) ||
+            /^[-—–_]$/.test(tok) ||
+            /^(?:blank|none|n\/?a|na|null|missing|unreadable|:unselected:)$/i.test(tok);
+
+          if (tokens.length > 0 && tokens.every(isAttendanceToken)) {
+            values.push(...tokens);
+            j++;
+            if (values.length >= detectedMonths.length + 1) {
+              totalVal = values.pop();
+              break;
+            } else if (values.length === detectedMonths.length) {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+
+        if (values.length > 0) {
+          attendance.push({ label, values, total: totalVal });
+          idx = j - 1;
+        }
+      }
+    }
+
+    if (detectedMonths.length > 0 && attendance.length > 0) {
+      fields.attendance_months = detectedMonths;
     }
   }
 
@@ -578,6 +812,9 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         computed_school_days: evaluated.computedSchoolDays,
         computed_days_present: evaluated.computedDaysPresent,
         computed_days_absent: evaluated.computedDaysAbsent,
+        is_school_days_complete: evaluated.isSchoolDaysComplete,
+        is_days_present_complete: evaluated.isDaysPresentComplete,
+        is_days_absent_complete: evaluated.isDaysAbsentComplete,
         printed_school_days: evaluated.printedSchoolDays,
         printed_days_present: evaluated.printedDaysPresent,
         printed_days_absent: evaluated.printedDaysAbsent,

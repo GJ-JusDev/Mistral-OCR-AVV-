@@ -37,7 +37,10 @@ export default function DocumentsPage() {
   }
 
   useEffect(() => {
-    fetchDocuments();
+    const timer = setTimeout(() => {
+      void fetchDocuments();
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   const filteredDocuments = useMemo(() => {

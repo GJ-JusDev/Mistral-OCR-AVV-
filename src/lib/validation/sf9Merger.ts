@@ -11,10 +11,10 @@
  * - Enforces mandatory Teacher review upon discrepancy
  */
 
-import type { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
+import type { ExtractedFields, GradeRecord } from "@/types/documents";
 import { cleanSubjectName } from "./documentComparator";
 import { validateSf9CrossSideCompatibility } from "./documentClassifier";
-import { getAuthoritativeSemesterFinalGrade } from "./gradeUtils";
+import { getAuthoritativeSemesterFinalGrade, updateExtractedFieldsAverages } from "./gradeUtils";
 
 export interface MergedSf9Result {
   unifiedFields: ExtractedFields;
@@ -69,10 +69,10 @@ export function mergeSf9FrontAndBack(
   }
 
   // Name resolution
-  let name = front.name || back.name;
-  let firstName = front.first_name || back.first_name;
-  let lastName = front.last_name || back.last_name;
-  let middleName = front.middle_name || back.middle_name;
+  const name = front.name || back.name;
+  const firstName = front.first_name || back.first_name;
+  const lastName = front.last_name || back.last_name;
+  const middleName = front.middle_name || back.middle_name;
 
   if (front.last_name && back.last_name && front.last_name.toLowerCase() !== back.last_name.toLowerCase()) {
     identityConflicts.push(`Conflicting Last Names: Front has "${front.last_name}", Back has "${back.last_name}".`);
@@ -99,7 +99,8 @@ export function mergeSf9FrontAndBack(
 
       const normSubject = cleanSubjectName(g.subject);
       const semTag = (g.semester || "").toLowerCase().trim();
-      const uniqueKey = `${semTag}::${normSubject}`;
+      const glTag = (g.grade_level || "").toLowerCase().trim();
+      const uniqueKey = `${glTag}::${semTag}::${normSubject}`;
 
       const authoritativeFinal = getAuthoritativeSemesterFinalGrade(g);
       const taggedGrade: GradeRecord = {
@@ -126,10 +127,14 @@ export function mergeSf9FrontAndBack(
           // Both sides agree or one provides quarters while other provides final grade: merge fields
           existing.grade = {
             ...existing.grade,
+            grade_level: existing.grade.grade_level || g.grade_level,
+            semester: existing.grade.semester || g.semester,
             q1: existing.grade.q1 ?? g.q1,
             q2: existing.grade.q2 ?? g.q2,
             q3: existing.grade.q3 ?? g.q3,
             q4: existing.grade.q4 ?? g.q4,
+            sem1_final_grade: existing.grade.sem1_final_grade ?? g.sem1_final_grade,
+            sem2_final_grade: existing.grade.sem2_final_grade ?? g.sem2_final_grade,
             final: existing.grade.final ?? g.final,
             remark: existing.grade.remark || g.remark,
             source_side: "both",
@@ -157,6 +162,7 @@ export function mergeSf9FrontAndBack(
   const attendancePercentage = back.attendance_percentage ?? front.attendance_percentage;
   const absencePercentage = back.absence_percentage ?? front.absence_percentage;
   const attendanceRiskStatus = back.attendance_risk_status || front.attendance_risk_status;
+  const attendanceDiscrepancyDetails = back.attendance_discrepancy_details || front.attendance_discrepancy_details;
 
   // 5. General Average
   const generalAverage = back.general_average ?? front.general_average;
@@ -198,6 +204,7 @@ export function mergeSf9FrontAndBack(
     attendance_percentage: attendancePercentage,
     absence_percentage: absencePercentage,
     attendance_risk_status: attendanceRiskStatus,
+    attendance_discrepancy_details: attendanceDiscrepancyDetails,
     general_average: generalAverage,
     observed_values: back.observed_values || front.observed_values,
     learner_progress_achievement: back.learner_progress_achievement || front.learner_progress_achievement,
@@ -206,8 +213,10 @@ export function mergeSf9FrontAndBack(
     ocr_model: [front.ocr_model, back.ocr_model].filter(Boolean).join(" + ") || "azure-layout",
   };
 
+  const finalizedFields = updateExtractedFieldsAverages(unifiedFields);
+
   return {
-    unifiedFields,
+    unifiedFields: finalizedFields,
     isSameLearner,
     hasIdentityConflict,
     hasAcademicConflict,
@@ -253,8 +262,16 @@ export function mergeSf10Pages(
   const primary = identityPage?.fields || {};
   const allGrades: GradeRecord[] = [];
   let attendance = primary.attendance || [];
+  let attendanceMonths = primary.attendance_months;
   let attendanceTotals = primary.attendance_totals;
+  let attendancePercentage = primary.attendance_percentage;
+  let absencePercentage = primary.absence_percentage;
+  let attendanceRiskStatus = primary.attendance_risk_status;
+  let attendanceDiscrepancyDetails = primary.attendance_discrepancy_details;
   let generalAverage = primary.general_average;
+  let observedValues = primary.observed_values;
+  let learnerProgressAchievement = primary.learner_progress_achievement;
+  let gradingScale = primary.grading_scale;
 
   for (const p of pages) {
     if (!p.fields) continue;
@@ -274,11 +291,35 @@ export function mergeSf10Pages(
     if (f.attendance && f.attendance.length > 0 && (!attendance || attendance.length === 0)) {
       attendance = f.attendance;
     }
+    if (f.attendance_months && (!attendanceMonths || attendanceMonths.length === 0)) {
+      attendanceMonths = f.attendance_months;
+    }
     if (f.attendance_totals && !attendanceTotals) {
       attendanceTotals = f.attendance_totals;
     }
+    if (f.attendance_percentage !== undefined && attendancePercentage === undefined) {
+      attendancePercentage = f.attendance_percentage;
+    }
+    if (f.absence_percentage !== undefined && absencePercentage === undefined) {
+      absencePercentage = f.absence_percentage;
+    }
+    if (f.attendance_risk_status && !attendanceRiskStatus) {
+      attendanceRiskStatus = f.attendance_risk_status;
+    }
+    if (f.attendance_discrepancy_details && !attendanceDiscrepancyDetails) {
+      attendanceDiscrepancyDetails = f.attendance_discrepancy_details;
+    }
     if (f.general_average !== undefined && generalAverage === undefined) {
       generalAverage = f.general_average;
+    }
+    if (f.observed_values && !observedValues) {
+      observedValues = f.observed_values;
+    }
+    if (f.learner_progress_achievement && !learnerProgressAchievement) {
+      learnerProgressAchievement = f.learner_progress_achievement;
+    }
+    if (f.grading_scale && !gradingScale) {
+      gradingScale = f.grading_scale;
     }
   }
 
@@ -286,8 +327,16 @@ export function mergeSf10Pages(
     ...primary,
     grades: allGrades,
     attendance,
+    attendance_months: attendanceMonths,
     attendance_totals: attendanceTotals,
+    attendance_percentage: attendancePercentage,
+    absence_percentage: absencePercentage,
+    attendance_risk_status: attendanceRiskStatus,
+    attendance_discrepancy_details: attendanceDiscrepancyDetails,
     general_average: generalAverage,
+    observed_values: observedValues,
+    learner_progress_achievement: learnerProgressAchievement,
+    grading_scale: gradingScale,
   };
 
   return {

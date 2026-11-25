@@ -34,7 +34,10 @@ export default function ReviewQueuePage() {
   }
 
   useEffect(() => {
-    fetchReviewQueue();
+    const timer = setTimeout(() => {
+      void fetchReviewQueue();
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   const handleRowClick = (doc: any) => {

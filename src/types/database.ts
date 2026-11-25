@@ -17,6 +17,42 @@ export type StudentIdentityConflictRow = Tables['student_identity_conflicts']['R
 export type TeacherAssignmentType = 'class_adviser' | 'subject_teacher'
 export type TeacherAssignmentStatus = 'active' | 'inactive'
 
+export interface SchoolStrandRow {
+  id: string
+  school_id: string
+  name: string
+  code: string
+  description?: string | null
+  is_active: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface SchoolSectionRow {
+  id: string
+  school_id: string
+  strand_id: string
+  name: string
+  capacity: number
+  is_active: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface TeacherAdvisoryRequestItem {
+  user_id: string
+  full_name: string
+  email: string | null
+  account_status: string
+  requested_grade_level: string | null
+  requested_strand: string | null
+  requested_section: string | null
+  requested_strand_id: string | null
+  requested_section_id: string | null
+  request_status: string | null
+  request_submitted_at: string | null
+}
+
 export type DocumentStatus = 'submitted' | 'extracted' | 'validated' | 'needs_review' | 'corrected' | 'approved' | 'rejected' | 'archived'
 export type DeletionRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'COMPLETED' | 'FAILED'
 export type DocumentType = 'sf1' | 'sf2' | 'sf5' | 'sf9' | 'sf10' | 'birth_cert'

@@ -8,62 +8,91 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
   const uploadPagePath = path.join(rootDir, "src/app/upload/page.tsx");
   const documentsRoutePath = path.join(rootDir, "src/app/api/documents/route.ts");
   const uploadWorkflowPath = path.join(rootDir, "src/lib/upload/uploadWorkflow.ts");
+  const batchScanRoutePath = path.join(rootDir, "src/app/api/scan/batch/route.ts");
 
   const uploadPageSrc = fs.readFileSync(uploadPagePath, "utf8");
   const documentsRouteSrc = fs.readFileSync(documentsRoutePath, "utf8");
   const uploadWorkflowSrc = fs.readFileSync(uploadWorkflowPath, "utf8");
+  const batchScanRouteSrc = fs.readFileSync(batchScanRoutePath, "utf8");
 
   // ── 1. Static Source Code Verification ─────────────────────────────────────
-  await t.test("1. UploadPage implements synchronous submission guard using useRef", () => {
+  await t.test("1. UploadPage implements synchronous submission guard and stage state machine", () => {
     assert.ok(
-      uploadPageSrc.includes("isSubmittingRef = useRef<boolean>(false)"),
-      "UploadPage must declare isSubmittingRef with useRef<boolean>(false)"
+      uploadPageSrc.includes("const [stage, setStage] = useState<UnifiedProcessingStage>(\"idle\")"),
+      "UploadPage must declare UnifiedProcessingStage state initialized to 'idle'"
     );
     assert.ok(
-      uploadPageSrc.includes("if (isSubmittingRef.current)") &&
-      uploadPageSrc.includes("isSubmittingRef.current = true"),
-      "UploadPage must check and set isSubmittingRef.current synchronously before any async operations"
+      uploadPageSrc.includes('disabled={stage !== "idle" && stage !== "error"}'),
+      "UploadPage must disable primary action button synchronously whenever stage is active"
     );
     assert.ok(
-      uploadPageSrc.includes("submissionIdRef = useRef<string | null>(null)"),
-      "UploadPage must track client submission UUID in submissionIdRef"
+      uploadPageSrc.includes("if (!ensureTeacherAssignmentConfirmed()) return;"),
+      "UploadPage must synchronously enforce active class adviser assignment before starting scan"
+    );
+    assert.ok(
+      uploadPageSrc.includes("if (filePreviews.length === 0)"),
+      "UploadPage must synchronously block execution if no files are staged"
     );
   });
 
-  await t.test("2. UploadPage displays the exact required progress status messages in order", () => {
-    const requiredStatuses = [
-      "Uploading document...",
-      "Processing OCR...",
-      "Saving extracted information...",
-      "Preparing Review Queue...",
+  await t.test("2. UploadPage displays unified batch processing stages and progress status messages", () => {
+    assert.ok(
+      uploadPageSrc.includes("const STAGES_CONFIG"),
+      "UploadPage must configure batch progression in STAGES_CONFIG"
+    );
+
+    const requiredStages = [
+      "uploading",
+      "classifying",
+      "extracting",
+      "organizing",
+      "matching",
+      "validating",
+      "completed",
     ];
 
-    for (const status of requiredStatuses) {
+    for (const stg of requiredStages) {
       assert.ok(
-        uploadPageSrc.includes(status),
-        `UploadPage must include exact status string: "${status}"`
+        uploadPageSrc.includes(`id: "${stg}"`),
+        `STAGES_CONFIG must define stage id "${stg}"`
       );
     }
+
+    assert.ok(
+      uploadPageSrc.includes('setStage("uploading")') &&
+      uploadPageSrc.includes('setStage("classifying")') &&
+      uploadPageSrc.includes('setStage("extracting")') &&
+      uploadPageSrc.includes('setStage("organizing")') &&
+      uploadPageSrc.includes('setStage("matching")') &&
+      uploadPageSrc.includes('setStage("validating")') &&
+      uploadPageSrc.includes('setStage("completed")'),
+      "UploadPage must update stage through all 7 sequential processing stages"
+    );
+
+    assert.ok(
+      uploadPageSrc.includes("setStatusMessage("),
+      "UploadPage must dynamically update user-facing status messages"
+    );
   });
 
-  await t.test("3. UploadPage automatically redirects to /review after persistence without resetting lock", () => {
+  await t.test("3. UploadPage renders UnifiedBatchResultsView upon completion without redirecting away", () => {
     assert.ok(
-      uploadPageSrc.includes("useRouter") && uploadPageSrc.includes("router.push('/review')"),
-      "UploadPage must import useRouter and execute router.push('/review') upon successful persistence"
-    );
-
-    // Verify submission lock is not reset on success
-    const successRedirectBlock = uploadPageSrc.match(
-      /setUploadProgressStatus\("Preparing Review Queue\.\.\."\);[\s\S]*?router\.push\('\/review'\);/
+      uploadPageSrc.includes('stage === "completed" && validationReport ? (') &&
+      uploadPageSrc.includes("<UnifiedBatchResultsView"),
+      "UploadPage must render UnifiedBatchResultsView in-place once validationReport is ready"
     );
     assert.ok(
-      successRedirectBlock,
-      "UploadPage must transition to Preparing Review Queue... and router.push('/review')"
+      uploadPageSrc.includes('report={validationReport}'),
+      "UploadPage must bind the consolidated batch validationReport to UnifiedBatchResultsView"
+    );
+    assert.ok(
+      uploadPageSrc.includes('initialStage="stage_b"'),
+      "UploadPage must preserve the 5-stage results navigation (Stages A-E) in UnifiedBatchResultsView"
     );
     assert.strictEqual(
-      successRedirectBlock[0].includes("isSubmittingRef.current = false"),
+      uploadPageSrc.includes("router.push('/review')"),
       false,
-      "Submission lock must NOT be reset to false upon successful redirect to avoid race duplicates"
+      "UploadPage must NOT redirect to /review on completion, preserving in-page five-stage validation dossier"
     );
   });
 
@@ -117,7 +146,7 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
     );
   });
 
-  await t.test("9. Storage Idempotency: API upload route supports deterministic documentId and upsert", () => {
+  await t.test("9. Storage Idempotency: API routes support deduplication, deterministic paths, and upsert", () => {
     const uploadApiSrc = fs.readFileSync(path.join(rootDir, "src/app/api/upload/route.ts"), "utf8");
     assert.ok(
       uploadApiSrc.includes("upsert: true"),
@@ -128,20 +157,37 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
       "Storage upload route must accept client documentId for deterministic pathing"
     );
     assert.ok(
-      uploadPageSrc.includes("storageCacheRef"),
-      "Upload page must cache storage URLs in storageCacheRef to avoid duplicate uploads"
+      batchScanRouteSrc.includes("uniqueFilesToUpload"),
+      "Batch scan API must deduplicate unique source files using uniqueFilesToUpload Map before uploading"
+    );
+    assert.ok(
+      batchScanRouteSrc.includes("upsert: true"),
+      "Batch storage upload must specify upsert: true for idempotent storage writes"
+    );
+    assert.ok(
+      batchScanRouteSrc.includes("storagePath"),
+      "Batch scan API must track deterministic storagePath per file"
+    );
+    assert.ok(
+      batchScanRouteSrc.includes("retry_segment") || batchScanRouteSrc.includes("retrySegmentId"),
+      "Batch scan API must support retrying individual segments without re-uploading duplicate binaries"
     );
   });
 
-  await t.test("10. Reset mechanism on new upload: resetSubmissionId clears caches for new documents", () => {
+  await t.test("10. Reset mechanism on new batch: handleStartNewBatch cleanly clears all batch state", () => {
     assert.ok(
-      uploadPageSrc.includes("resetSubmissionId"),
-      "Upload page must define resetSubmissionId callback"
+      uploadPageSrc.includes("handleStartNewBatch"),
+      "Upload page must define handleStartNewBatch callback"
     );
     assert.ok(
-      uploadPageSrc.includes("storageCacheRef.current = null") &&
-      uploadPageSrc.includes("submissionIdRef.current = null"),
-      "resetSubmissionId must reset both submissionIdRef and storageCacheRef"
+      uploadPageSrc.includes("setSelectedFiles([])") &&
+      uploadPageSrc.includes("setFilePreviews([])") &&
+      uploadPageSrc.includes("setDetectedSegments([])") &&
+      uploadPageSrc.includes("setExtractedData({})") &&
+      uploadPageSrc.includes("setValidationReport(null)") &&
+      uploadPageSrc.includes('setStage("idle")') &&
+      uploadPageSrc.includes("setErrorMessage(null)"),
+      "handleStartNewBatch must reset all batch state variables to prevent stale result reuse"
     );
   });
 
@@ -157,40 +203,47 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
   });
 
   // ── 2. Functional Behavioral Simulations ──────────────────────────────────
-  await t.test("7. Simulation: Synchronous guard immediately drops duplicate button clicks", async () => {
+  await t.test("12. Simulation: Synchronous stage guard immediately drops duplicate scan clicks", async () => {
     let callCount = 0;
-    const isSubmittingRef = { current: false };
+    let stage = "idle";
     const progressLog = [];
 
-    async function handleUploadClick() {
-      // Synchronous Guard (Phase 2 requirement)
-      if (isSubmittingRef.current) {
+    async function handleStartScanClick() {
+      // Synchronous Guard matching disabled={stage !== "idle" && stage !== "error"}
+      if (stage !== "idle" && stage !== "error") {
         return { accepted: false, reason: "BLOCKED_BY_GUARD" };
       }
-      isSubmittingRef.current = true;
+      stage = "uploading";
       callCount += 1;
 
-      // Pipeline simulation
-      progressLog.push("Uploading document...");
+      // Batch Pipeline simulation
+      progressLog.push("File Upload");
       await new Promise((resolve) => setTimeout(resolve, 5));
 
-      progressLog.push("Processing OCR...");
+      stage = "classifying";
+      progressLog.push("Document Classification");
       await new Promise((resolve) => setTimeout(resolve, 5));
 
-      progressLog.push("Saving extracted information...");
+      stage = "extracting";
+      progressLog.push("OCR/ICR Extraction");
       await new Promise((resolve) => setTimeout(resolve, 5));
 
-      progressLog.push("Preparing Review Queue...");
-      return { accepted: true, redirect: "/review" };
+      stage = "validating";
+      progressLog.push("Cross-Document Validation");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      stage = "completed";
+      progressLog.push("Validation Report");
+      return { accepted: true, stage: "completed" };
     }
 
-    // Simulate user rapidly clicking Upload button 5 times within the same event cycle
+    // Simulate user rapidly clicking Start Scanning button 5 times within the same event cycle
     const results = await Promise.all([
-      handleUploadClick(),
-      handleUploadClick(),
-      handleUploadClick(),
-      handleUploadClick(),
-      handleUploadClick(),
+      handleStartScanClick(),
+      handleStartScanClick(),
+      handleStartScanClick(),
+      handleStartScanClick(),
+      handleStartScanClick(),
     ]);
 
     // Exactly one click must be accepted
@@ -201,16 +254,17 @@ test("AVV Upload Duplicate Prevention & Automatic Review Queue Redirect Suite", 
     assert.strictEqual(blocked.length, 4, "All 4 subsequent duplicate clicks must be rejected by synchronous guard");
     assert.strictEqual(callCount, 1, "Handler pipeline must run exactly once");
 
-    // All 4 required stages must have executed in exact sequence
+    // All required batch stages must have executed in exact sequence
     assert.deepStrictEqual(progressLog, [
-      "Uploading document...",
-      "Processing OCR...",
-      "Saving extracted information...",
-      "Preparing Review Queue...",
+      "File Upload",
+      "Document Classification",
+      "OCR/ICR Extraction",
+      "Cross-Document Validation",
+      "Validation Report",
     ]);
   });
 
-  await t.test("8. Simulation: Idempotent backend persistence prevents duplicate document records", async () => {
+  await t.test("13. Simulation: Idempotent backend persistence prevents duplicate document records", async () => {
     const documentDatabase = new Map();
 
     function persistDocument(body, user) {

@@ -13,6 +13,8 @@ const MIGRATION_022_PATH = path.resolve(rootDir, "supabase", "migrations", "022_
 const MIGRATION_023_PATH = path.resolve(rootDir, "supabase", "migrations", "023_shs_roster_documents_and_multi_learner_child_tables.sql");
 const MIGRATION_024_PATH = path.resolve(rootDir, "supabase", "migrations", "024_shs_cross_document_validation_engine.sql");
 const MIGRATION_025_PATH = path.resolve(rootDir, "supabase", "migrations", "025_shs_roster_security_and_rls_hardening.sql");
+const MIGRATION_031_PATH = path.resolve(rootDir, "supabase", "migrations", "031_avv_validation_context_and_atomic_persistence.sql");
+const MIGRATION_032_PATH = path.resolve(rootDir, "supabase", "migrations", "032_avv_null_context_and_batch_persistence.sql");
 
 const SCHOOL_ID = "a0000000-0000-0000-0000-000000000001";
 const ADMIN_ID = "10000000-0000-0000-0000-000000000001";
@@ -529,4 +531,597 @@ test("SHS Migrations 023-025 Replay & Verification Suite (PostgreSQL / PGlite)",
     });
     assert.equal(adminRead.length, 1, "Admin must have full access");
   });
+});
+
+test("Migration 031 removes conflicting AVV read policies and persists atomically", async () => {
+  const db = await bootstrapFullDatabase();
+
+  await db.exec(`
+    CREATE POLICY "Authorized read sf1_roster_entries"
+      ON public.sf1_roster_entries FOR SELECT TO authenticated
+      USING (
+        public.is_admin()
+        OR (public.is_principal() AND school_id = public.get_auth_user_school_id())
+        OR (
+          public.is_approved_teacher()
+          AND public.can_teacher_access_section(school_id, school_year, grade_level, section)
+        )
+      );
+    CREATE POLICY "Authorized read sf2_attendance_entries"
+      ON public.sf2_attendance_entries FOR SELECT TO authenticated
+      USING (
+        public.is_admin()
+        OR (public.is_principal() AND school_id = public.get_auth_user_school_id())
+        OR (
+          public.is_approved_teacher()
+          AND public.can_teacher_access_section(school_id, school_year, grade_level, section)
+        )
+      );
+    CREATE POLICY "Authorized read sf5_promotion_entries"
+      ON public.sf5_promotion_entries FOR SELECT TO authenticated
+      USING (
+        public.is_admin()
+        OR (public.is_principal() AND school_id = public.get_auth_user_school_id())
+        OR (
+          public.is_approved_teacher()
+          AND public.can_teacher_access_section(school_id, school_year, grade_level, section)
+        )
+      );
+    CREATE POLICY "Authorized read cross_document_validations"
+      ON public.cross_document_validations FOR SELECT TO authenticated
+      USING (
+        public.is_admin()
+        OR (public.is_principal() AND school_id = public.get_auth_user_school_id())
+        OR (
+          public.is_approved_teacher()
+          AND EXISTS (
+            SELECT 1
+            FROM public.student_enrollments enrollment
+            WHERE enrollment.student_id = cross_document_validations.student_id
+              AND enrollment.school_id = cross_document_validations.school_id
+              AND enrollment.enrollment_status = 'active'
+              AND public.can_teacher_access_section(
+                enrollment.school_id,
+                enrollment.school_year,
+                enrollment.grade_level,
+                enrollment.section
+              )
+          )
+        )
+      );
+  `);
+
+  const student = await db.query(`
+    INSERT INTO public.students (school_id, lrn, first_name, last_name, grade_level)
+    VALUES ($1, '109345000088', 'Test', 'Learner', 'Grade 11')
+    RETURNING id;
+  `, [SCHOOL_ID]);
+  const studentId = student.rows[0].id;
+
+  await db.query(`
+    INSERT INTO public.student_enrollments (
+      student_id, school_id, school_year, grade_level, section, adviser_user_id,
+      enrollment_status, is_current
+    ) VALUES ($1, $2, '2026-2027', 'Grade 11', 'Rizal', $3, 'active', true);
+  `, [studentId, SCHOOL_ID, TEACHER_A_ID]);
+
+  const rowIds = {};
+  for (const year of ["2025-2026", "2026-2027"]) {
+    for (const type of ["sf1", "sf2", "sf5"]) {
+      const document = await db.query(`
+        INSERT INTO public.documents (
+          school_id, document_type, image_url, status, school_year, grade_level, section
+        ) VALUES ($1, $2, $3, 'needs_review', $4, 'Grade 11', 'Rizal')
+        RETURNING id;
+      `, [SCHOOL_ID, type, `https://storage.local/${type}-${year}.jpg`, year]);
+      rowIds[`${type}-${year}`] = document.rows[0].id;
+    }
+
+    await db.query(`
+      INSERT INTO public.sf1_roster_entries (
+        document_id, student_id, school_id, school_year, grade_level, section, track, strand,
+        semester, lrn, last_name, first_name, sex, row_index
+      ) VALUES ($1, $2, $3, $4, 'Grade 11', 'Rizal', 'Academic', 'STEM',
+        '1st Semester', '109345000088', 'Learner', 'Test', 'M', 1);
+    `, [rowIds[`sf1-${year}`], studentId, SCHOOL_ID, year]);
+    await db.query(`
+      INSERT INTO public.sf2_attendance_entries (
+        document_id, student_id, school_id, school_year, grade_level, section, month,
+        lrn, learner_name, row_index
+      ) VALUES ($1, $2, $3, $4, 'Grade 11', 'Rizal', 'August',
+        '109345000088', 'Learner, Test', 1);
+    `, [rowIds[`sf2-${year}`], studentId, SCHOOL_ID, year]);
+    await db.query(`
+      INSERT INTO public.sf5_promotion_entries (
+        document_id, student_id, school_id, school_year, grade_level, section, track, strand,
+        semester, form_variant, lrn, learner_name, action_taken, row_index
+      ) VALUES ($1, $2, $3, $4, 'Grade 11', 'Rizal', 'Academic', 'STEM',
+        '1st Semester', 'SF5A-SHS', '109345000088', 'Learner, Test', 'COMPLETE', 1);
+    `, [rowIds[`sf5-${year}`], studentId, SCHOOL_ID, year]);
+
+    await db.query(`
+      INSERT INTO public.cross_document_validations (
+        student_id, school_id, school_year, grade_level, semester, validation_type, status
+      ) VALUES ($1, $2, $3, 'Grade 11', '1st Semester', 'SF1_SF2', 'NEEDS_VERIFICATION');
+    `, [studentId, SCHOOL_ID, year]);
+  }
+
+  const legacyReadCount = await asUser(db, TEACHER_A_ID, async () => {
+    const result = await db.query("SELECT COUNT(*)::int AS count FROM public.sf1_roster_entries;");
+    return result.rows[0].count;
+  });
+  assert.equal(legacyReadCount, 2, "The fixture reproduces the older policy's cross-year OR access.");
+
+  await db.exec(fs.readFileSync(MIGRATION_031_PATH, "utf8"));
+  await db.query(`
+    UPDATE public.cross_document_validations
+    SET section = 'Rizal'
+    WHERE school_year = '2025-2026';
+  `);
+  await db.exec(`
+    ALTER TABLE public.cross_document_validations
+      DROP CONSTRAINT chk_cross_validation_key_requires_context;
+  `);
+  const incompleteContext = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, persistence_key, status
+    ) VALUES ($1, $2, '2027-2028', NULL, 'Rizal', 'Full Year',
+      'SF1_SF9', 'LEGACY_NULL_GRADE_KEY', 'NEEDS_VERIFICATION')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID]);
+  const incompleteGradeId = incompleteContext.rows[0].id;
+  const emptySection = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, persistence_key, status
+    ) VALUES ($1, $2, '2027-2028', 'Grade 11', '', 'Full Year',
+      'SF1_SF9', 'LEGACY_EMPTY_SECTION_KEY', 'NEEDS_VERIFICATION')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID]);
+  const emptySectionId = emptySection.rows[0].id;
+  const whitespaceSection = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, persistence_key, status, resolved_by, resolved_at, resolution_notes
+    ) VALUES ($1, $2, '2027-2028', 'Grade 11', '   ', 'Full Year',
+      'SF1_SF9', 'LEGACY_WHITESPACE_SECTION_KEY', 'RESOLVED', $3,
+      TIMESTAMPTZ '2026-01-02 03:04:05+00', 'Historical resolution retained')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID, TEACHER_A_ID]);
+  const whitespaceSectionId = whitespaceSection.rows[0].id;
+  const blankSchoolYear = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, persistence_key, status
+    ) VALUES ($1, $2, '   ', 'Grade 11', 'Rizal', 'Full Year',
+      'SF1_SF9', 'LEGACY_BLANK_YEAR_KEY', 'NEEDS_VERIFICATION')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID]);
+  const blankSchoolYearId = blankSchoolYear.rows[0].id;
+  await db.exec(`
+    ALTER TABLE public.cross_document_validations
+      ADD CONSTRAINT chk_cross_validation_key_requires_context
+      CHECK (
+        persistence_key IS NULL
+        OR (section IS NOT NULL AND BTRIM(section) <> '' AND grade_level IS NOT NULL)
+      ) NOT VALID;
+  `);
+  const incompleteSection = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, status
+    ) VALUES ($1, $2, '2027-2028', 'Grade 11', NULL, 'Full Year',
+      'SF1_SF9', 'NEEDS_VERIFICATION')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID]);
+  const incompleteSectionId = incompleteSection.rows[0].id;
+  const completeContext = await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, status
+    ) VALUES ($1, $2, '2027-2028', 'Grade 11', 'Rizal', 'Full Year',
+      'SF1_SF5', 'NEEDS_VERIFICATION')
+    RETURNING id;
+  `, [studentId, SCHOOL_ID]);
+
+  await db.exec(fs.readFileSync(MIGRATION_032_PATH, "utf8"));
+  const repairedContexts = await db.query(`
+    SELECT id, grade_level, section, persistence_key
+    FROM public.cross_document_validations
+    WHERE id IN ($1, $2, $3, $4, $5, $6);
+  `, [
+    incompleteGradeId,
+    emptySectionId,
+    whitespaceSectionId,
+    blankSchoolYearId,
+    incompleteSectionId,
+    completeContext.rows[0].id,
+  ]);
+  const byId = new Map(repairedContexts.rows.map((row) => [row.id, row]));
+  assert.equal(byId.get(incompleteGradeId).persistence_key, null, "Unknown grade must not receive a persistence key.");
+  assert.equal(byId.get(incompleteSectionId).persistence_key, null, "Unknown section must not receive a persistence key.");
+  assert.equal(byId.get(emptySectionId).persistence_key, null, "Empty section must not retain a persistence key.");
+  assert.equal(byId.get(whitespaceSectionId).persistence_key, null, "Whitespace-only section must not retain a persistence key.");
+  assert.equal(byId.get(blankSchoolYearId).persistence_key, null, "Blank school year must not receive a persistence key.");
+  assert.equal(
+    byId.get(completeContext.rows[0].id).persistence_key,
+    "PAIR|SF1_SF5|Full Year||",
+    "Complete academic context receives its scoped key."
+  );
+  await db.query(`
+    UPDATE public.cross_document_validations
+    SET status = 'RESOLVED', resolved_by = $2, resolved_at = NOW(), resolution_notes = 'Reviewed legacy context'
+    WHERE id = $1;
+  `, [incompleteGradeId, TEACHER_A_ID]);
+  const resolvedIncomplete = await db.query(`
+    SELECT status, persistence_key, resolution_notes
+    FROM public.cross_document_validations
+    WHERE id = $1;
+  `, [incompleteGradeId]);
+  assert.equal(resolvedIncomplete.rows[0].status, "RESOLVED");
+  assert.equal(resolvedIncomplete.rows[0].persistence_key, null);
+  assert.equal(resolvedIncomplete.rows[0].resolution_notes, "Reviewed legacy context");
+  await db.query(`
+    UPDATE public.cross_document_validations
+    SET status = 'RESOLVED', resolved_by = $2, resolved_at = NOW(), resolution_notes = 'Reviewed empty-section context'
+    WHERE id = $1;
+  `, [emptySectionId, TEACHER_A_ID]);
+  await db.query(`
+    UPDATE public.cross_document_validations
+    SET updated_at = NOW()
+    WHERE id = $1;
+  `, [incompleteSectionId]);
+  const preservedHistoricalResolution = await db.query(`
+    SELECT status, persistence_key, resolved_by, resolved_at, resolution_notes
+    FROM public.cross_document_validations
+    WHERE id = $1;
+  `, [whitespaceSectionId]);
+  assert.equal(preservedHistoricalResolution.rows[0].status, "RESOLVED");
+  assert.equal(preservedHistoricalResolution.rows[0].persistence_key, null);
+  assert.equal(preservedHistoricalResolution.rows[0].resolved_by, TEACHER_A_ID);
+  assert.equal(preservedHistoricalResolution.rows[0].resolved_at.toISOString(), "2026-01-02T03:04:05.000Z");
+  assert.equal(preservedHistoricalResolution.rows[0].resolution_notes, "Historical resolution retained");
+
+  const policies = await db.query(`
+    SELECT tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename IN (
+        'sf1_roster_entries', 'sf2_attendance_entries',
+        'sf5_promotion_entries', 'cross_document_validations'
+      );
+  `);
+  const policyNames = new Set(policies.rows.map((row) => row.policyname));
+  for (const legacyPolicy of [
+    "Teacher access on sf1_roster_entries",
+    "Teacher access on sf2_attendance_entries",
+    "Teacher access on sf5_promotion_entries",
+    "Teacher read on cross_document_validations",
+  ]) {
+    assert.equal(policyNames.has(legacyPolicy), false, `${legacyPolicy} must be removed`);
+  }
+  for (const scopedPolicy of [
+    "Authorized read sf1_roster_entries",
+    "Authorized read sf2_attendance_entries",
+    "Authorized read sf5_promotion_entries",
+    "Authorized read cross_document_validations",
+  ]) {
+    assert.equal(policyNames.has(scopedPolicy), true, `${scopedPolicy} must remain`);
+  }
+  const rpcPrivileges = await db.query(`
+    SELECT
+      has_function_privilege('authenticated', 'public.persist_cross_document_validation(jsonb)', 'EXECUTE') AS authenticated_can_persist,
+      has_function_privilege('service_role', 'public.persist_cross_document_validation(jsonb)', 'EXECUTE') AS service_role_can_persist,
+      has_function_privilege('authenticated', 'public.persist_cross_document_validation_batch(jsonb)', 'EXECUTE') AS authenticated_can_batch,
+      has_function_privilege('service_role', 'public.persist_cross_document_validation_batch(jsonb)', 'EXECUTE') AS service_role_can_batch;
+  `);
+  assert.equal(rpcPrivileges.rows[0].authenticated_can_persist, false);
+  assert.equal(rpcPrivileges.rows[0].service_role_can_persist, true);
+  assert.equal(rpcPrivileges.rows[0].authenticated_can_batch, false);
+  assert.equal(rpcPrivileges.rows[0].service_role_can_batch, true);
+
+  for (const table of [
+    "sf1_roster_entries",
+    "sf2_attendance_entries",
+    "sf5_promotion_entries",
+    "cross_document_validations",
+  ]) {
+    const years = await asUser(db, TEACHER_A_ID, async () => {
+      const result = await db.query(`SELECT DISTINCT school_year FROM public.${table} ORDER BY school_year;`);
+      return result.rows.map((row) => row.school_year);
+    });
+    assert.deepEqual(years, ["2026-2027"], `${table} reads must match the teacher's exact school year`);
+  }
+
+  const persistenceContext = {
+    student_id: studentId,
+    school_id: SCHOOL_ID,
+    school_year: "2026-2027",
+    grade_level: "Grade 11",
+    section: "Rizal",
+    semester: "1st Semester",
+    validation_type: "SF1_SF2",
+    source_doc1_id: rowIds["sf1-2026-2027"],
+    source_doc2_id: rowIds["sf2-2026-2027"],
+    source_signature: null,
+    persistence_key: `PAIR|SF1_SF2|1st Semester|${rowIds["sf1-2026-2027"]}|${rowIds["sf2-2026-2027"]}`,
+    comparison_results: [{ sourceDocumentIds: [rowIds["sf1-2026-2027"], rowIds["sf2-2026-2027"]] }],
+    discrepancy_details: [{ message: "Initial discrepancy" }],
+    status: "MISMATCH",
+    needs_human_review: true,
+  };
+  const persist = (payload) => db.query(
+    "SELECT * FROM public.persist_cross_document_validation($1::jsonb);",
+    [JSON.stringify(payload)]
+  );
+  const invalidPersistencePayloads = [
+    { ...persistenceContext, school_year: null },
+    { ...persistenceContext, school_year: "" },
+    { ...persistenceContext, school_year: "   " },
+    { ...persistenceContext, grade_level: null },
+    { ...persistenceContext, grade_level: "Grade 10" },
+    { ...persistenceContext, section: null },
+    { ...persistenceContext, section: "   " },
+    { ...persistenceContext, school_id: "00000000-0000-0000-0000-000000000001" },
+    { ...persistenceContext, persistence_key: "NOT_THE_CANONICAL_KEY" },
+    { ...persistenceContext, persistence_key: "   " },
+  ];
+  for (const invalidPayload of invalidPersistencePayloads) {
+    await assert.rejects(
+      () => persist(invalidPayload),
+      /complete validation context and persistence key are required/i
+    );
+    await assert.rejects(
+      () => db.query(
+        "SELECT public.persist_cross_document_validation_batch($1::jsonb);",
+        [JSON.stringify([invalidPayload])]
+      ),
+      /missing or invalid context or payload fields/i
+    );
+  }
+  const initial = await persist(persistenceContext);
+  await persist({
+    ...persistenceContext,
+    comparison_results: [{ message: "Updated comparison" }],
+  });
+  let count = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM public.cross_document_validations
+    WHERE persistence_key = $1;
+  `, [persistenceContext.persistence_key]);
+  assert.equal(count.rows[0].count, 1, "Repeated writes must use one unique context key.");
+  assert.deepEqual(initial.rows[0].comparison_results, persistenceContext.comparison_results);
+
+  await db.query(`
+    UPDATE public.cross_document_validations
+    SET status = 'RESOLVED',
+        resolved_by = $2,
+        resolved_at = NOW(),
+        resolution_notes = 'Teacher decision'
+    WHERE id = $1;
+  `, [initial.rows[0].id, TEACHER_A_ID]);
+  const beforeResolvedWrite = await db.query(`
+    SELECT comparison_results, resolved_by, resolved_at, resolution_notes
+    FROM public.cross_document_validations
+    WHERE id = $1;
+  `, [initial.rows[0].id]);
+  await persist({
+    ...persistenceContext,
+    comparison_results: [{ message: "Must not overwrite resolved record" }],
+    status: "MISMATCH",
+  });
+  const afterResolvedWrite = await db.query(`
+    SELECT status, comparison_results, resolved_by, resolved_at, resolution_notes
+    FROM public.cross_document_validations
+    WHERE id = $1;
+  `, [initial.rows[0].id]);
+  assert.equal(afterResolvedWrite.rows[0].status, "RESOLVED");
+  assert.deepEqual(afterResolvedWrite.rows[0].comparison_results, beforeResolvedWrite.rows[0].comparison_results);
+  assert.equal(afterResolvedWrite.rows[0].resolved_by, TEACHER_A_ID);
+  assert.equal(afterResolvedWrite.rows[0].resolved_at.toISOString(), beforeResolvedWrite.rows[0].resolved_at.toISOString());
+  assert.equal(afterResolvedWrite.rows[0].resolution_notes, "Teacher decision");
+
+  const successfulBatchPayloads = [
+    {
+      ...persistenceContext,
+      comparison_results: [{ message: "Must preserve the teacher resolution" }],
+      discrepancy_details: [],
+    },
+    {
+      ...persistenceContext,
+      validation_type: "SF1_SF5",
+      persistence_key: "PAIR|SF1_SF5|1st Semester||",
+      source_doc1_id: null,
+      source_doc2_id: null,
+      comparison_results: [],
+      discrepancy_details: [],
+    },
+  ];
+  const successfulBatch = await db.query(
+    "SELECT public.persist_cross_document_validation_batch($1::jsonb) AS result;",
+    [JSON.stringify(successfulBatchPayloads)]
+  );
+  assert.equal(successfulBatch.rows[0].result.success, true);
+  assert.equal(successfulBatch.rows[0].result.persistedCount, 2);
+  const preservedBatchResolution = await db.query(`
+    SELECT status, comparison_results, resolved_by, resolved_at, resolution_notes
+    FROM public.cross_document_validations
+    WHERE id = $1;
+  `, [initial.rows[0].id]);
+  assert.equal(preservedBatchResolution.rows[0].status, "RESOLVED");
+  assert.deepEqual(preservedBatchResolution.rows[0].comparison_results, beforeResolvedWrite.rows[0].comparison_results);
+  assert.equal(preservedBatchResolution.rows[0].resolved_by, TEACHER_A_ID);
+  assert.equal(preservedBatchResolution.rows[0].resolved_at.toISOString(), beforeResolvedWrite.rows[0].resolved_at.toISOString());
+  assert.equal(preservedBatchResolution.rows[0].resolution_notes, "Teacher decision");
+
+  const mixedContextPayloads = [
+    {
+      ...persistenceContext,
+      source_doc1_id: null,
+      source_doc2_id: null,
+      persistence_key: "PAIR|SF1_SF2|1st Semester||",
+    },
+    {
+      ...persistenceContext,
+      school_year: "2025-2026",
+      source_doc1_id: null,
+      source_doc2_id: null,
+      persistence_key: "PAIR|SF1_SF2|1st Semester||",
+    },
+  ];
+  const mixedContextRowsBefore = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM public.cross_document_validations
+    WHERE persistence_key = 'PAIR|SF1_SF2|1st Semester||';
+  `);
+  await assert.rejects(
+    () => db.query(
+      "SELECT public.persist_cross_document_validation_batch($1::jsonb);",
+      [JSON.stringify(mixedContextPayloads)]
+    ),
+    /one learner and academic context/
+  );
+  const invalidBatchRows = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM public.cross_document_validations
+    WHERE persistence_key = 'PAIR|SF1_SF2|1st Semester||';
+  `);
+  assert.equal(
+    invalidBatchRows.rows[0].count,
+    mixedContextRowsBefore.rows[0].count,
+    "Invalid batch context is rejected without writing any rows."
+  );
+
+  const batchFailurePayloads = [
+    {
+      ...persistenceContext,
+      validation_type: "PSA_SF1",
+      semester: "Full Year",
+      persistence_key: "PAIR|PSA_SF1|Full Year||",
+      source_doc1_id: null,
+      source_doc2_id: null,
+    },
+    {
+      ...persistenceContext,
+      validation_type: "SF1_SF2",
+      persistence_key: "PAIR|SF1_SF2|1st Semester||",
+      source_doc1_id: null,
+      source_doc2_id: null,
+    },
+  ];
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION public.fail_second_validation_batch_write()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.validation_type = 'SF1_SF2' THEN
+        RAISE EXCEPTION 'simulated batch write failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER fail_second_validation_batch_write
+      BEFORE INSERT ON public.cross_document_validations
+      FOR EACH ROW EXECUTE FUNCTION public.fail_second_validation_batch_write();
+  `);
+  await assert.rejects(
+    () => db.query(
+      "SELECT public.persist_cross_document_validation_batch($1::jsonb);",
+      [JSON.stringify(batchFailurePayloads)]
+    ),
+    /simulated batch write failure/
+  );
+  const failedBatchRows = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM public.cross_document_validations
+    WHERE persistence_key = 'PAIR|PSA_SF1|Full Year||';
+  `);
+  assert.equal(failedBatchRows.rows[0].count, 0, "A later batch write failure must roll back earlier writes.");
+});
+
+test("Migration 031 duplicate complete-context keys abort without deleting history", async () => {
+  const db = await bootstrapFullDatabase();
+  const student = await db.query(`
+    INSERT INTO public.students (school_id, lrn, first_name, last_name, grade_level)
+    VALUES ($1, '109345000077', 'Duplicate', 'Learner', 'Grade 11')
+    RETURNING id;
+  `, [SCHOOL_ID]);
+  const studentId = student.rows[0].id;
+  await db.query(`
+    INSERT INTO public.student_enrollments (
+      student_id, school_id, school_year, grade_level, section, adviser_user_id,
+      enrollment_status, is_current
+    ) VALUES ($1, $2, '2026-2027', 'Grade 11', 'Rizal', $3, 'active', true);
+  `, [studentId, SCHOOL_ID, TEACHER_A_ID]);
+  await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, semester, validation_type, status
+    ) VALUES
+      ($1, $2, '2026-2027', 'Grade 11', '1st Semester', 'SF1_SF2', 'NEEDS_VERIFICATION'),
+      ($1, $2, '2026-2027', 'Grade 11', '1st Semester', 'SF1_SF2', 'NEEDS_VERIFICATION');
+  `, [studentId, SCHOOL_ID]);
+
+  await assert.rejects(
+    () => db.exec(fs.readFileSync(MIGRATION_031_PATH, "utf8")),
+    /Duplicate scoped validation keys exist/
+  );
+  await db.exec("ROLLBACK;");
+  const preservedRows = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM public.cross_document_validations
+    WHERE student_id = $1;
+  `, [studentId]);
+  assert.equal(preservedRows.rows[0].count, 2, "Duplicate history remains untouched after the migration aborts.");
+  const migrationColumn = await db.query(`
+    SELECT COUNT(*)::int AS count
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'cross_document_validations'
+      AND column_name = 'persistence_key';
+  `);
+  assert.equal(migrationColumn.rows[0].count, 0, "The failed transactional migration leaves no partial schema changes.");
+});
+
+test("Migration 032 duplicate canonical contexts abort without merging history", async () => {
+  const db = await bootstrapFullDatabase();
+  const student = await db.query(`
+    INSERT INTO public.students (school_id, lrn, first_name, last_name, grade_level)
+    VALUES ($1, '109345000078', 'Duplicate', 'Context', 'Grade 11')
+    RETURNING id;
+  `, [SCHOOL_ID]);
+  const studentId = student.rows[0].id;
+  await db.query(`
+    INSERT INTO public.student_enrollments (
+      student_id, school_id, school_year, grade_level, section, adviser_user_id,
+      enrollment_status, is_current
+    ) VALUES ($1, $2, '2026-2027', 'Grade 11', 'Rizal', $3, 'active', true);
+  `, [studentId, SCHOOL_ID, TEACHER_A_ID]);
+  await db.exec(fs.readFileSync(MIGRATION_031_PATH, "utf8"));
+  await db.exec("DROP INDEX public.uq_cross_validation_context_key;");
+  await db.query(`
+    INSERT INTO public.cross_document_validations (
+      student_id, school_id, school_year, grade_level, section, semester,
+      validation_type, persistence_key, status
+    ) VALUES
+      ($1, $2, '2026-2027', 'Grade 11', 'Rizal', '1st Semester',
+        'SF1_SF2', 'LEGACY_KEY_A', 'NEEDS_VERIFICATION'),
+      ($1, $2, '2026-2027', 'Grade 11', 'Rizal', '1st Semester',
+        'SF1_SF2', 'LEGACY_KEY_B', 'RESOLVED');
+  `, [studentId, SCHOOL_ID]);
+
+  await assert.rejects(
+    () => db.exec(fs.readFileSync(MIGRATION_032_PATH, "utf8")),
+    /Duplicate scoped validation keys exist/
+  );
+  await db.exec("ROLLBACK;");
+  const preservedRows = await db.query(`
+    SELECT persistence_key, status
+    FROM public.cross_document_validations
+    WHERE student_id = $1
+    ORDER BY persistence_key;
+  `, [studentId]);
+  assert.deepEqual(preservedRows.rows, [
+    { persistence_key: "LEGACY_KEY_A", status: "NEEDS_VERIFICATION" },
+    { persistence_key: "LEGACY_KEY_B", status: "RESOLVED" },
+  ]);
 });

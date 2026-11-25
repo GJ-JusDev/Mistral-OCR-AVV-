@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useEffect } from "react";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { ConfirmationDialog } from "@/components/ui/ConfirmationDialog";
@@ -45,10 +45,18 @@ export function UserActions({
   const isTeacher = role === "teacher";
   const isAdmin = role === "admin";
 
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setCurrentTime(Date.now());
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
   // 24-hour review window evaluation
   const eligibilityTime = user.review_eligibility_time ? new Date(user.review_eligibility_time).getTime() : 0;
-  const isEarly = eligibilityTime > Date.now();
-  const remainingHours = isEarly ? Math.ceil((eligibilityTime - Date.now()) / (1000 * 60 * 60)) : 0;
+  const isEarly = currentTime > 0 && eligibilityTime > currentTime;
+  const remainingHours = isEarly ? Math.ceil((eligibilityTime - currentTime) / (1000 * 60 * 60)) : 0;
 
   const [activeAction, setActiveAction] = useState<
     "none" | "approve_form" | "decline_form" | "edit_confirm" | "edit_password" | "edit_form" | "delete_declined_confirm"

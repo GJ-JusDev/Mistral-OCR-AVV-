@@ -6,6 +6,7 @@ import {
 } from "@/lib/validation/crossDocumentEngine";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
 import {
+  buildPersistedValidationResponse,
   evaluateStudentValidation,
   fetchLegacySf1Sf2Entries,
   fetchPersistedStudentValidation,
@@ -43,26 +44,56 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const studentId = searchParams.get("studentId");
+    const schoolId = searchParams.get("schoolId");
     const schoolYear = searchParams.get("schoolYear");
     const gradeLevel = searchParams.get("gradeLevel");
+    const section = searchParams.get("section");
 
     if (!studentId) {
       return NextResponse.json({ error: "studentId query parameter is required" }, { status: 400 });
     }
+    if (!schoolId || !schoolYear || !gradeLevel || !section) {
+      return NextResponse.json(
+        { error: "schoolId, schoolYear, gradeLevel, and section are required" },
+        { status: 400 }
+      );
+    }
 
     try {
+      const { data: student, error: studentError } = await supabase
+        .from("students")
+        .select("school_id")
+        .eq("id", studentId)
+        .maybeSingle();
+      if (studentError) {
+        console.error("[api/validation/cross-document] Student context lookup failed:", studentError.message);
+        return NextResponse.json({ error: "Failed to verify learner context." }, { status: 500 });
+      }
+      if (!student) {
+        return NextResponse.json({ error: "Student not found" }, { status: 404 });
+      }
+      if (student.school_id !== schoolId) {
+        return NextResponse.json({ error: "Forbidden: Learner is outside the selected school." }, { status: 403 });
+      }
+
       const response = await fetchPersistedStudentValidation(
         supabase,
-        studentId,
-        schoolYear,
-        gradeLevel ? normalizeGradeLevelKey(gradeLevel) : null
+        {
+          studentId,
+          schoolId,
+          schoolYear,
+          gradeLevel: normalizeGradeLevelKey(gradeLevel),
+          section,
+        }
       );
       return NextResponse.json(response);
     } catch (error: any) {
-      return NextResponse.json({ error: error.message || "Failed to fetch validations" }, { status: 500 });
+      console.error("[api/validation/cross-document] Persisted validation read failed:", error);
+      return NextResponse.json({ error: "Failed to retrieve persisted validations." }, { status: 500 });
     }
   } catch (err: any) {
-    return NextResponse.json({ error: err.message || "Failed to fetch validations" }, { status: 500 });
+    console.error("[api/validation/cross-document] GET failed:", err);
+    return NextResponse.json({ error: "Failed to retrieve persisted validations." }, { status: 500 });
   }
 }
 
@@ -90,6 +121,17 @@ export async function POST(request: NextRequest) {
 
     if (!roleRow || roleRow.account_status !== "Approved") {
       return NextResponse.json({ error: "Forbidden: Account not approved." }, { status: 403 });
+    }
+
+    const userRole = (roleRow.role || "").toLowerCase().trim();
+    if (userRole === "admin" || userRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role cannot validate or process documents. Cross-document validation is restricted to authorized teachers.",
+          code: "ADMIN_CANNOT_PROCESS",
+        },
+        { status: 403 }
+      );
     }
 
     const body = await request.json();
@@ -130,7 +172,16 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        validation,
+        persisted: false,
+        isPersisted: false,
+        persistenceStatus: "COMPUTED_ONLY",
+        message:
+          "Section-level SF1-SF2 cross-document comparison is an on-demand audit and is not persisted to database records.",
+        validation: {
+          ...validation,
+          isPersisted: false,
+          persistenceStatus: "COMPUTED_ONLY",
+        },
       });
     }
 
@@ -152,6 +203,9 @@ export async function POST(request: NextRequest) {
     }
 
     const schoolId = student.school_id || roleRow.school_id;
+    if (body.schoolId && body.schoolId !== schoolId) {
+      return NextResponse.json({ error: "Forbidden: Student is outside the selected school." }, { status: 403 });
+    }
     if (!schoolId || (roleRow.school_id && roleRow.school_id !== schoolId && roleRow.role !== "admin")) {
       return NextResponse.json({ error: "Forbidden: Student is outside your authorized school." }, { status: 403 });
     }
@@ -189,6 +243,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "A valid Grade 11 or Grade 12 context is required." }, { status: 400 });
     }
     const section = enrollment?.section || body.section || null;
+    if (!section) {
+      return NextResponse.json(
+        { error: "A section is required for context-scoped validation." },
+        { status: 400 }
+      );
+    }
 
     if (String(roleRow.role || "").toLowerCase() === "teacher") {
       const { data: assignments, error: assignmentError } = await (supabase as any)
@@ -232,6 +292,9 @@ export async function POST(request: NextRequest) {
     let persistedValidations;
     try {
       persistedValidations = await persistStudentValidation(privilegedDb, context, evaluation);
+      if (!persistedValidations.some((row: any) => row.validation_type === "CONSOLIDATED_SHS")) {
+        throw new Error("Retrieve persisted validation results: consolidated row was not returned after persistence.");
+      }
     } catch (persistenceError: any) {
       const message = persistenceError?.message || "Cross-document validation persistence failed.";
       console.error("[api/validation/cross-document] Persistence failed:", message);
@@ -279,21 +342,27 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    const consolidatedRecord = persistedValidations.find((row: any) => row.validation_type === "CONSOLIDATED_SHS") || null;
-    const persistedMatrix = Array.isArray(consolidatedRecord?.comparison_results)
-      ? consolidatedRecord.comparison_results
-      : evaluation.unifiedResult.fieldsMatrix;
-    const persistedDiscrepancies = Array.isArray(consolidatedRecord?.discrepancy_details)
-      ? consolidatedRecord.discrepancy_details
-      : evaluation.unifiedResult.discrepancies;
+    const persistedResponse = buildPersistedValidationResponse(persistedValidations);
+    const consolidatedRecord = persistedResponse.consolidated;
+    if (!consolidatedRecord) {
+      throw new Error("Persisted consolidated validation record is unavailable.");
+    }
+    const persistedUnifiedResult = {
+      ...evaluation.unifiedResult,
+      overallStatus: consolidatedRecord.status,
+      needsHumanReview: Boolean(consolidatedRecord.needs_human_review),
+      fieldsMatrix: persistedResponse.matrix,
+      discrepancies: persistedResponse.discrepancies,
+      summaryMessage: `Persisted unified validation status: ${consolidatedRecord.status}.`,
+    };
 
     return NextResponse.json({
-      consolidated: evaluation.consolidated,
+      consolidated: consolidatedRecord,
       consolidatedRecord,
-      matrix: persistedMatrix,
-      discrepancies: persistedDiscrepancies,
-      pairwiseResults: evaluation.pairwiseResults,
-      unifiedResult: evaluation.unifiedResult,
+      matrix: persistedResponse.matrix,
+      discrepancies: persistedResponse.discrepancies,
+      pairwiseResults: persistedResponse.pairwiseResults,
+      unifiedResult: persistedUnifiedResult,
       validations: persistedValidations,
     });
   } catch (err: any) {

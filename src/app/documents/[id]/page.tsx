@@ -75,7 +75,10 @@ export default function DocumentDetailPage() {
 
   useEffect(() => {
     if (!documentId) return;
-    fetchDocumentDetail();
+    const timer = setTimeout(() => {
+      void fetchDocumentDetail();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [documentId]);
 
   const canApprove = currentUserRole === "admin";
@@ -135,7 +138,7 @@ export default function DocumentDetailPage() {
   };
 
   const handleFieldChange = (field: any, value: any) => {
-    let newExtractedFields = {
+    const newExtractedFields = {
       ...(document?.extracted_fields || {}),
       [field]: value,
     };

@@ -234,43 +234,54 @@ export function recalculateSubjectGradeStatus(
   const effectiveSem =
     normalizeSemesterContext(updated.semester) || normalizeSemesterContext(semesterContext);
 
-  const numQ1 = parseQuarterNumeric(updated.q1);
-  const numQ2 = parseQuarterNumeric(updated.q2);
-  const numQ3 = parseQuarterNumeric(updated.q3);
-  const numQ4 = parseQuarterNumeric(updated.q4);
+  let numQ1 = parseQuarterNumeric(updated.q1);
+  let numQ2 = parseQuarterNumeric(updated.q2);
+  let numQ3 = parseQuarterNumeric(updated.q3);
+  let numQ4 = parseQuarterNumeric(updated.q4);
 
   // Alamin kung may quarters na pwedeng kwentahin ayon sa semester
   let qA: number | string | undefined | null = undefined;
   let qB: number | string | undefined | null = undefined;
 
   if (effectiveSem === "2nd Semester") {
-    if (numQ3 !== undefined && numQ4 !== undefined) {
-      qA = updated.q3;
-      qB = updated.q4;
-    } else if (
-      numQ1 !== undefined &&
-      numQ2 !== undefined &&
-      numQ3 === undefined &&
-      numQ4 === undefined
-    ) {
-      // Defensive fallback para sa 2nd semester parsed bilang Q1 at Q2
-      qA = updated.q1;
-      qB = updated.q2;
-    } else {
-      qA = numQ3 !== undefined ? updated.q3 : undefined;
-      qB = numQ4 !== undefined ? updated.q4 : undefined;
+    // Second Semester: Quarters MUST strictly be Q3 and Q4.
+    // If q1/q2 were populated from a 2nd semester table labeled "1 & 2", migrate them to Q3/Q4 and clear Q1/Q2
+    if (numQ3 === undefined && numQ4 === undefined && (numQ1 !== undefined || numQ2 !== undefined)) {
+      updated.q3 = updated.q1;
+      updated.q4 = updated.q2;
+      updated.q1 = undefined;
+      updated.q2 = undefined;
+      numQ3 = parseQuarterNumeric(updated.q3);
+      numQ4 = parseQuarterNumeric(updated.q4);
     }
+    // Strict isolation: clear any lingering Q1/Q2 marks on a 2nd Semester record
+    updated.q1 = undefined;
+    updated.q2 = undefined;
+    updated.sem1_final_grade = undefined;
+
+    qA = numQ3 !== undefined ? updated.q3 : undefined;
+    qB = numQ4 !== undefined ? updated.q4 : undefined;
     if (!updated.semester) {
       updated.semester = "2nd Semester";
     }
   } else if (effectiveSem === "1st Semester") {
-    if (numQ1 !== undefined && numQ2 !== undefined) {
-      qA = updated.q1;
-      qB = updated.q2;
-    } else {
-      qA = numQ1 !== undefined ? updated.q1 : undefined;
-      qB = numQ2 !== undefined ? updated.q2 : undefined;
+    // First Semester: Quarters MUST strictly be Q1 and Q2.
+    // If q3/q4 were erroneously attached to a 1st semester record, migrate to Q1/Q2 and clear Q3/Q4
+    if (numQ1 === undefined && numQ2 === undefined && (numQ3 !== undefined || numQ4 !== undefined)) {
+      updated.q1 = updated.q3;
+      updated.q2 = updated.q4;
+      updated.q3 = undefined;
+      updated.q4 = undefined;
+      numQ1 = parseQuarterNumeric(updated.q1);
+      numQ2 = parseQuarterNumeric(updated.q2);
     }
+    // Strict isolation: clear any lingering Q3/Q4 marks on a 1st Semester record
+    updated.q3 = undefined;
+    updated.q4 = undefined;
+    updated.sem2_final_grade = undefined;
+
+    qA = numQ1 !== undefined ? updated.q1 : undefined;
+    qB = numQ2 !== undefined ? updated.q2 : undefined;
     if (!updated.semester) {
       updated.semester = "1st Semester";
     }
@@ -280,10 +291,16 @@ export function recalculateSubjectGradeStatus(
       qA = updated.q3;
       qB = updated.q4;
       updated.semester = "2nd Semester";
+      updated.q1 = undefined;
+      updated.q2 = undefined;
+      updated.sem1_final_grade = undefined;
     } else if (numQ1 !== undefined && numQ2 !== undefined && (numQ3 === undefined || numQ4 === undefined)) {
       qA = updated.q1;
       qB = updated.q2;
       updated.semester = "1st Semester";
+      updated.q3 = undefined;
+      updated.q4 = undefined;
+      updated.sem2_final_grade = undefined;
     } else if (numQ1 !== undefined && numQ2 !== undefined) {
       qA = updated.q1;
       qB = updated.q2;

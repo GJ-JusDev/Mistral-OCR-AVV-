@@ -62,6 +62,7 @@ export default function StudentDetailPage() {
             validationRecord: validationData.consolidated,
             validationMatrix: validationData.matrix,
             validationDiscrepancies: validationData.discrepancies,
+            validationPairwiseResults: validationData.pairwiseResults,
           }
         : current
     );
@@ -73,7 +74,11 @@ export default function StudentDetailPage() {
       if (!res.ok) throw new Error("Failed to load student details");
       const json = await res.json();
       setData(json);
-      const contexts = getStudentAcademicContexts(json.enrollments, json.cross_document_validations);
+      const contexts = getStudentAcademicContexts(
+        json.enrollments,
+        json.cross_document_validations,
+        json.student?.school_id
+      );
       setSelectedValidationContext(chooseInitialStudentAcademicContext(json.enrollments, contexts));
     } catch (err: any) {
       setError(err.message || "Failed to load student");
@@ -84,40 +89,50 @@ export default function StudentDetailPage() {
 
   useEffect(() => {
     if (!studentId) return;
-    fetchStudentData();
+    const timer = setTimeout(() => {
+      void fetchStudentData();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [studentId]);
 
   useEffect(() => {
-    if (!studentId || !selectedValidationContext) {
-      setValidationLoading(false);
-      return;
-    }
     let active = true;
-    setValidationLoadError(null);
-    setValidationLoading(true);
-    setData((current: any) => current ? {
-      ...current,
-      validationRecord: null,
-      validationMatrix: [],
-      validationDiscrepancies: [],
-    } : current);
-    fetchValidationData(selectedValidationContext)
-      .then((validationData) => {
-        if (!active) return;
-        setData((current: any) => current ? {
-          ...current,
-          validationRecord: validationData.consolidated,
-          validationMatrix: validationData.matrix,
-          validationDiscrepancies: validationData.discrepancies,
-        } : current);
-      })
-      .catch((err: any) => {
-        if (active) setValidationLoadError(err.message || "Failed to load persisted validation results.");
-      })
-      .finally(() => {
-        if (active) setValidationLoading(false);
-      });
-    return () => { active = false; };
+    const timer = setTimeout(() => {
+      if (!studentId || !selectedValidationContext) {
+        setValidationLoading(false);
+        return;
+      }
+      setValidationLoadError(null);
+      setValidationLoading(true);
+      setData((current: any) => current ? {
+        ...current,
+        validationRecord: null,
+        validationMatrix: [],
+        validationDiscrepancies: [],
+        validationPairwiseResults: [],
+      } : current);
+      fetchValidationData(selectedValidationContext)
+        .then((validationData) => {
+          if (!active) return;
+          setData((current: any) => current ? {
+            ...current,
+            validationRecord: validationData.consolidated,
+            validationMatrix: validationData.matrix,
+            validationDiscrepancies: validationData.discrepancies,
+            validationPairwiseResults: validationData.pairwiseResults,
+          } : current);
+        })
+        .catch((err: any) => {
+          if (active) setValidationLoadError(err.message || "Failed to load persisted validation results.");
+        })
+        .finally(() => {
+          if (active) setValidationLoading(false);
+        });
+    }, 0);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [studentId, selectedValidationContext?.schoolYear, selectedValidationContext?.gradeLevel, selectedValidationContext?.section]);
 
   if (loading) {
@@ -150,15 +165,20 @@ export default function StudentDetailPage() {
   }
 
   const { student, documents = [], rosters = {}, grades = [], attendance = [] } = data;
-  const validationContexts = getStudentAcademicContexts(data.enrollments, data.cross_document_validations);
+  const validationContexts = getStudentAcademicContexts(
+    data.enrollments,
+    data.cross_document_validations,
+    student.school_id
+  );
   const selectedContextValue = selectedValidationContext
-    ? `${selectedValidationContext.schoolYear}|${selectedValidationContext.gradeLevel}|${selectedValidationContext.section || ""}`
+    ? `${selectedValidationContext.schoolId}|${selectedValidationContext.schoolYear}|${selectedValidationContext.gradeLevel}|${selectedValidationContext.section}`
     : "";
   const selectedEnrollment = selectedValidationContext
     ? (data.enrollments || []).find((row: any) =>
+        String(row.school_id || student.school_id) === selectedValidationContext.schoolId &&
         String(row.school_year) === selectedValidationContext.schoolYear &&
         String(row.grade_level) === selectedValidationContext.gradeLevel &&
-        (row.section || "") === (selectedValidationContext.section || "")
+        String(row.section || "") === selectedValidationContext.section
       )
     : null;
   const fullName = `${student.last_name}, ${student.first_name} ${student.middle_name || ""}${student.suffix ? " " + student.suffix : ""}`.trim();
@@ -314,7 +334,7 @@ export default function StudentDetailPage() {
               value={selectedContextValue}
               onChange={(event) => {
                 const context = validationContexts.find((item) =>
-                  `${item.schoolYear}|${item.gradeLevel}|${item.section || ""}` === event.target.value
+                  `${item.schoolId}|${item.schoolYear}|${item.gradeLevel}|${item.section}` === event.target.value
                 );
                 setData((current: any) => current ? {
                   ...current,
@@ -329,10 +349,10 @@ export default function StudentDetailPage() {
               <option value="">Select a school-year context</option>
               {validationContexts.map((context) => (
                 <option
-                  key={`${context.schoolYear}|${context.gradeLevel}`}
-                  value={`${context.schoolYear}|${context.gradeLevel}|${context.section || ""}`}
+                  key={`${context.schoolId}|${context.schoolYear}|${context.gradeLevel}|${context.section}`}
+                  value={`${context.schoolId}|${context.schoolYear}|${context.gradeLevel}|${context.section}`}
                 >
-                  {context.schoolYear} — {context.gradeLevel}{context.section ? ` — ${context.section}` : ""}
+                  {context.schoolYear} — {context.gradeLevel} — {context.section}
                 </option>
               ))}
             </select>
@@ -343,6 +363,7 @@ export default function StudentDetailPage() {
           <ShsConsolidatedValidationHub
             student={{
               id: student.id,
+              school_id: student.school_id,
               lrn: student.lrn,
               first_name: student.first_name,
               middle_name: student.middle_name,
@@ -357,6 +378,7 @@ export default function StudentDetailPage() {
             section={selectedValidationContext?.section || selectedEnrollment?.section || student.section}
             initialValidationRecord={data.validationRecord}
             initialMatrix={data.validationMatrix}
+            initialPairwiseResults={data.validationPairwiseResults}
             initialError={validationLoadError}
             initialLoading={validationLoading}
             onRefreshValidation={refreshValidationData}

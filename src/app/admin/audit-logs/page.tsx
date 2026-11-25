@@ -123,7 +123,10 @@ export default function AdminAuditLogsPage() {
   }, [searchQuery, categoryFilter, outcomeFilter, computedDateRange, page, pageSize]);
 
   useEffect(() => {
-    loadLogs();
+    const timer = setTimeout(() => {
+      void loadLogs();
+    }, 0);
+    return () => clearTimeout(timer);
   }, [loadLogs]);
 
   const handleExportCsv = async () => {

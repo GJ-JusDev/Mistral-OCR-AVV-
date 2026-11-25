@@ -86,7 +86,7 @@ export function isNonAcademicSubject(subject: string): boolean {
 }
 
 export function cleanSubjectName(raw: string): string {
-  let cleaned = (raw || "")
+  const cleaned = (raw || "")
     .replace(/^(?:core\s+subjects?|applied\s+and\s+specialized\s+subjects?|applied\s+subjects?|specialized\s+subjects?)[\s:\-–|]*/i, "")
     .replace(/[|*_`]/g, "")
     .replace(/\s+/g, " ")

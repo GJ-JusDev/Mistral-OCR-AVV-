@@ -84,7 +84,10 @@ export default function TeacherRegistryPage() {
   }
 
   useEffect(() => {
-    fetchRegistry();
+    const timer = setTimeout(() => {
+      void fetchRegistry();
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   const filteredTeachers = useMemo(() => {

@@ -477,7 +477,8 @@ export async function handleOcrRoute(
           extractFields,
           gradeLevel,
           documentSide,
-          ...(effectiveDocType === "sf10" &&
+          documentType: effectiveDocType,
+          ...((effectiveDocType === "sf10" || effectiveDocType === "sf9") &&
           extractFields &&
           !process.env.AZURE_DOCUMENT_INTELLIGENCE_MODEL
             ? { modelId: "prebuilt-layout" }
@@ -609,7 +610,8 @@ export async function handleOcrRoute(
                 image: image || effectiveFrontImage || effectiveBackImage,
                 extractFields,
                 gradeLevel,
-                ...(effectiveDocType === "sf10" &&
+                documentType: effectiveDocType,
+                ...((effectiveDocType === "sf10" || effectiveDocType === "sf9") &&
                 extractFields &&
                 !process.env.AZURE_DOCUMENT_INTELLIGENCE_MODEL
                   ? { modelId: "prebuilt-layout" }

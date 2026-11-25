@@ -174,27 +174,6 @@ export async function register(formData: FormData) {
   const lastName = (formData.get("lastName") as string)?.trim();
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
 
-  // Extract and validate requested advisory class fields BEFORE any auth or DB calls
-  const gradeLevel = (formData.get("gradeLevel") as string)?.trim();
-  const strand = (formData.get("strand") as string)?.trim();
-  const rawSection = (formData.get("section") as string)?.trim();
-  const section = rawSection ? rawSection.replace(/\s+/g, " ") : "";
-
-  const validGrades = ["Grade 11", "Grade 12"];
-  const validStrands = ["CSS", "HUMSS", "Tourism"];
-
-  if (!gradeLevel || !validGrades.includes(gradeLevel)) {
-    return { error: "Invalid or missing grade level. Must be 'Grade 11' or 'Grade 12'." };
-  }
-
-  if (!strand || !validStrands.includes(strand)) {
-    return { error: "Invalid or missing strand. Must be one of CSS, HUMSS, or Tourism." };
-  }
-
-  if (!section || section.length < 2 || section.length > 50 || !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(section)) {
-    return { error: "Invalid or missing section. Must be 2 to 50 characters and contain only letters, numbers, spaces, hyphens, or periods." };
-  }
-
   if (!email) {
     return { error: "Email address is required." };
   }
@@ -287,7 +266,7 @@ export async function register(formData: FormData) {
   let profileSaved = false;
 
   const rollbackAuthUser = async (failureMessage: string) => {
-    if (isPreExistingAccount) {
+    if (isPreExistingAccount || !signUpData.user) {
       return { error: failureMessage };
     }
     try {
@@ -367,16 +346,16 @@ export async function register(formData: FormData) {
           school_id: TRIS_SCHOOL_ID,
           registration_timestamp: registrationTimestamp,
           review_eligibility_time: reviewEligibilityTime,
-          registry_match_status: matchStatus as any,
+          registry_match_status: matchStatus,
           matched_registry_id: matchedRegistryId,
           middle_name: middleName || null,
           middle_initial: derivedMi,
           has_no_middle_name: hasNoMiddleName,
-          requested_grade_level: gradeLevel,
-          requested_strand: strand,
-          requested_section: section,
-          request_status: "Pending",
-          request_submitted_at: registrationTimestamp,
+          requested_grade_level: null,
+          requested_strand: null,
+          requested_section: null,
+          request_status: null,
+          request_submitted_at: null,
         });
 
       if (insertError) {
@@ -388,40 +367,32 @@ export async function register(formData: FormData) {
       // Note: The on_auth_user_created database trigger inserts a skeleton user_roles row
       // right when auth.signUp creates a new auth.users record (with requested_* = NULL and
       // request_status = NULL).
-      // Protect against downgrading an Approved/Declined advisory request or silently mutating
-      // an already-populated advisory request on any duplicate/repeat registration flow.
-      const hasLockedAdvisoryStatus =
-        existingRole.request_status === "Approved" || existingRole.request_status === "Declined";
-      const hasExistingAdvisorySelection =
-        Boolean(existingRole.requested_grade_level) ||
-        Boolean(existingRole.requested_strand) ||
-        Boolean(existingRole.requested_section);
       const hasLockedAccountStatus =
         existingRole.account_status === "Approved" || existingRole.account_status === "Declined";
 
-      if (hasLockedAdvisoryStatus || hasExistingAdvisorySelection || hasLockedAccountStatus) {
+      if (hasLockedAccountStatus) {
         isPreExistingAccount = true;
         return {
-          error: "An advisory request is already recorded for this account and cannot be overwritten during registration.",
+          error: "An account with this email is already registered and processed.",
         };
       }
 
-      const updatePayload: Record<string, any> = {
+      const updatePayload: Record<string, unknown> = {
         role: "teacher",
         account_status: "Pending",
         school_id: existingRole.school_id ?? TRIS_SCHOOL_ID,
         registration_timestamp: registrationTimestamp,
         review_eligibility_time: reviewEligibilityTime,
-        registry_match_status: matchStatus as any,
+        registry_match_status: matchStatus,
         matched_registry_id: matchedRegistryId,
         middle_name: middleName || null,
         middle_initial: derivedMi,
         has_no_middle_name: hasNoMiddleName,
-        requested_grade_level: gradeLevel,
-        requested_strand: strand,
-        requested_section: section,
-        request_status: "Pending",
-        request_submitted_at: registrationTimestamp,
+        requested_grade_level: null,
+        requested_strand: null,
+        requested_section: null,
+        request_status: null,
+        request_submitted_at: null,
       };
 
       const { error: updateError } = await adminClient
@@ -430,8 +401,8 @@ export async function register(formData: FormData) {
         .eq("user_id", signUpData.user.id);
 
       if (updateError) {
-        console.error("Failed to update user_roles entry with advisory request:", updateError);
-        return await rollbackAuthUser("Registration failed to save advisory class request. Please try again.");
+        console.error("Failed to update user_roles entry during registration:", updateError);
+        return await rollbackAuthUser("Registration failed to update faculty profile. Please try again.");
       }
       profileSaved = true;
     }
@@ -447,15 +418,15 @@ export async function register(formData: FormData) {
       targetType: "user",
       targetId: signUpData.user.id,
       targetLabel: `${firstName} ${lastName}`.trim() || email,
-      reason: "New faculty registration submitted with Pending status",
+      reason: "New faculty registration submitted with Pending status (advisory class selection deferred to post-login)",
       details: {
         role: "Teacher",
         account_status: "Pending",
         school_id: TRIS_SCHOOL_ID,
-        requested_grade_level: gradeLevel,
-        requested_strand: strand,
-        requested_section: section,
-        request_status: "Pending",
+        requested_grade_level: null,
+        requested_strand: null,
+        requested_section: null,
+        request_status: null,
       },
     });
 

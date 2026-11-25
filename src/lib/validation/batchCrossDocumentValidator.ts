@@ -102,6 +102,21 @@ export interface LearnerValidationDossier {
   discrepancies: BatchDiscrepancyItem[];
   unifiedMatrix: UnifiedFieldComparisonRow[];
   duplicateWarnings: DuplicateScanWarning[];
+  validationPersistence?: {
+    status: "PERSISTED" | "REQUIRES_IDENTITY_RESOLUTION" | "ERROR" | "SKIPPED";
+    consolidatedValidationId?: string;
+    persistedStatus?: string;
+    reason?: string;
+    recommendedAction?: string;
+  };
+  persistedDiscrepancies?: Array<{
+    field: string;
+    sourceValue?: any;
+    targetValue?: any;
+    severity?: string;
+    category?: string;
+    description?: string;
+  }>;
 }
 
 export interface BatchValidationReport {
@@ -117,6 +132,8 @@ export interface BatchValidationReport {
     missingDocumentsCount: number;     // Missing expected forms
     incompleteDataCount: number;       // Missing LRN, grades, or marks
     needsManualVerificationCount: number; // Needing teacher judgment
+    persistedValidationCount?: number; // Learners whose validation was persisted
+    identityResolutionRequiredCount?: number; // Learners with no valid LRN (not persisted)
   };
   categorizedResults: {
     successfullyMatched: LearnerValidationDossier[];
@@ -125,9 +142,11 @@ export interface BatchValidationReport {
     missingDocuments: BatchDiscrepancyItem[];
     incompleteData: BatchDiscrepancyItem[];
     needsManualVerification: BatchDiscrepancyItem[];
+    requiresIdentityResolution?: LearnerValidationDossier[];
   };
   learnerDossiers: LearnerValidationDossier[];
   segments: DocumentSegment[];
+  validationSource?: "COMPUTED_PREVIEW" | "PERSISTED";
 }
 
 /**
@@ -930,6 +949,65 @@ export function evaluateBatchCrossDocumentValidation(params: {
       }
     }
 
+    // Comparator 8b: SF9 Attendance Discrepancies and Equation Mismatches
+    if (learner.sf9Record?.raw?.attendance_discrepancy_details && Array.isArray(learner.sf9Record.raw.attendance_discrepancy_details)) {
+      for (let i = 0; i < learner.sf9Record.raw.attendance_discrepancy_details.length; i++) {
+        const detail = learner.sf9Record.raw.attendance_discrepancy_details[i];
+        const disc: BatchDiscrepancyItem = {
+          id: `disc-${learnerDiscrepancies.length + 1}-sf9-att-${i + 1}`,
+          learnerName: fullName,
+          lrn: displayedLrn,
+          field: "SF9 Attendance Consistency",
+          source1Doc: "SF9-SHS Report Card",
+          source1Page: learner.sf9Record.pageNumber,
+          source1FileName: learner.sf9Record.fileName,
+          source1DataUrl: learner.sf9Record.dataUrl,
+          source1Value: detail,
+          source2Doc: "Attendance Record Equation (Present + Absent = School Days / Total Sum)",
+          source2Page: undefined,
+          source2FileName: undefined,
+          source2DataUrl: undefined,
+          source2Value: "Consistent attendance records",
+          severity: "WARNING",
+          category: "NEEDS_VERIFICATION",
+          reason: detail,
+          recommendedAction: "Teacher must inspect the monthly attendance table on SF9 and verify days present, days absent, and school days.",
+        };
+        learnerDiscrepancies.push(disc);
+        allDiscrepancies.push(disc);
+      }
+    }
+
+    // Comparator 8c: SF9 High Absence Warning (DepEd Safeguard)
+    if (learner.sf9Record?.raw?.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED" || learner.sf9Record?.raw?.attendance_risk_status === "ATTENDANCE_WARNING") {
+      const risk = learner.sf9Record.raw.attendance_risk_status;
+      const absencePct = learner.sf9Record.raw.absence_percentage;
+      const disc: BatchDiscrepancyItem = {
+        id: `disc-${learnerDiscrepancies.length + 1}-sf9-att-risk`,
+        learnerName: fullName,
+        lrn: displayedLrn,
+        field: "SF9 Attendance Risk Screening",
+        source1Doc: "SF9-SHS Report Card",
+        source1Page: learner.sf9Record.pageNumber,
+        source1FileName: learner.sf9Record.fileName,
+        source1DataUrl: learner.sf9Record.dataUrl,
+        source1Value: `${risk} (${absencePct ?? "—"}% absences)`,
+        source2Doc: "DepEd Order No. 8, s. 2015 Screening Threshold",
+        source2Page: undefined,
+        source2FileName: undefined,
+        source2DataUrl: undefined,
+        source2Value: "< 15% absences (Normal)",
+        severity: "WARNING",
+        category: "NEEDS_VERIFICATION",
+        reason: risk === "ATTENDANCE_REVIEW_REQUIRED"
+          ? `High absence rate (${absencePct}% absences) flagged on SF9. DepEd safeguard: Warning only. Academic grades and promotion are NOT automatically penalized. School head verification required.`
+          : `Elevated absence rate (${absencePct}% absences) flagged on SF9. Early warning for class adviser intervention.`,
+        recommendedAction: "Advise class adviser to verify attendance records with school guidance or attendance coordinator.",
+      };
+      learnerDiscrepancies.push(disc);
+      allDiscrepancies.push(disc);
+    }
+
     // UNIFIED VALIDATION: Execute ONE complete student-centered cross-document evaluation
     const unifiedResult = evaluateUnifiedStudentValidation({
       lrn: displayedLrn,
@@ -1010,10 +1088,10 @@ export function evaluateBatchCrossDocumentValidation(params: {
     let overallStatus: LearnerValidationDossier["overallStatus"] = "MATCH";
     if (hasCritical) {
       overallStatus = "MISMATCH";
-    } else if (hasWarning || hasMissingDocs || unifiedResult.overallStatus === "NEEDS_VERIFICATION") {
-      overallStatus = "NEEDS_REVIEW";
     } else if (docPresence.totalAvailable < 2 || unifiedResult.overallStatus === "NOT_APPLICABLE") {
       overallStatus = "INCOMPLETE";
+    } else if (hasWarning || hasMissingDocs || unifiedResult.overallStatus === "NEEDS_VERIFICATION") {
+      overallStatus = "NEEDS_REVIEW";
     }
 
     dossiers.push({
@@ -1081,5 +1159,132 @@ export function evaluateBatchCrossDocumentValidation(params: {
     },
     learnerDossiers: dossiers,
     segments,
+    validationSource: "COMPUTED_PREVIEW",
   };
+}
+
+/**
+ * Rebuilds batch discrepancy categories and summary metrics strictly from persisted validation results.
+ * This guarantees a single source of truth across the validation engine, database rows, and batch UI.
+ *
+ * Learners with invalid LRNs (which cannot be persisted to canonical student tables) are explicitly
+ * categorized as REQUIRES_IDENTITY_RESOLUTION and stripped of computed-only cross-document matrices,
+ * while their extracted document data is preserved.
+ */
+export function rebuildBatchValidationReportFromPersistedResults(
+  report: BatchValidationReport
+): BatchValidationReport {
+  const allDiscrepancies: BatchDiscrepancyItem[] = [];
+
+  for (const dossier of report.learnerDossiers) {
+    if (dossier.validationPersistence?.status === "PERSISTED") {
+      // Rebuild dossier.discrepancies from persisted validation data
+      const persistedItems = Array.isArray(dossier.persistedDiscrepancies)
+        ? dossier.persistedDiscrepancies
+        : [];
+      const priorDiscrepancies = dossier.discrepancies || [];
+
+      const reconstructed: BatchDiscrepancyItem[] = [];
+
+      for (let i = 0; i < persistedItems.length; i++) {
+        const item = persistedItems[i];
+        const match = priorDiscrepancies.find(
+          (d) => d.field.toLowerCase() === item.field.toLowerCase() || d.reason === item.description
+        );
+
+        let category: BatchDiscrepancyItem["category"] = "MISMATCH";
+        if (item.category === "NEEDS_VERIFICATION") {
+          category = "NEEDS_VERIFICATION";
+        } else if (item.severity === "CRITICAL" || item.severity === "ERROR") {
+          category = "MISMATCH";
+        } else if (item.severity === "WARNING" || item.severity === "INFO") {
+          category = "NEEDS_VERIFICATION";
+        }
+
+        const disc: BatchDiscrepancyItem = {
+          id: match?.id || `disc-persisted-${dossier.lrn}-${i + 1}-${item.field.replace(/[^a-zA-Z0-9]/g, "_")}`,
+          learnerName: dossier.fullName,
+          lrn: dossier.lrn,
+          field: item.field,
+          source1Doc: match?.source1Doc || "Unified Cross-Document Matrix",
+          source1Page: match?.source1Page,
+          source1FileName: match?.source1FileName,
+          source1DataUrl: match?.source1DataUrl,
+          source1Value: item.sourceValue ?? match?.source1Value,
+          source2Doc: match?.source2Doc || "Database Record",
+          source2Page: match?.source2Page,
+          source2FileName: match?.source2FileName,
+          source2DataUrl: match?.source2DataUrl,
+          source2Value: item.targetValue ?? match?.source2Value,
+          severity: (item.severity as any) || match?.severity || "WARNING",
+          category,
+          reason: item.description || match?.reason || "Field discrepancy verified from database record.",
+          recommendedAction: match?.recommendedAction || "Inspect physical documents and reconcile discrepancies.",
+        };
+        reconstructed.push(disc);
+        allDiscrepancies.push(disc);
+      }
+      dossier.discrepancies = reconstructed;
+    } else if (dossier.validationPersistence?.status === "REQUIRES_IDENTITY_RESOLUTION") {
+      dossier.unifiedMatrix = [];
+      dossier.discrepancies = [
+        {
+          id: `disc-identity-resolution-${dossier.lrn}`,
+          learnerName: dossier.fullName,
+          lrn: dossier.lrn,
+          field: "Learner Reference Number (LRN)",
+          source1Doc: "Extracted Record",
+          source1Value: dossier.lrn,
+          source2Doc: "DepEd 12-Digit LRN Standard",
+          source2Value: "12-digit numeric LRN",
+          severity: "CRITICAL",
+          category: "INCOMPLETE_DATA",
+          reason: dossier.validationPersistence.reason || "Missing or invalid 12-digit LRN prevents database persistence and canonical student linking.",
+          recommendedAction: dossier.validationPersistence.recommendedAction || "Resolve learner identity manually by inspecting original scanned document and assigning a valid 12-digit LRN.",
+        },
+      ];
+      allDiscrepancies.push(...dossier.discrepancies);
+    }
+  }
+
+  // Re-categorize report
+  const successfullyMatched = report.learnerDossiers.filter(
+    (d) => d.overallStatus === "MATCH" && d.documentPresence.totalAvailable >= 2 && d.validationPersistence?.status === "PERSISTED"
+  );
+  const consistentRecords = report.learnerDossiers.filter(
+    (d) => d.discrepancies.filter((x) => x.severity === "CRITICAL").length === 0 && d.validationPersistence?.status === "PERSISTED"
+  );
+  const mismatchedInformation = allDiscrepancies.filter((d) => d.category === "MISMATCH");
+  const missingDocuments = allDiscrepancies.filter((d) => d.category === "MISSING_DOC");
+  const incompleteData = allDiscrepancies.filter((d) => d.category === "INCOMPLETE_DATA");
+  const needsManualVerification = allDiscrepancies.filter((d) => d.category === "NEEDS_VERIFICATION");
+  const requiresIdentityResolution = report.learnerDossiers.filter(
+    (d) => d.validationPersistence?.status === "REQUIRES_IDENTITY_RESOLUTION"
+  );
+
+  report.validationSource = "PERSISTED";
+  report.summary = {
+    ...report.summary,
+    totalLearnersDetected: report.learnerDossiers.length,
+    successfullyMatchedCount: successfullyMatched.length,
+    consistentRecordsCount: consistentRecords.length,
+    mismatchedInformationCount: mismatchedInformation.length,
+    missingDocumentsCount: missingDocuments.length,
+    incompleteDataCount: incompleteData.length,
+    needsManualVerificationCount: needsManualVerification.length,
+    persistedValidationCount: report.learnerDossiers.filter((d) => d.validationPersistence?.status === "PERSISTED").length,
+    identityResolutionRequiredCount: requiresIdentityResolution.length,
+  };
+
+  report.categorizedResults = {
+    successfullyMatched,
+    consistentRecords,
+    mismatchedInformation,
+    missingDocuments,
+    incompleteData,
+    needsManualVerification,
+    requiresIdentityResolution,
+  };
+
+  return report;
 }

@@ -8,6 +8,7 @@ export interface OcrInput {
   extractFields?: boolean;
   gradeLevel?: string;
   documentSide?: "front" | "back";
+  documentType?: string;
   modelId?: string;
 }
 
@@ -29,6 +30,9 @@ export class OcrProviderError extends Error {
   public readonly retryAfter?: number;
   public readonly isRateLimit: boolean;
   public readonly isQuotaExhausted: boolean;
+  public readonly diagnosticCode?: string;
+  public readonly innerCode?: string;
+  public readonly azureErrorCode?: string;
 
   constructor(
     message: string,
@@ -37,6 +41,9 @@ export class OcrProviderError extends Error {
       status: number;
       code: MistralOcrErrorCode | "SERVICE_UNAVAILABLE" | "TIMEOUT" | "UNSUPPORTED_FORMAT";
       retryAfter?: number;
+      diagnosticCode?: string;
+      innerCode?: string;
+      azureErrorCode?: string;
     }
   ) {
     super(message);
@@ -47,6 +54,9 @@ export class OcrProviderError extends Error {
     this.retryAfter = options.retryAfter;
     this.isRateLimit = options.code === "RATE_LIMIT_EXCEEDED";
     this.isQuotaExhausted = options.code === "QUOTA_EXHAUSTED";
+    this.diagnosticCode = options.diagnosticCode;
+    this.innerCode = options.innerCode;
+    this.azureErrorCode = options.azureErrorCode;
   }
 }
 

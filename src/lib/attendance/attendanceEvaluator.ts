@@ -38,6 +38,8 @@ export interface MonthlyAttendanceItem {
   schoolDays?: number;
   daysPresent?: number;
   daysAbsent?: number;
+  isEquationValid?: boolean;
+  isComplete?: boolean;
 }
 
 export interface AttendanceEvaluationInput {
@@ -57,15 +59,19 @@ export interface AttendanceEvaluationInput {
 
 export interface AttendanceEvaluationResult {
   monthlyBreakdown: MonthlyAttendanceItem[];
-  computedSchoolDays: number;
-  computedDaysPresent: number;
-  computedDaysAbsent: number;
+  computedSchoolDays?: number;
+  computedDaysPresent?: number;
+  computedDaysAbsent?: number;
+  isSchoolDaysComplete?: boolean;
+  isDaysPresentComplete?: boolean;
+  isDaysAbsentComplete?: boolean;
   printedSchoolDays?: number;
   printedDaysPresent?: number;
   printedDaysAbsent?: number;
   attendancePercentage: number;
   absencePercentage: number;
   hasTotalsDiscrepancy: boolean;
+  hasEquationDiscrepancy: boolean;
   discrepancyDetails: string[];
   riskStatus: AttendanceRiskStatus;
   verificationStatus: AttendanceVerificationStatus;
@@ -78,12 +84,31 @@ export interface AttendanceEvaluationResult {
  * PARSE ATTENDANCE NUMERIC VALUE
  *
  * Sinusuportahan ang buo (integer) at fractional/decimal na araw (hal. 0.5, 19.5).
- * Ang unreadable, blank, o hyphen ay ibinabalik bilang undefined (HINDI zero).
+ * Ang unreadable, blank, hyphen, o dash ay ibinabalik bilang undefined (HINDI zero).
  */
 export function parseAttendanceNumber(val: any): number | undefined {
   if (val === undefined || val === null) return undefined;
   const str = String(val).trim();
-  if (str === "" || str === "-" || str === ":unselected:" || str.toLowerCase() === "null") {
+  const lower = str.toLowerCase();
+  if (
+    str === "" ||
+    str === "-" ||
+    str === "—" ||
+    str === "–" ||
+    str === "_" ||
+    str === ":unselected:" ||
+    str === ":selected:" ||
+    lower === "null" ||
+    lower === "undefined" ||
+    lower === "blank" ||
+    lower === "none" ||
+    lower === "n/a" ||
+    lower === "na" ||
+    lower === "missing" ||
+    lower === "unreadable" ||
+    lower === "incomplete" ||
+    lower === "unknown"
+  ) {
     return undefined;
   }
   const match = str.match(/^-?(\d+(?:\.\d+)?)$/);
@@ -111,9 +136,13 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
   let sumDaysPresent = 0;
   let sumDaysAbsent = 0;
 
-  let hasPopulatedSchoolDays = false;
-  let hasPopulatedDaysPresent = false;
-  let hasPopulatedDaysAbsent = false;
+  let countSchoolDaysPopulated = 0;
+  let countDaysPresentPopulated = 0;
+  let countDaysAbsentPopulated = 0;
+
+  let hasTotalsDiscrepancy = false;
+  let hasEquationDiscrepancy = false;
+  const discrepancyDetails: string[] = [];
 
   for (let i = 0; i < months.length; i++) {
     const month = months[i];
@@ -123,15 +152,32 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
 
     if (sd !== undefined) {
       sumSchoolDays += sd;
-      hasPopulatedSchoolDays = true;
+      countSchoolDaysPopulated++;
     }
     if (dp !== undefined) {
       sumDaysPresent += dp;
-      hasPopulatedDaysPresent = true;
+      countDaysPresentPopulated++;
     }
     if (da !== undefined) {
       sumDaysAbsent += da;
-      hasPopulatedDaysAbsent = true;
+      countDaysAbsentPopulated++;
+    }
+
+    let isEquationValid: boolean | undefined = undefined;
+    const isItemComplete = sd !== undefined && dp !== undefined && da !== undefined;
+    if (isItemComplete) {
+      const sumPresAbs = Math.round((dp + da) * 100) / 100;
+      const expectedSd = Math.round(sd * 100) / 100;
+      if (sumPresAbs === expectedSd) {
+        isEquationValid = true;
+      } else {
+        isEquationValid = false;
+        hasTotalsDiscrepancy = true;
+        hasEquationDiscrepancy = true;
+        discrepancyDetails.push(
+          `Discrepancy sa Attendance Equation sa buwan ng ${month}: Days Present (${dp}) + Days Absent (${da}) = ${sumPresAbs}, ngunit ang School Days ay ${sd}.`
+        );
+      }
     }
 
     monthlyBreakdown.push({
@@ -139,22 +185,30 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
       schoolDays: sd,
       daysPresent: dp,
       daysAbsent: da,
+      isEquationValid,
+      isComplete: isItemComplete,
     });
   }
 
-  // Iwas floating point precision issue (e.g. 0.1 + 0.2)
-  const computedSchoolDays = Math.round(sumSchoolDays * 100) / 100;
-  const computedDaysPresent = Math.round(sumDaysPresent * 100) / 100;
-  const computedDaysAbsent = Math.round(sumDaysAbsent * 100) / 100;
+  // Completeness flags per metric row
+  const isSchoolDaysComplete = months.length > 0 && countSchoolDaysPopulated === months.length;
+  const isDaysPresentComplete = months.length > 0 && countDaysPresentPopulated === months.length;
+  const isDaysAbsentComplete = months.length > 0 && countDaysAbsentPopulated === months.length;
+
+  // Requirement: Compute totals ONLY from complete, valid monthly data.
+  // If a row or month is incomplete, do NOT compute or report an incomplete total as official.
+  const computedSchoolDays = isSchoolDaysComplete ? Math.round(sumSchoolDays * 100) / 100 : undefined;
+  const computedDaysPresent = isDaysPresentComplete ? Math.round(sumDaysPresent * 100) / 100 : undefined;
+  const computedDaysAbsent = isDaysAbsentComplete ? Math.round(sumDaysAbsent * 100) / 100 : undefined;
 
   // Percentage calculations
   const attendancePercentage =
-    computedSchoolDays > 0
+    computedSchoolDays !== undefined && computedDaysPresent !== undefined && computedSchoolDays > 0
       ? Math.round((computedDaysPresent / computedSchoolDays) * 10000) / 100
       : 0;
 
   const absencePercentage =
-    computedSchoolDays > 0
+    computedSchoolDays !== undefined && computedDaysAbsent !== undefined && computedSchoolDays > 0
       ? Math.round((computedDaysAbsent / computedSchoolDays) * 10000) / 100
       : 0;
 
@@ -163,36 +217,63 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
   const printedDaysPresent = parseAttendanceNumber(input.printedDaysPresentTotal);
   const printedDaysAbsent = parseAttendanceNumber(input.printedDaysAbsentTotal);
 
-  const discrepancyDetails: string[] = [];
-  let hasTotalsDiscrepancy = false;
-
-  if (printedSchoolDays !== undefined && hasPopulatedSchoolDays && printedSchoolDays !== computedSchoolDays) {
+  if (printedSchoolDays !== undefined && computedSchoolDays !== undefined && printedSchoolDays !== computedSchoolDays) {
     hasTotalsDiscrepancy = true;
     discrepancyDetails.push(
       `Discrepancy sa Total School Days: Nakaimprenta sa form ay ${printedSchoolDays}, ngunit ang sum ng buwanan ay ${computedSchoolDays}.`
     );
   }
 
-  if (printedDaysPresent !== undefined && hasPopulatedDaysPresent && printedDaysPresent !== computedDaysPresent) {
+  if (printedDaysPresent !== undefined && computedDaysPresent !== undefined && printedDaysPresent !== computedDaysPresent) {
     hasTotalsDiscrepancy = true;
     discrepancyDetails.push(
       `Discrepancy sa Total Days Present: Nakaimprenta sa form ay ${printedDaysPresent}, ngunit ang sum ng buwanan ay ${computedDaysPresent}.`
     );
   }
 
-  if (printedDaysAbsent !== undefined && hasPopulatedDaysAbsent && printedDaysAbsent !== computedDaysAbsent) {
+  if (printedDaysAbsent !== undefined && computedDaysAbsent !== undefined && printedDaysAbsent !== computedDaysAbsent) {
     hasTotalsDiscrepancy = true;
     discrepancyDetails.push(
       `Discrepancy sa Total Days Absent: Nakaimprenta sa form ay ${printedDaysAbsent}, ngunit ang sum ng buwanan ay ${computedDaysAbsent}.`
     );
   }
 
+  // Equation checks on Printed Totals
+  if (printedSchoolDays !== undefined && printedDaysPresent !== undefined && printedDaysAbsent !== undefined) {
+    const sumPrinted = Math.round((printedDaysPresent + printedDaysAbsent) * 100) / 100;
+    const expPrintedSd = Math.round(printedSchoolDays * 100) / 100;
+    if (sumPrinted !== expPrintedSd) {
+      hasTotalsDiscrepancy = true;
+      hasEquationDiscrepancy = true;
+      discrepancyDetails.push(
+        `Discrepancy sa Attendance Equation sa Printed Totals: Days Present (${printedDaysPresent}) + Days Absent (${printedDaysAbsent}) = ${sumPrinted}, ngunit ang School Days ay ${printedSchoolDays}.`
+      );
+    }
+  }
+
+  // Equation checks on Computed Totals
+  if (
+    computedSchoolDays !== undefined &&
+    computedDaysPresent !== undefined &&
+    computedDaysAbsent !== undefined &&
+    computedSchoolDays > 0
+  ) {
+    const sumComputed = Math.round((computedDaysPresent + computedDaysAbsent) * 100) / 100;
+    if (sumComputed !== computedSchoolDays) {
+      hasTotalsDiscrepancy = true;
+      hasEquationDiscrepancy = true;
+      discrepancyDetails.push(
+        `Discrepancy sa Attendance Equation sa Computed Totals: Sum of Days Present (${computedDaysPresent}) + Sum of Days Absent (${computedDaysAbsent}) = ${sumComputed}, ngunit ang Computed School Days ay ${computedSchoolDays}.`
+      );
+    }
+  }
+
   // Completeness check
   const isComplete =
     months.length > 0 &&
-    hasPopulatedSchoolDays &&
-    hasPopulatedDaysPresent &&
-    computedSchoolDays > 0;
+    isSchoolDaysComplete &&
+    isDaysPresentComplete &&
+    isDaysAbsentComplete;
 
   // Risk Status Screening
   let riskStatus: AttendanceRiskStatus = "NORMAL";
@@ -218,6 +299,10 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
     advisoryMessage = `Normal ang attendance record ng student (${attendancePercentage}% present, ${absencePercentage}% absent). Walang attendance warning.`;
   }
 
+  if (hasTotalsDiscrepancy || hasEquationDiscrepancy) {
+    requiresReview = true;
+  }
+
   const verificationStatus: AttendanceVerificationStatus =
     input.verificationStatus || (requiresReview ? "PENDING" : "PENDING");
 
@@ -226,12 +311,16 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
     computedSchoolDays,
     computedDaysPresent,
     computedDaysAbsent,
+    isSchoolDaysComplete,
+    isDaysPresentComplete,
+    isDaysAbsentComplete,
     printedSchoolDays,
     printedDaysPresent,
     printedDaysAbsent,
     attendancePercentage,
     absencePercentage,
     hasTotalsDiscrepancy,
+    hasEquationDiscrepancy,
     discrepancyDetails,
     riskStatus,
     verificationStatus,
@@ -286,6 +375,9 @@ export function evaluateAttendanceRecords(
       computed_school_days: evaluated.computedSchoolDays,
       computed_days_present: evaluated.computedDaysPresent,
       computed_days_absent: evaluated.computedDaysAbsent,
+      is_school_days_complete: evaluated.isSchoolDaysComplete,
+      is_days_present_complete: evaluated.isDaysPresentComplete,
+      is_days_absent_complete: evaluated.isDaysAbsentComplete,
       printed_school_days: evaluated.printedSchoolDays,
       printed_days_present: evaluated.printedDaysPresent,
       printed_days_absent: evaluated.printedDaysAbsent,
@@ -293,6 +385,8 @@ export function evaluateAttendanceRecords(
     attendancePercentage: evaluated.attendancePercentage,
     absencePercentage: evaluated.absencePercentage,
     riskStatus: evaluated.riskStatus,
+    hasTotalsDiscrepancy: evaluated.hasTotalsDiscrepancy,
+    hasEquationDiscrepancy: evaluated.hasEquationDiscrepancy,
     discrepancyDetails: evaluated.discrepancyDetails,
   };
 }

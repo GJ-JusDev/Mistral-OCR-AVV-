@@ -1,10 +1,12 @@
 export interface StudentAcademicContext {
+  schoolId: string;
   schoolYear: string;
   gradeLevel: string;
-  section?: string | null;
+  section: string;
 }
 
 interface AcademicContextRecord {
+  school_id?: string | null;
   school_year?: string | null;
   grade_level?: string | null;
   section?: string | null;
@@ -14,29 +16,28 @@ interface AcademicContextRecord {
 
 export function getStudentAcademicContexts(
   enrollments: AcademicContextRecord[] = [],
-  validations: AcademicContextRecord[] = []
+  validations: AcademicContextRecord[] = [],
+  studentSchoolId?: string | null
 ): StudentAcademicContext[] {
   const contexts = new Map<string, StudentAcademicContext>();
-  const enrollmentYearGrades = new Set<string>();
   const addContext = (row: AcademicContextRecord) => {
-    if (!row?.school_year || !row?.grade_level) return;
+    const schoolId = row?.school_id || studentSchoolId;
+    if (!schoolId || !row?.school_year || !row?.grade_level || !row?.section) return;
+    if (studentSchoolId && schoolId !== studentSchoolId) return;
     const context = {
+      schoolId: String(schoolId),
       schoolYear: String(row.school_year),
       gradeLevel: String(row.grade_level),
-      section: row.section || null,
+      section: String(row.section),
     };
-    const key = `${context.schoolYear}|${context.gradeLevel}|${context.section || ""}`;
+    const key = `${context.schoolId}|${context.schoolYear}|${context.gradeLevel}|${context.section}`;
     if (!contexts.has(key)) contexts.set(key, context);
   };
   for (const row of enrollments) {
-    if (!row?.school_year || !row?.grade_level) continue;
-    enrollmentYearGrades.add(`${row.school_year}|${row.grade_level}`);
     addContext(row);
   }
   for (const row of validations) {
-    if (!row?.school_year || !row?.grade_level) continue;
-    const yearGradeKey = `${row.school_year}|${row.grade_level}`;
-    if (!enrollmentYearGrades.has(yearGradeKey)) addContext(row);
+    addContext(row);
   }
   return Array.from(contexts.values());
 }
@@ -52,7 +53,8 @@ export function chooseInitialStudentAcademicContext(
     const currentContext = contexts.find((context) =>
       context.schoolYear === String(currentEnrollment.school_year) &&
       context.gradeLevel === String(currentEnrollment.grade_level) &&
-      (context.section || "") === (currentEnrollment.section || "")
+      context.schoolId === String(currentEnrollment.school_id || context.schoolId) &&
+      context.section === String(currentEnrollment.section || "")
     );
     if (currentContext) return currentContext;
   }
@@ -62,8 +64,10 @@ export function chooseInitialStudentAcademicContext(
 export function buildPersistedValidationUrl(studentId: string, context: StudentAcademicContext): string {
   const params = new URLSearchParams({
     studentId,
+    schoolId: context.schoolId,
     schoolYear: context.schoolYear,
     gradeLevel: context.gradeLevel,
+    section: context.section,
   });
   return `/api/validation/cross-document?${params.toString()}`;
 }

@@ -19,15 +19,20 @@ import type {
   CrossDocumentValidationStatus,
   CrossDocumentValidationType,
 } from "@/types/database";
-import type {
-  ConsolidatedShsEvaluationResult,
-  PairwiseValidationResult,
-  UnifiedFieldComparisonRow,
+import {
+  buildDocumentCompletenessChecklist,
+  deriveDocumentPresenceFromMatrix,
+  evaluateRequiredDocumentCoverage,
+  type ConsolidatedShsEvaluationResult,
+  type PairwiseValidationResult,
+  type UnifiedFieldComparisonRow,
 } from "@/lib/validation/crossDocumentEngine";
+import { readPersistedValidationResponse } from "@/lib/validation/studentCrossDocumentValidation";
 
 interface ShsConsolidatedValidationHubProps {
   student: {
     id: string;
+    school_id: string;
     lrn: string;
     first_name: string;
     middle_name?: string | null;
@@ -37,9 +42,9 @@ interface ShsConsolidatedValidationHubProps {
     section?: string;
     strand?: string;
   };
-  initialConsolidated?: ConsolidatedShsEvaluationResult | null;
   initialMatrix?: UnifiedFieldComparisonRow[] | null;
   initialValidationRecord?: any | null;
+  initialPairwiseResults?: PairwiseValidationResult[] | null;
   initialError?: string | null;
   initialLoading?: boolean;
   schoolYear: string;
@@ -51,9 +56,8 @@ interface ShsConsolidatedValidationHubProps {
 function getPersistedHubData(record: any, studentId: string, schoolId: string, gradeLevel?: string) {
   if (!record) return null;
   const matrix = Array.isArray(record.comparison_results) ? record.comparison_results : [];
-  const sourceTypes = new Set<string>(
-    matrix.flatMap((row: any) => row.sourceDocumentTypes || row.sourcesPresent || [])
-  );
+  const presence = deriveDocumentPresenceFromMatrix(matrix);
+  const coverage = evaluateRequiredDocumentCoverage(presence);
   const discrepancies = Array.isArray(record.discrepancy_details) ? record.discrepancy_details : [];
   const status = record.status === "RESOLVED" ? "RESOLVED" : record.status;
   return {
@@ -64,14 +68,18 @@ function getPersistedHubData(record: any, studentId: string, schoolId: string, g
     overallStatus: status as CrossDocumentValidationStatus,
     needsHumanReview: Boolean(record.needs_human_review),
     documentCompleteness: {
-      sf1: sourceTypes.has("SF1-SHS"),
-      sf2: sourceTypes.has("SF2-SHS"),
-      sf5: sourceTypes.has("SF5A-SHS") || sourceTypes.has("SF5B-SHS"),
-      sf9: sourceTypes.has("SF9-SHS"),
-      sf10: sourceTypes.has("SF10-SHS"),
-      birth_cert: sourceTypes.has("PSA"),
-      totalAvailable: sourceTypes.size,
-      totalRequired: 5,
+      sf1: presence.sf1,
+      sf2: presence.sf2,
+      sf5: coverage.sf5Satisfied,
+      sf5a: presence.sf5a,
+      sf5b: presence.sf5b,
+      sf9: presence.sf9,
+      sf10: presence.sf10,
+      birth_cert: presence.psa,
+      totalAvailable: coverage.requiredAvailable,
+      totalRequired: coverage.totalRequired,
+      requiredAvailable: coverage.requiredAvailable,
+      hasRequiredCoverage: coverage.hasRequiredCoverage,
     },
     pairwiseResults: [],
     criticalDiscrepanciesCount: discrepancies.filter((item: any) => item.severity === "CRITICAL").length,
@@ -85,9 +93,9 @@ function getPersistedHubData(record: any, studentId: string, schoolId: string, g
 
 export default function ShsConsolidatedValidationHub({
   student,
-  initialConsolidated,
   initialMatrix,
   initialValidationRecord,
+  initialPairwiseResults = [],
   initialError,
   initialLoading,
   schoolYear,
@@ -96,27 +104,30 @@ export default function ShsConsolidatedValidationHub({
   onRefreshValidation,
 }: ShsConsolidatedValidationHubProps) {
   const activeValidationRecord = initialValidationRecord &&
+    initialValidationRecord.student_id === student.id &&
+    initialValidationRecord.school_id === student.school_id &&
     (!schoolYear || initialValidationRecord.school_year === schoolYear) &&
-    (!gradeLevel || initialValidationRecord.grade_level === gradeLevel)
+    (!gradeLevel || initialValidationRecord.grade_level === gradeLevel) &&
+    (!section || initialValidationRecord.section === section)
     ? initialValidationRecord
     : null;
   const [data, setData] = useState<ConsolidatedShsEvaluationResult | null>(
     activeValidationRecord
       ? getPersistedHubData(activeValidationRecord, student.id, activeValidationRecord.school_id || "", student.grade_level)
-      : initialConsolidated || null
+      : null
   );
   const [matrix, setMatrix] = useState<UnifiedFieldComparisonRow[] | null>(
-    initialMatrix ||
-      (Array.isArray(activeValidationRecord?.comparison_results)
+    activeValidationRecord
+      ? initialMatrix || (Array.isArray(activeValidationRecord.comparison_results)
         ? activeValidationRecord.comparison_results
-        : Array.isArray((initialConsolidated as any)?.comparison_results)
-        ? (initialConsolidated as any).comparison_results
         : null)
+      : null
   );
   const [persistedDiscrepancies, setPersistedDiscrepancies] = useState<any[]>(
     Array.isArray(activeValidationRecord?.discrepancy_details) ? activeValidationRecord.discrepancy_details : []
   );
   const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+  const [pairwiseResults, setPairwiseResults] = useState<PairwiseValidationResult[]>(initialPairwiseResults || []);
   const [loading, setLoading] = useState(false);
   const [persistedLoading, setPersistedLoading] = useState(Boolean(initialLoading));
   const [error, setError] = useState<string | null>(initialError || null);
@@ -125,29 +136,32 @@ export default function ShsConsolidatedValidationHub({
   const displayGradeLevel = gradeLevel || student.grade_level;
 
   useEffect(() => {
-    setData(
-      activeValidationRecord
-        ? getPersistedHubData(activeValidationRecord, student.id, activeValidationRecord.school_id || "", displayGradeLevel)
-        : initialConsolidated || null
-    );
-    setMatrix(
-      initialMatrix ||
-        (Array.isArray(activeValidationRecord?.comparison_results)
-          ? activeValidationRecord.comparison_results
-          : Array.isArray((initialConsolidated as any)?.comparison_results)
-          ? (initialConsolidated as any).comparison_results
-          : null)
-    );
-    setPersistedDiscrepancies(
-      Array.isArray(activeValidationRecord?.discrepancy_details) ? activeValidationRecord.discrepancy_details : []
-    );
-    setError(initialError || null);
-    setPersistedLoading(Boolean(initialLoading));
-  }, [student.id, schoolYear, gradeLevel, activeValidationRecord, initialMatrix, initialConsolidated, initialError, initialLoading]);
+    const timer = setTimeout(() => {
+      setData(
+        activeValidationRecord
+          ? getPersistedHubData(activeValidationRecord, student.id, activeValidationRecord.school_id || "", displayGradeLevel)
+          : null
+      );
+      setMatrix(
+        activeValidationRecord
+          ? initialMatrix || (Array.isArray(activeValidationRecord.comparison_results)
+            ? activeValidationRecord.comparison_results
+            : null)
+          : null
+      );
+      setPairwiseResults(initialPairwiseResults || []);
+      setPersistedDiscrepancies(
+        Array.isArray(activeValidationRecord?.discrepancy_details) ? activeValidationRecord.discrepancy_details : []
+      );
+      setError(initialError || null);
+      setPersistedLoading(Boolean(initialLoading));
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [student.id, student.school_id, schoolYear, gradeLevel, section, activeValidationRecord, initialMatrix, initialPairwiseResults, initialError, initialLoading, displayGradeLevel]);
 
   const handleRunValidation = async () => {
-    if (!schoolYear) {
-      setError("Select an academic context before running validation.");
+    if (!student.school_id || !schoolYear || !section) {
+      setError("Select a school, school year, grade level, and section before running validation.");
       return;
     }
     setLoading(true);
@@ -158,6 +172,7 @@ export default function ShsConsolidatedValidationHub({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           studentId: student.id,
+          schoolId: student.school_id,
           schoolYear,
           gradeLevel: displayGradeLevel,
           section,
@@ -167,28 +182,30 @@ export default function ShsConsolidatedValidationHub({
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Cross-document validation execution failed");
       }
-      const json = await res.json();
       const params = new URLSearchParams({
         studentId: student.id,
+        schoolId: student.school_id,
         schoolYear,
         ...(displayGradeLevel ? { gradeLevel: displayGradeLevel } : {}),
+        section,
       });
       const savedRes = await fetch(`/api/validation/cross-document?${params.toString()}`);
-      if (!savedRes.ok) {
-        const savedError = await savedRes.json().catch(() => ({}));
-        throw new Error(savedError.error || "Validation completed but saved results could not be retrieved.");
-      }
-      const saved = await savedRes.json();
-      const record = saved.consolidated || json.consolidatedRecord;
+      const saved = await readPersistedValidationResponse(savedRes);
+      const record = saved.consolidated;
       setData(
         record
           ? getPersistedHubData(record, student.id, record.school_id || "", student.grade_level)
-          : json.consolidated
+          : null
       );
-      setMatrix(saved.matrix || json.matrix || []);
-      setPersistedDiscrepancies(saved.discrepancies || json.discrepancies || []);
+      setMatrix(record ? saved.matrix : null);
+      setPersistedDiscrepancies(record ? saved.discrepancies : []);
+      setPairwiseResults(saved.pairwiseResults);
       if (onRefreshValidation) await onRefreshValidation();
     } catch (err: any) {
+      setData(null);
+      setMatrix(null);
+      setPersistedDiscrepancies([]);
+      setPairwiseResults([]);
       setError(err.message || "Failed to execute validation");
     } finally {
       setLoading(false);
@@ -258,26 +275,17 @@ export default function ShsConsolidatedValidationHub({
     }
   };
 
-  const completeness = data?.documentCompleteness || {
-    sf1: false,
-    sf2: false,
-    sf5: false,
-    sf9: false,
-    sf10: false,
-    birth_cert: false,
-    totalAvailable: 0,
-    totalRequired: 6,
-  };
-
-  const docs = [
-    { key: "sf1", label: "SHS SF1 School Register", present: completeness.sf1, required: true },
-    { key: "sf2", label: "SHS SF2 Attendance Sheet", present: completeness.sf2, required: true },
-    { key: "sf5", label: "SHS SF5A Promotion Report", present: (completeness as any).sf5a ?? completeness.sf5, required: true },
-    { key: "sf5", label: "SHS SF5B Graduation List", present: (completeness as any).sf5b ?? false, required: Boolean(student.grade_level?.includes("12")) },
-    { key: "sf9", label: "SHS SF9 Report Card", present: completeness.sf9, required: true },
-    { key: "sf10", label: "SHS SF10 Permanent Record", present: completeness.sf10, required: true },
-    { key: "birth_cert", label: "PSA Birth Certificate", present: (completeness as any).psa ?? completeness.birth_cert, required: false },
-  ];
+  const completeness = data?.documentCompleteness;
+  // The checklist follows exactly the engine rule: SF5A OR SF5B satisfies one requirement.
+  const { items: docs, coverage: completenessCoverage } = buildDocumentCompletenessChecklist({
+    sf1: Boolean(completeness?.sf1),
+    sf2: Boolean(completeness?.sf2),
+    sf5a: Boolean(completeness?.sf5a ?? (completeness?.sf5 && !completeness?.sf5b)),
+    sf5b: Boolean(completeness?.sf5b),
+    sf9: Boolean(completeness?.sf9),
+    sf10: Boolean(completeness?.sf10),
+    psa: Boolean(completeness?.birth_cert),
+  });
 
   return (
     <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 p-6 shadow-xs space-y-6">
@@ -333,9 +341,9 @@ export default function ShsConsolidatedValidationHub({
       {/* Document Completeness Checklist */}
       <div>
         <h3 className="text-xs font-bold uppercase tracking-wide text-zinc-500 mb-3">
-          Document Completeness Matrix ({completeness.totalAvailable}/{completeness.totalRequired} Forms)
+          Document Completeness Matrix ({completenessCoverage.requiredAvailable}/{completenessCoverage.totalRequired} Required Forms)
         </h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
           {docs.map((doc, dIdx) => (
             <div
               key={dIdx}
@@ -359,6 +367,9 @@ export default function ShsConsolidatedValidationHub({
                 </p>
                 <p className="text-[10px] text-zinc-500 mt-0.5">
                   {doc.required ? "Required" : "Supporting"}
+                  {doc.present && doc.key === "sf5" && doc.satisfiedBy.length > 0
+                    ? ` · Satisfied by ${doc.satisfiedBy.join(" + ")}`
+                    : ""}
                 </p>
               </div>
             </div>
@@ -441,6 +452,16 @@ export default function ShsConsolidatedValidationHub({
                             {row.notes && (
                               <p className="text-[10px] text-zinc-500 mt-0.5 italic">{row.notes}</p>
                             )}
+                            {row.sourceTraces && row.sourceTraces.length > 0 && (
+                              <p className="text-[9px] text-zinc-400 mt-1 break-all">
+                                Source trace: {row.sourceTraces.map((trace) => [
+                                  `${trace.documentType} ${trace.documentId}`,
+                                  trace.pageNumber !== undefined ? `Page ${trace.pageNumber}` : null,
+                                  trace.rowIndex !== undefined ? `Row ${trace.rowIndex}` : null,
+                                  trace.academicContext?.semester,
+                                ].filter(Boolean).join(" · ")).join("; ")}
+                              </p>
+                            )}
                           </td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.psaValue)}</td>
                           <td className="py-2.5 px-2 text-center font-mono">{renderCellValue(row.sf1Value)}</td>
@@ -469,13 +490,13 @@ export default function ShsConsolidatedValidationHub({
       )}
 
       {/* Pairwise Results Section */}
-      {data && data.pairwiseResults.length > 0 && (
+      {pairwiseResults.length > 0 && (
         <div className="space-y-3">
           <h3 className="text-xs font-bold uppercase tracking-wide text-zinc-500">
-            Pairwise Cross-Document Consistency Audits ({data.pairwiseResults.length})
+            Pairwise Cross-Document Consistency Audits ({pairwiseResults.length})
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {data.pairwiseResults.map((pr: PairwiseValidationResult, idx: number) => (
+            {pairwiseResults.map((pr: PairwiseValidationResult, idx: number) => (
               <div
                 key={idx}
                 className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/30 flex flex-col justify-between space-y-2"

@@ -36,6 +36,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [currentTime, setCurrentTime] = useState<number>(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "declined">("all");
   const [roleFilter, setRoleFilter] = useState<string>("all");
@@ -62,7 +63,11 @@ export default function UsersPage() {
   }
 
   useEffect(() => {
-    fetchUsers();
+    const timer = setTimeout(() => {
+      setCurrentTime(Date.now());
+      void fetchUsers();
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   // Filtered and computed user lists
@@ -342,8 +347,8 @@ export default function UsersPage() {
 
                   // Countdown calculation
                   const eligibilityTime = user.review_eligibility_time ? new Date(user.review_eligibility_time).getTime() : 0;
-                  const isEarly = eligibilityTime > Date.now();
-                  const remainingHours = isEarly ? Math.ceil((eligibilityTime - Date.now()) / (1000 * 60 * 60)) : 0;
+                  const isEarly = currentTime > 0 && eligibilityTime > currentTime;
+                  const remainingHours = isEarly ? Math.ceil((eligibilityTime - currentTime) / (1000 * 60 * 60)) : 0;
 
                   return (
                     <TableRow key={user.id} className={isPending ? "bg-amber-50/40" : ""}>

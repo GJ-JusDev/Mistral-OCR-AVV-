@@ -392,7 +392,7 @@ export function parseAzureObservedValuesTable(
 
     // Attempt to match behavior statement in col 1, col 0, or combined
     const candidateText = `${col0Text} ${col1Text}`.trim();
-    let stmtDef = matchBehaviorStatement(candidateText) || matchBehaviorStatement(fullRowText);
+    const stmtDef = matchBehaviorStatement(candidateText) || matchBehaviorStatement(fullRowText);
 
     if (!stmtDef) {
       // Check if candidate matches any of the canonical statements by sequential index under current Core Value
@@ -603,7 +603,7 @@ export function parseTextObservedValuesAndAchievement(
     }
 
     // Check for Behavior Statement in pipe-table row: | Core Value | Statement | Q1 | Q2 | Q3 | Q4 |
-    if (line.startsWith("|")) {
+    if (line.includes("|")) {
       const cells = line
         .split("|")
         .map((c) => c.trim())

@@ -233,10 +233,10 @@ export async function autoCropDocument(
     const cropH = Math.min(origH - cropY, Math.round(boxH / scale));
 
     // Crop onto high-resolution canvas
-    let cropCanvas = document.createElement("canvas");
+    const cropCanvas = document.createElement("canvas");
     cropCanvas.width = cropW;
     cropCanvas.height = cropH;
-    let cropCtx = cropCanvas.getContext("2d");
+    const cropCtx = cropCanvas.getContext("2d");
     if (!cropCtx) {
       return {
         success: false,

@@ -158,7 +158,7 @@ export async function getPrincipalDashboardData() {
       .select("student_id, subject, final_grade, status, semester");
 
     // 5. Try fetching eligibility approvals (or defensive fallback)
-    let eligibilityMap = new Map<string, any>();
+    const eligibilityMap = new Map<string, any>();
     try {
       const { data: approvals } = await supabase
         .from("eligibility_approvals")
@@ -457,7 +457,7 @@ export async function getPrincipalStudentRecords(filters?: {
       .order("subject", { ascending: true });
 
     // 4. Fetch eligibility approvals
-    let eligibilityMap = new Map<string, any>();
+    const eligibilityMap = new Map<string, any>();
     try {
       const { data: approvals } = await supabase
         .from("eligibility_approvals")
@@ -1443,8 +1443,8 @@ export async function getPrincipalAcademicOverview(filters?: {
 
       // Verified grades from subject_grades table OR approved document extracted_fields
       let grades: any[] = allGrades.filter(g => g.student_id === st.id);
-      let generalAverage = fields.precise_general_average || fields.general_average || fields.shs_general_average_printed || null;
-      let displayedAverage = fields.displayed_general_average || (generalAverage !== null && !isNaN(Number(generalAverage)) ? Math.round(Number(generalAverage)) : null);
+      const generalAverage = fields.precise_general_average || fields.general_average || fields.shs_general_average_printed || null;
+      const displayedAverage = fields.displayed_general_average || (generalAverage !== null && !isNaN(Number(generalAverage)) ? Math.round(Number(generalAverage)) : null);
 
       if (grades.length === 0 && Array.isArray(fields.grades) && fields.grades.length > 0) {
         grades = fields.grades.map((g: any) => ({

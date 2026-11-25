@@ -196,40 +196,7 @@ export default function RegisterPage() {
             </div>
           </div>
 
-          {/* New Advisory Request Section */}
-            <div className="space-y-4 pt-2">
-              <div className="border-b border-slate-100 pb-2">
-                <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#0B1F33]">3. Advisory Assignment Request</h2>
-                <p className="text-xs text-slate-500 mt-0.5">Select your intended advisory class. This will be reviewed by the administrator.</p>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Grade Level */}
-                <div>
-                  <label htmlFor="gradeLevel" className="block text-xs sm:text-sm font-semibold text-slate-700 mb-1.5">Grade Level <span className="text-red-500">*</span></label>
-                  <select id="gradeLevel" name="gradeLevel" required className="w-full px-3 py-2 text-sm bg-slate-50/50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20">
-                    <option value="">Select grade level</option>
-                    <option value="Grade 11">Grade 11</option>
-                    <option value="Grade 12">Grade 12</option>
-                  </select>
-                </div>
-                {/* Strand */}
-                <div>
-                  <label htmlFor="strand" className="block text-xs sm:text-sm font-semibold text-slate-700 mb-1.5">Strand <span className="text-red-500">*</span></label>
-                  <select id="strand" name="strand" required className="w-full px-3 py-2 text-sm bg-slate-50/50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20">
-                    <option value="">Select strand</option>
-                    <option value="CSS">CSS</option>
-                    <option value="HUMSS">HUMSS</option>
-                    <option value="Tourism">Tourism</option>
-                  </select>
-                </div>
-                {/* Section */}
-                <div className="sm:col-span-2">
-                  <label htmlFor="section" className="block text-xs sm:text-sm font-semibold text-slate-700 mb-1.5">Section <span className="text-red-500">*</span></label>
-                  <input id="section" name="section" type="text" required placeholder="e.g. Rizal" className="w-full px-3 py-2 text-sm bg-slate-50/50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#174EA6] focus:ring-2 focus:ring-[#174EA6]/20" />
-                </div>
-              </div>
-            </div>
-            {/* SECTION 2: Account Credentials */}
+          {/* SECTION 2: Account Credentials */}
           <div className="space-y-4 pt-2">
             <div className="border-b border-slate-100 pb-2">
               <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#0B1F33]">

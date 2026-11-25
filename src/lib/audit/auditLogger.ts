@@ -233,9 +233,6 @@ export async function queryAuditLogs(
   const pageSize = Math.min(100, Math.max(1, pagination.pageSize || 20));
   const offset = (page - 1) * pageSize;
 
-  let allEvents: AuditEvent[] = [];
-  let dbQueriedSuccessfully = false;
-
   const adminClient = getAdminClient();
   if (adminClient) {
     try {
@@ -293,7 +290,6 @@ export async function queryAuditLogs(
       const { data, count, error } = await query.range(offset, offset + pageSize - 1);
 
       if (!error && data) {
-        dbQueriedSuccessfully = true;
         const totalCount = count ?? data.length;
 
         // Compute summary metrics

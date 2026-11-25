@@ -11,6 +11,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import type { TeacherAssignmentRecord, TeacherModulePolicy } from "@/lib/teacher/assignments";
+import TeacherAdvisorySelectionArea from "./TeacherAdvisorySelectionArea";
 
 interface AssignedSectionItem {
   key: string;
@@ -32,6 +33,7 @@ export interface TeacherAssignmentOverviewProps {
   pendingDocuments: any[];
   policy: TeacherModulePolicy;
   canScanAny: boolean;
+  requestedAdvisory?: any;
 }
 
 export default function TeacherAssignmentOverview({
@@ -42,30 +44,37 @@ export default function TeacherAssignmentOverview({
   pendingDocuments,
   policy: _policy,
   canScanAny,
+  requestedAdvisory,
 }: TeacherAssignmentOverviewProps) {
   const hasAnyActiveAssignment =
     advisoryClasses.length > 0 || subjectAssignments.length > 0;
 
   if (!hasAnyActiveAssignment) {
     return (
-      <div
-        role="region"
-        aria-labelledby="no-active-assignment-heading"
-        className="rounded-xl border border-amber-300 bg-amber-50 p-6 shadow-xs"
-      >
-        <div className="flex items-start gap-4">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
-            <ShieldAlert className="h-6 w-6" aria-hidden="true" />
-          </div>
-          <div>
-            <h2 id="no-active-assignment-heading" className="text-lg font-bold text-slate-900">
-              No Active Teaching Assignments Found
-            </h2>
-            <p className="mt-1 text-sm text-slate-700">
-              You currently do not have any active Class Adviser or Subject Teacher assignments.
-              Please request an official class or subject assignment from your school administrator
-              before viewing student rosters or scanning SF9/SF10 documents.
-            </p>
+      <div className="space-y-6">
+        <TeacherAdvisorySelectionArea
+          advisoryClasses={advisoryClasses}
+          initialRequestedAdvisory={requestedAdvisory}
+        />
+        <div
+          role="region"
+          aria-labelledby="no-active-assignment-heading"
+          className="rounded-xl border border-amber-300 bg-amber-50 p-6 shadow-xs"
+        >
+          <div className="flex items-start gap-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+              <ShieldAlert className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <div>
+              <h2 id="no-active-assignment-heading" className="text-lg font-bold text-slate-900">
+                No Active Teaching Assignments Found
+              </h2>
+              <p className="mt-1 text-sm text-slate-700">
+                You currently do not have any active Class Adviser or Subject Teacher assignments.
+                Submit an advisory class request above or contact your school administrator.
+                SF9/SF10 scanning and roster viewing remain locked until an approved assignment is in place.
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -74,6 +83,10 @@ export default function TeacherAssignmentOverview({
 
   return (
     <div className="space-y-6">
+      <TeacherAdvisorySelectionArea
+        advisoryClasses={advisoryClasses}
+        initialRequestedAdvisory={requestedAdvisory}
+      />
       {/* Row 1: Advisory Classes & Teaching Subjects */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <DashboardCard

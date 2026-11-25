@@ -100,21 +100,66 @@ function splitName(fullName: string): {
   };
 }
 
+function isBareNameLabel(line: string, label: "last" | "first" | "middle"): boolean {
+  const trimmed = line.trim();
+  const stripped = trimmed.replace(/^[\(\[\{]\s*/, "").replace(/\s*[\)\]\}]$/, "").trim();
+  let labelRegex: RegExp;
+  if (label === "last") {
+    labelRegex = /^(?:last\s*name|surname|apelyido)(?:\s*\/\s*(?:last\s*name|surname|apelyido))?[:\s]*$/i;
+  } else if (label === "first") {
+    labelRegex = /^(?:first\s*name|given\s*name|pangalan)(?:\s*\/\s*(?:first\s*name|given\s*name|pangalan))?[:\s]*$/i;
+  } else {
+    labelRegex = /^(?:middle\s*name|gitnang\s*apelyido)(?:\s*\/\s*(?:middle\s*name|gitnang\s*apelyido))?[:\s]*$/i;
+  }
+  return labelRegex.test(stripped);
+}
+
 /**
  * Attempt to extract name by looking for the line containing "Last Name" or "First Name", 
  * and grabbing the line immediately above it. This is very common in Philippine school 
  * forms where labels are printed below the blank line.
  */
-function extractNameFromLabelsBelow(text: string): string | null {
+function extractNameFromLabelsBelow(text: string): { fullName: string; first_name?: string; middle_name?: string; last_name?: string } | string | null {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].toLowerCase();
-    if (line.includes("last name") || line.includes("first name")) {
+  const isHeaderOrMeta = (s: string) =>
+    s.includes(":") ||
+    /\d/.test(s) ||
+    /^(?:republic|department|region|division|district|school|report|sf\d|lrn|grade|section|track|strand|semester|quarter)/i.test(s) ||
+    ALL_LABELS.some(lbl => s.toLowerCase() === lbl.toLowerCase());
+
+  for (let i = 0; i < lines.length; i++) {
+    // 1. Column-stacked layout: 3 name lines printed above "Last Name", "First Name", "Middle Name"
+    if (isBareNameLabel(lines[i], "last")) {
+      const next1 = lines[i + 1] || "";
+      const next2 = lines[i + 2] || "";
+      if (isBareNameLabel(next1, "first") && (isBareNameLabel(next2, "middle") || i >= 2)) {
+        if (i >= 3) {
+          const lName = lines[i - 3].replace(/^(Name|Student Name|Learner's Name)[\s:]*/i, "").trim();
+          const fName = lines[i - 2].trim();
+          const mName = lines[i - 1].trim();
+          if (
+            lName && fName && mName &&
+            !isHeaderOrMeta(lName) &&
+            !isHeaderOrMeta(fName) &&
+            !isHeaderOrMeta(mName)
+          ) {
+            return {
+              fullName: `${lName}, ${fName} ${mName}`,
+              first_name: fName,
+              middle_name: mName,
+              last_name: lName,
+            };
+          }
+        }
+      }
+    }
+
+    // 2. Single line printed directly above bare label
+    if (i >= 1 && (isBareNameLabel(lines[i], "last") || isBareNameLabel(lines[i], "first"))) {
       const aboveLine = lines[i - 1];
       // Strip "Name:" prefix if it exists on that line
       const cleanAbove = aboveLine.replace(/^(Name|Student Name|Learner's Name)[\s:]*/i, "").trim();
-      // Avoid grabbing random other labels
-      if (cleanAbove && !ALL_LABELS.some(l => cleanAbove.toLowerCase() === l.toLowerCase()) && cleanAbove.length > 2) {
+      if (cleanAbove && !isHeaderOrMeta(cleanAbove) && cleanAbove.length > 2) {
         return cleanAbove;
       }
     }
@@ -201,31 +246,43 @@ export function parseOcrText(text: string, rawLayout?: any): ExtractedFields {
     }
   } else {
     // First try the highly accurate heuristic: Name is printed directly above "Last Name First Name" labels
-    fullName = extractNameFromLabelsBelow(text) || "";
+    const labelsBelowRes = extractNameFromLabelsBelow(text);
+    if (labelsBelowRes && typeof labelsBelowRes === "object") {
+      fullName = labelsBelowRes.fullName;
+      nameParts = {
+        first_name: labelsBelowRes.first_name || "",
+        middle_name: labelsBelowRes.middle_name || "",
+        last_name: labelsBelowRes.last_name || "",
+      };
+    } else {
+      if (typeof labelsBelowRes === "string") {
+        fullName = labelsBelowRes;
+      }
 
-    if (!fullName) {
-      // Fallback to standard field extraction
-      fullName =
-        extractField(text, "Name", otherLabels) ||
-        extractField(text, "Student Name", otherLabels) ||
-        extractField(text, "Learner's Name", otherLabels) ||
-        extractField(text, "Pangalan", otherLabels); // Filipino label
+      if (!fullName) {
+        // Fallback to standard field extraction
+        fullName =
+          extractField(text, "Name", otherLabels) ||
+          extractField(text, "Student Name", otherLabels) ||
+          extractField(text, "Learner's Name", otherLabels) ||
+          extractField(text, "Pangalan", otherLabels); // Filipino label
+      }
+
+      // Try extracting first/middle/last separately first.
+      const directFirst = extractField(text, "First Name", otherLabels) ||
+        extractField(text, "Given Name", otherLabels);
+      const directMiddle = extractField(text, "Middle Name", otherLabels) ||
+        extractField(text, "Middle Initial", otherLabels);
+      const directLast = extractField(text, "Last Name", otherLabels) ||
+        extractField(text, "Surname", otherLabels) ||
+        extractField(text, "Family Name", otherLabels);
+
+      // If we got direct parts, use them. Otherwise split the full name.
+      nameParts =
+        directFirst || directLast
+          ? { first_name: directFirst, middle_name: directMiddle, last_name: directLast }
+          : splitName(fullName);
     }
-
-    // Try extracting first/middle/last separately first.
-    const directFirst = extractField(text, "First Name", otherLabels) ||
-      extractField(text, "Given Name", otherLabels);
-    const directMiddle = extractField(text, "Middle Name", otherLabels) ||
-      extractField(text, "Middle Initial", otherLabels);
-    const directLast = extractField(text, "Last Name", otherLabels) ||
-      extractField(text, "Surname", otherLabels) ||
-      extractField(text, "Family Name", otherLabels);
-
-    // If we got direct parts, use them. Otherwise split the full name.
-    nameParts =
-      directFirst || directLast
-        ? { first_name: directFirst, middle_name: directMiddle, last_name: directLast }
-        : splitName(fullName);
   }
 
   // Compose the full name for display and adviser name-collision checking
@@ -235,10 +292,36 @@ export function parseOcrText(text: string, rawLayout?: any): ExtractedFields {
       .join(" ");
 
   // LRN
-  const rawLrn =
+  let rawLrn =
     spatial.lrn ||
     extractField(text, "LRN", otherLabels) ||
     extractField(text, "Learner Reference Number", otherLabels);
+
+  // If LRN label is on its own line followed by a 12-digit number on subsequent lines
+  if (!rawLrn || !isValidLrn(normalizeLrn(rawLrn))) {
+    const lines = text.split(/\r?\n/).map((l) => l.trim());
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\b(?:LRN|Learner Reference Number)\b[:\s]*$/i.test(lines[i])) {
+        for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
+          const m = lines[j].match(/^(\d{12})$/);
+          if (m) {
+            rawLrn = m[1];
+            break;
+          }
+        }
+        if (rawLrn) break;
+      }
+    }
+  }
+
+  // Fallback: If document contains a distinct standalone 12-digit number
+  if (!rawLrn || !isValidLrn(normalizeLrn(rawLrn))) {
+    const standaloneMatch = text.match(/(?:^|\n)\s*(\d{12})\s*(?:\r?\n|$)/);
+    if (standaloneMatch) {
+      rawLrn = standaloneMatch[1];
+    }
+  }
+
   const lrn = normalizeLrn(rawLrn);
 
   // Grade (exclude Grade / Grade Level from stop-labels so values like "Grade 8" are not self-truncated)

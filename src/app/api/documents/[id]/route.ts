@@ -35,6 +35,15 @@ export async function GET(
       .maybeSingle();
 
     const currentUserRole = String(roleRow?.role || user?.user_metadata?.role || "teacher").toLowerCase().trim();
+    if (currentUserRole === "admin" || currentUserRole === "administrator") {
+      return NextResponse.json(
+        {
+          error: "Forbidden: Administrator role cannot access document records. Documents module has been removed from Admin experience.",
+          code: "ADMIN_DOCUMENTS_REMOVED",
+        },
+        { status: 403 }
+      );
+    }
     const canApprove = currentUserRole === "admin";
 
     const { data, error } = await supabase

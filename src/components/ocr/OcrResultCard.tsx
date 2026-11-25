@@ -34,6 +34,12 @@ export default function OcrResultCard({
   provider,
 }: OcrResultCardProps) {
   const [showRaw, setShowRaw] = useState(false);
+  const [expandedCoreValues, setExpandedCoreValues] = useState<Record<string, boolean>>({
+    "1": true,
+    "2": true,
+    "3": true,
+    "4": true,
+  });
 
   if (!fields) return null;
 
@@ -201,13 +207,6 @@ export default function OcrResultCard({
     updatedAttendance[recordIndex] = rec;
     onFieldChange("attendance", updatedAttendance);
   };
-
-  const [expandedCoreValues, setExpandedCoreValues] = useState<Record<string, boolean>>({
-    "1": true,
-    "2": true,
-    "3": true,
-    "4": true,
-  });
 
   const toggleCoreValue = (indexStr: string) => {
     setExpandedCoreValues((prev) => ({

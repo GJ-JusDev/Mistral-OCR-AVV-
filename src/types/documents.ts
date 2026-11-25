@@ -265,6 +265,9 @@ export type ExtractedFields = {
     computed_school_days?: number
     computed_days_present?: number
     computed_days_absent?: number
+    is_school_days_complete?: boolean
+    is_days_present_complete?: boolean
+    is_days_absent_complete?: boolean
     printed_school_days?: number
     printed_days_present?: number
     printed_days_absent?: number

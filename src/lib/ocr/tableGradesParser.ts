@@ -23,6 +23,9 @@ export interface ParsedTableGradesResult {
     computed_school_days?: number;
     computed_days_present?: number;
     computed_days_absent?: number;
+    is_school_days_complete?: boolean;
+    is_days_present_complete?: boolean;
+    is_days_absent_complete?: boolean;
     printed_school_days?: number;
     printed_days_present?: number;
     printed_days_absent?: number;
@@ -306,13 +309,13 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           let values: string[] = [];
           let printedTotal: string | undefined = undefined;
 
-          // Panatilihin ang decimal/fractions (0.5, 19.5) at ihiwalay ang Total column
+          // Panatilihin ang decimal/fractions (0.5, 19.5), blangko, dash, at ihiwalay ang Total column
           if (totalColIdx > 0 && totalColIdx < row.length) {
-            values = row.slice(1, totalColIdx).map((c) => c.replace(/[^0-9.]/g, "").trim());
-            const rawTotal = row[totalColIdx]?.replace(/[^0-9.]/g, "").trim();
-            printedTotal = rawTotal !== "" ? rawTotal : undefined;
+            values = row.slice(1, totalColIdx).map((c) => c.trim());
+            const rawTotal = row[totalColIdx]?.trim();
+            printedTotal = rawTotal !== "" && rawTotal !== "-" && rawTotal !== "—" ? rawTotal : undefined;
           } else {
-            values = row.slice(1).map((c) => c.replace(/[^0-9.]/g, "").trim());
+            values = row.slice(1).map((c) => c.trim());
           }
 
           attendanceRecords.push({ label, values, total: printedTotal });
@@ -352,6 +355,9 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           computed_school_days: evaluated.computedSchoolDays,
           computed_days_present: evaluated.computedDaysPresent,
           computed_days_absent: evaluated.computedDaysAbsent,
+          is_school_days_complete: evaluated.isSchoolDaysComplete,
+          is_days_present_complete: evaluated.isDaysPresentComplete,
+          is_days_absent_complete: evaluated.isDaysAbsentComplete,
           printed_school_days: evaluated.printedSchoolDays,
           printed_days_present: evaluated.printedDaysPresent,
           printed_days_absent: evaluated.printedDaysAbsent,
@@ -397,11 +403,20 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       tableGradeLevel = "Grade 11";
     }
 
-    if (fullTableText.includes("first semester") || fullTableText.includes("1st semester")) {
-      isSemester1 = true;
-    }
-    if (fullTableText.includes("second semester") || fullTableText.includes("2nd semester")) {
+    const firstRowsText = matrix.slice(0, 3).map((r) => r.join(" ")).join(" ").toLowerCase();
+    if (firstRowsText.includes("second semester") || firstRowsText.includes("2nd semester")) {
       isSemester2 = true;
+      isSemester1 = false;
+    } else if (firstRowsText.includes("first semester") || firstRowsText.includes("1st semester")) {
+      isSemester1 = true;
+      isSemester2 = false;
+    } else {
+      if (fullTableText.includes("second semester") || fullTableText.includes("2nd semester")) {
+        isSemester2 = true;
+      }
+      if (fullTableText.includes("first semester") || fullTableText.includes("1st semester")) {
+        isSemester1 = true;
+      }
     }
 
     // Inspect header rows (Row 0 and Row 1) for column positioning
@@ -502,7 +517,14 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       isFullYearQuarterly = true;
       isSemester1 = false;
       isSemester2 = false;
-    } else if (isSemester2 || (q3Col >= 0 || q4Col >= 0)) {
+    } else if (q3Col >= 0 || q4Col >= 0) {
+      // Explicit Q3 or Q4 columns present -> strictly Second Semester
+      isSemester2 = true;
+      isSemester1 = false;
+      if (q3Col === -1 && table.columnCount >= 3) q3Col = 1;
+      if (q4Col === -1 && table.columnCount >= 3) q4Col = 2;
+    } else if (isSemester2 && !isSemester1) {
+      // Explicit Second Semester heading without Q1/Q2 headers
       isSemester2 = true;
       isSemester1 = false;
       if (q3Col === -1 && q1Col >= 0) q3Col = q1Col;
@@ -510,6 +532,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (q3Col === -1 && table.columnCount >= 3) q3Col = 1;
       if (q4Col === -1 && table.columnCount >= 3) q4Col = 2;
     } else {
+      // Default to First Semester (Q1, Q2)
       isSemester1 = true;
       isSemester2 = false;
       if (q1Col === -1 && table.columnCount >= 3) q1Col = 1;

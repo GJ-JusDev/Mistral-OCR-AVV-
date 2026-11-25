@@ -92,7 +92,7 @@ export function parseShsSf2(
 
   // Calculate summary metrics
   let totalPresent = 0;
-  let totalSchoolDays = header.total_school_days || 20;
+  const totalSchoolDays = header.total_school_days || 20;
   let learnersWith5ConsecutiveAbsences = 0;
 
   for (const entry of attendance) {
