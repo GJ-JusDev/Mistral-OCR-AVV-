@@ -4,12 +4,11 @@ import React, { useState } from "react";
 import { Card } from "@/components/ui/Card";
 import FieldEditor from "./FieldEditor";
 import { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
-import { AlertTriangle, CheckCircle, FileText, User, Users, Award, ShieldCheck, ChevronDown, ChevronRight, Heart, Sparkles, BookOpen } from "lucide-react";
+import { AlertTriangle, FileText, Users, Award, ShieldCheck, ChevronDown, ChevronRight, Heart } from "lucide-react";
 import { normalizeObservedRating } from "@/lib/ocr/observedValuesParser";
 import {
   recalculateSubjectGradeStatus,
   computeSemesterGeneralAverage,
-  updateExtractedFieldsAverages,
   normalizeGradeRecords,
   normalizeSemesterContext,
   parseQuarterNumeric,
@@ -23,6 +22,7 @@ export interface OcrResultCardProps {
   confidence?: number;
   model?: string;
   provider?: string;
+  documentType?: string;
 }
 
 export default function OcrResultCard({
@@ -32,6 +32,7 @@ export default function OcrResultCard({
   confidence,
   model,
   provider,
+  documentType,
 }: OcrResultCardProps) {
   const [showRaw, setShowRaw] = useState(false);
   const [expandedCoreValues, setExpandedCoreValues] = useState<Record<string, boolean>>({
@@ -40,6 +41,67 @@ export default function OcrResultCard({
     "3": true,
     "4": true,
   });
+
+  const effectiveDocType = String(
+    documentType ||
+    fields?.document_type ||
+    fields?.form_variant ||
+    (fields?.identity && (fields?.child_name || fields?.registry_number || fields?.mother_maiden_name) ? "birth_cert" : "")
+  ).toLowerCase().trim();
+  const isPsa =
+    effectiveDocType === "birth_cert" ||
+    effectiveDocType === "psa" ||
+    Boolean(fields?.child_name && (fields?.registry_number || fields?.mother_maiden_name || fields?.father_name)) ||
+    Boolean(fields?.identity && (fields?.registry_number || fields?.mother_maiden_name || fields?.father_name));
+  const isSf1 = effectiveDocType === "sf1";
+  const isSf2 = effectiveDocType === "sf2";
+  const isSf5 = effectiveDocType === "sf5" || effectiveDocType === "sf5a" || effectiveDocType === "sf5b";
+  const isSf10 = effectiveDocType === "sf10";
+  const isSf9 = effectiveDocType === "sf9" || (!effectiveDocType && !isPsa && !isSf1 && !isSf2 && !isSf5 && !isSf10);
+
+  // Helper to extract PSA Civil Registry fields cleanly from flat or nested sources
+  const psaValues = React.useMemo(() => {
+    const ef = (fields || {}) as any;
+    const idObj = (ef.identity && typeof ef.identity === "object") ? ef.identity : {};
+
+    const firstName = String(ef.first_name || idObj.first_name || "").trim();
+    const middleName = String(ef.middle_name || idObj.middle_name || "").trim();
+    const lastName = String(ef.last_name || idObj.last_name || "").trim();
+
+    let childCompleteName = String(ef.child_name || ef.complete_name || ef.formatted_name || ef.name || idObj.complete_name || idObj.formatted_name || "").trim();
+    if (!childCompleteName && (lastName || firstName)) {
+      const parts = [lastName, [firstName, middleName].filter(Boolean).join(" ")].filter(Boolean);
+      childCompleteName = parts.join(", ");
+    }
+
+    const birthDate = String(ef.birth_date || ef.date_of_birth || idObj.birth_date || "").trim();
+    const rawSex = String(ef.sex || ef.gender || idObj.sex || "").trim().toUpperCase();
+    let formattedSex = "";
+    if (rawSex === "M" || rawSex === "MALE") {
+      formattedSex = "Male (M)";
+    } else if (rawSex === "F" || rawSex === "FEMALE") {
+      formattedSex = "Female (F)";
+    } else if (rawSex) {
+      formattedSex = rawSex;
+    }
+
+    const registryNumber = String(ef.registry_number || ef.certificate_number || idObj.registry_number || idObj.certificate_number || "").trim();
+    const motherMaidenName = String(ef.mother_maiden_name || ef.mother_name || idObj.mother_maiden_name || idObj.mother_name || "").trim();
+    const fatherName = String(ef.father_name || idObj.father_name || "").trim();
+
+    return {
+      childCompleteName,
+      firstName,
+      middleName,
+      lastName,
+      birthDate,
+      rawSex,
+      formattedSex,
+      registryNumber,
+      motherMaidenName,
+      fatherName,
+    };
+  }, [fields]);
 
   if (!fields) return null;
 
@@ -329,10 +391,84 @@ export default function OcrResultCard({
     onFieldChange("attendance", updatedAttendance);
   };
 
+  // Helper for honest per-field confidence percentage pills:
+  // >= 85% emerald, 60–84% amber, < 60% / 0% slate
+  const renderConfidencePill = (fieldKey: string, val: any) => {
+    const isPresent = val !== undefined && val !== null && String(val).trim() !== "" && String(val).trim() !== "-";
+    if (!isPresent) {
+      return (
+        <span
+          title="0% — Not detected"
+          data-testid={`psa-confidence-${fieldKey}`}
+          className="inline-flex items-center justify-center min-w-[46px] px-2.5 py-0.5 rounded-full text-xs font-bold border cursor-default shadow-2xs bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700"
+        >
+          0%
+        </span>
+      );
+    }
+
+    const statusMap = (fields as any).field_statuses ||
+                      (fields as any).identity?.field_statuses ||
+                      (fields as any).field_confidences ||
+                      (fields as any).confidences;
+
+    const statusItem = statusMap?.[fieldKey];
+    let pct = 0;
+
+    if (typeof statusItem === "number") {
+      const raw = statusItem > 1 ? statusItem : statusItem * 100;
+      pct = Math.round(Math.min(100, Math.max(0, raw)));
+    } else if (statusItem && typeof statusItem === "object") {
+      if (typeof statusItem.confidence === "number") {
+        const raw = statusItem.confidence > 1 ? statusItem.confidence : statusItem.confidence * 100;
+        pct = Math.round(Math.min(100, Math.max(0, raw)));
+      } else if (statusItem.status === "needs_verification") {
+        pct = 70;
+      } else if (statusItem.status === "not_detected") {
+        pct = 0;
+      } else if (statusItem.status === "extracted") {
+        pct = 95;
+      }
+    } else if (typeof effectiveConfidence === "number") {
+      const raw = effectiveConfidence > 1 ? effectiveConfidence : effectiveConfidence * 100;
+      pct = Math.round(Math.min(100, Math.max(0, raw)));
+    } else {
+      pct = 95;
+    }
+
+    let pillStyle = "bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700";
+    let tooltip = `${pct}% — Field extracted`;
+
+    if (pct >= 85) {
+      pillStyle = "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800";
+      tooltip = `${pct}% — Verified high confidence`;
+    } else if (pct >= 60) {
+      pillStyle = "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800";
+      tooltip = `${pct}% — Review recommended`;
+    } else {
+      pillStyle = "bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:border-slate-700";
+      tooltip = `${pct}% — Low confidence`;
+    }
+
+    return (
+      <span
+        title={tooltip}
+        data-testid={`psa-confidence-${fieldKey}`}
+        className={`inline-flex items-center justify-center min-w-[46px] px-2.5 py-0.5 rounded-full text-xs font-bold border cursor-default shadow-2xs ${pillStyle}`}
+      >
+        {pct}%
+      </span>
+    );
+  };
+
   return (
     <Card
-      title="Extraction & Verification Panel"
-      description="Compare extracted values against document image. Click any grade cell to correct before approval."
+      title={isPsa ? "PSA Civil Identity & Registry Card" : "Extraction & Verification Panel"}
+      description={
+        isPsa
+          ? "PSA Certificate of Live Birth supporting civil identity record under RA 10173."
+          : "Compare extracted values against document image. Click any grade cell to correct before approval."
+      }
       headerAction={headerAction}
       className="w-full mt-4"
     >
@@ -377,82 +513,354 @@ export default function OcrResultCard({
         </div>
       ) : (
         <div className="space-y-6">
-          {/* Section 1: Student Information Header Fields */}
-          <div>
-            <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3">
-              Learner Identity &amp; Form Details
-            </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {[
-                  { key: "lrn", label: "Learner Reference No. (LRN)" },
-                  { key: "name", label: "Full Name (Source)" },
-                  { key: "last_name", label: "Last Name" },
-                  { key: "first_name", label: "First Name" },
-                  { key: "middle_name", label: "Middle Name" },
-                  { key: "school_name", label: "School Name" },
-                  { key: "school_id", label: "School ID" },
-                  { key: "grade_level", label: "Grade Level" },
-                  { key: "school_year", label: "School Year" },
-                  { key: "track_strand", label: "Track / Strand" },
-                  { key: "section", label: "Section" },
-                  { key: "adviser", label: "Class Adviser" },
-                ].map(({ key, label }) => {
-                  const val = (fields as any)[key] ?? "";
-                  const isSchoolConfig =
-                    (fields as any).trusted_school_verified === true &&
-                    ((fields as any).school_id_source === "school_configuration" || fields.school_id === "500169" || fields.school_id === "300792") &&
-                    (key === "school_id" ||
-                     (key === "school_name" &&
-                      (!fields.school_name ||
-                       fields.school_name.trim() === "" ||
-                       fields.school_name.toLowerCase().includes("taysan"))));
+          {/* Document-Type-Specific Layouts: PSA Civil Identity vs DepEd Academic Forms */}
+          {isPsa ? (
+            <div className="bg-white dark:bg-zinc-900 rounded-xl border border-purple-200 dark:border-purple-800/60 p-5 shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-purple-100 dark:border-purple-900/40 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-purple-100 dark:bg-purple-950/60 rounded-lg text-purple-700 dark:text-purple-300">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                      PSA Civil Identity &amp; Registry Details
+                    </h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      Civil identity evidence protected under RA 10173. PSA records do NOT have an LRN or DepEd school assignment fields.
+                    </p>
+                  </div>
+                </div>
+                <span className="self-start sm:self-auto text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                  RA 10173 Civil Record
+                </span>
+              </div>
 
-                  if (isSchoolConfig) {
-                    const displayLabel = key === "school_id" ? "DepEd School ID" : "School";
-                    const displayVal =
-                      key === "school_id"
-                        ? (fields.school_id === "300792" ? "500169" : (fields.school_id || "500169"))
-                        : (fields.school_name || "Taysan Resettlement Integrated School");
+              {/* Child's Complete Name Banner */}
+              <div className="p-3.5 bg-purple-50/70 dark:bg-purple-950/30 rounded-xl border border-purple-100 dark:border-purple-900/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-purple-800 dark:text-purple-300 uppercase tracking-wider">
+                    Child&apos;s Complete Name
+                  </span>
+                  {renderConfidencePill("child_name", psaValues.childCompleteName)}
+                </div>
+                <div className="text-base font-bold text-zinc-900 dark:text-zinc-100">
+                  {onFieldChange ? (
+                    <input
+                      type="text"
+                      value={psaValues.childCompleteName}
+                      onChange={(e) => onFieldChange("child_name", e.target.value)}
+                      placeholder="Child Complete Name (Last, First Middle)"
+                      className="w-full text-sm font-bold px-2.5 py-1.5 rounded-lg border border-purple-200 dark:border-purple-800 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                    />
+                  ) : (
+                    psaValues.childCompleteName || <span className="text-zinc-400 italic">Not detected</span>
+                  )}
+                </div>
+              </div>
 
-                    return (
-                      <div key={key} className="flex flex-col gap-1">
-                        <div className="flex justify-between items-center">
-                          <span className="text-xs font-medium text-zinc-500">{displayLabel}</span>
-                          <span className="text-[10px] font-semibold tracking-wider uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
-                            School Configuration
-                          </span>
-                        </div>
-                        <div className="bg-zinc-100 dark:bg-zinc-800/80 px-3 py-2 rounded-md border border-zinc-200 dark:border-zinc-700 text-sm font-medium text-zinc-900 dark:text-zinc-100 select-none">
-                          {displayVal}
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  if (onFieldChange) {
-                    return (
-                      <FieldEditor
-                        key={key}
-                        label={label}
-                        value={String(val)}
-                        onChange={(newVal) => onFieldChange(key, newVal)}
+              {/* Dedicated 6 Fields List matching /psa-scan */}
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800 text-xs">
+                {/* 1. First Name */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    First Name
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.firstName}
+                        onChange={(e) => onFieldChange("first_name", e.target.value)}
+                        placeholder="Child First Name"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
                       />
-                    );
-                  }
-                  return (
-                    <div key={key} className="flex flex-col gap-1">
-                      <span className="text-xs font-medium text-zinc-500">{label}</span>
-                      <div className="bg-zinc-50 dark:bg-zinc-800 px-3 py-2 rounded-md border border-zinc-200 dark:border-zinc-700 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                        {val || <span className="text-zinc-400 italic">Empty</span>}
-                      </div>
-                    </div>
-                  );
-                })}
+                    ) : (
+                      psaValues.firstName || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("first_name", psaValues.firstName)}
+                  </div>
+                </div>
+
+                {/* 2. Middle Name */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Middle Name
+                    <span className="block text-[10px] text-zinc-400 font-normal">Optional / Blank if none</span>
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.middleName}
+                        onChange={(e) => onFieldChange("middle_name", e.target.value)}
+                        placeholder="(Blank if none)"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.middleName || <span className="text-zinc-400 italic">None / Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("middle_name", psaValues.middleName)}
+                  </div>
+                </div>
+
+                {/* 3. Last Name */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Last Name
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.lastName}
+                        onChange={(e) => onFieldChange("last_name", e.target.value)}
+                        placeholder="Child Last Name"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.lastName || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("last_name", psaValues.lastName)}
+                  </div>
+                </div>
+
+                {/* 4. Date of Birth */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Date of Birth
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.birthDate}
+                        onChange={(e) => onFieldChange("birth_date", e.target.value)}
+                        placeholder="YYYY-MM-DD"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.birthDate || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("birth_date", psaValues.birthDate)}
+                  </div>
+                </div>
+
+                {/* 5. Sex */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Sex
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <select
+                        value={psaValues.rawSex === "F" || psaValues.rawSex === "FEMALE" ? "F" : "M"}
+                        onChange={(e) => onFieldChange("sex", e.target.value)}
+                        className="text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      >
+                        <option value="M">Male (M)</option>
+                        <option value="F">Female (F)</option>
+                      </select>
+                    ) : (
+                      psaValues.formattedSex || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("sex", psaValues.rawSex)}
+                  </div>
+                </div>
+
+                {/* 6. Local Civil Registry / Certificate No. */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Local Civil Registry / Certificate No.
+                  </div>
+                  <div className="sm:col-span-5 font-mono font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.registryNumber}
+                        onChange={(e) => onFieldChange("registry_number", e.target.value)}
+                        placeholder="e.g. 2007-12345"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.registryNumber || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("registry_number", psaValues.registryNumber)}
+                  </div>
+                </div>
+
+                {/* 7. Mother's Maiden Name */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Mother&apos;s Maiden Name
+                    <span className="block text-[10px] text-zinc-400 font-normal">Complete Maiden Name</span>
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.motherMaidenName}
+                        onChange={(e) => onFieldChange("mother_maiden_name", e.target.value)}
+                        placeholder="Mother's Maiden Name"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.motherMaidenName || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("mother_maiden_name", psaValues.motherMaidenName)}
+                  </div>
+                </div>
+
+                {/* 8. Father's Name */}
+                <div className="py-3 grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+                  <div className="sm:col-span-4 font-semibold text-zinc-600 dark:text-zinc-400">
+                    Father&apos;s Name
+                    <span className="block text-[10px] text-zinc-400 font-normal">Complete Legal Name</span>
+                  </div>
+                  <div className="sm:col-span-5 font-medium text-zinc-900 dark:text-zinc-100">
+                    {onFieldChange ? (
+                      <input
+                        type="text"
+                        value={psaValues.fatherName}
+                        onChange={(e) => onFieldChange("father_name", e.target.value)}
+                        placeholder="Father's Complete Name"
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 focus:ring-1 focus:ring-purple-500"
+                      />
+                    ) : (
+                      psaValues.fatherName || <span className="text-zinc-400 italic">Not detected</span>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3 flex justify-end">
+                    {renderConfidencePill("father_name", psaValues.fatherName)}
+                  </div>
+                </div>
               </div>
             </div>
+          ) : (
+            <>
+              {/* Section 1: Tailored Metadata Header by Document Type */}
+              <div>
+                <h4 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3">
+                  {isSf1
+                    ? "School & Section Metadata (SF1-SHS)"
+                    : isSf2
+                    ? "School & Section Metadata (SF2-SHS)"
+                    : isSf10
+                    ? "Learner Permanent Record Identity (SF10-SHS)"
+                    : isSf5
+                    ? "School & Section Metadata (SF5-SHS)"
+                    : "Learner Identity & Form Details (SF9-SHS)"}
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {(isSf1 || isSf2 || isSf5
+                    ? [
+                        { key: "school_name", label: "School Name" },
+                        { key: "school_id", label: "School ID" },
+                        { key: "grade_level", label: "Grade Level" },
+                        { key: "school_year", label: "School Year" },
+                        { key: "track_strand", label: "Track / Strand" },
+                        { key: "section", label: "Section" },
+                        { key: "adviser", label: "Class Adviser" },
+                      ]
+                    : isSf10
+                    ? [
+                        { key: "lrn", label: "Learner Reference No. (LRN)" },
+                        { key: "name", label: "Full Name (Source)" },
+                        { key: "last_name", label: "Last Name" },
+                        { key: "first_name", label: "First Name" },
+                        { key: "middle_name", label: "Middle Name" },
+                        { key: "birth_date", label: "Date of Birth" },
+                        { key: "sex", label: "Sex" },
+                        { key: "school_name", label: "School Name" },
+                        { key: "school_id", label: "School ID" },
+                        { key: "grade_level", label: "Grade Level" },
+                        { key: "school_year", label: "School Year" },
+                        { key: "track_strand", label: "Track / Strand" },
+                      ]
+                    : [
+                        { key: "lrn", label: "Learner Reference No. (LRN)" },
+                        { key: "name", label: "Full Name (Source)" },
+                        { key: "last_name", label: "Last Name" },
+                        { key: "first_name", label: "First Name" },
+                        { key: "middle_name", label: "Middle Name" },
+                        { key: "school_name", label: "School Name" },
+                        { key: "school_id", label: "School ID" },
+                        { key: "grade_level", label: "Grade Level" },
+                        { key: "school_year", label: "School Year" },
+                        { key: "track_strand", label: "Track / Strand" },
+                        { key: "section", label: "Section" },
+                        { key: "adviser", label: "Class Adviser" },
+                      ]
+                  ).map(({ key, label }) => {
+                    const val = (fields as any)[key] ?? "";
+                    const isSchoolConfig =
+                      (fields as any).trusted_school_verified === true &&
+                      ((fields as any).school_id_source === "school_configuration" || fields.school_id === "500169" || fields.school_id === "300792") &&
+                      (key === "school_id" ||
+                       (key === "school_name" &&
+                        (!fields.school_name ||
+                         fields.school_name.trim() === "" ||
+                         fields.school_name.toLowerCase().includes("taysan"))));
+
+                    if (isSchoolConfig) {
+                      const displayLabel = key === "school_id" ? "DepEd School ID" : "School";
+                      const displayVal =
+                        key === "school_id"
+                          ? (fields.school_id === "300792" ? "500169" : (fields.school_id || "500169"))
+                          : (fields.school_name || "Taysan Resettlement Integrated School");
+
+                      return (
+                        <div key={key} className="flex flex-col gap-1">
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-medium text-zinc-500">{displayLabel}</span>
+                            <span className="text-[10px] font-semibold tracking-wider uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
+                              School Configuration
+                            </span>
+                          </div>
+                          <div className="bg-zinc-100 dark:bg-zinc-800/80 px-3 py-2 rounded-md border border-zinc-200 dark:border-zinc-700 text-sm font-medium text-zinc-900 dark:text-zinc-100 select-none">
+                            {displayVal}
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    if (onFieldChange) {
+                      return (
+                        <FieldEditor
+                          key={key}
+                          label={label}
+                          value={String(val)}
+                          onChange={(newVal) => onFieldChange(key, newVal)}
+                        />
+                      );
+                    }
+                    return (
+                      <div key={key} className="flex flex-col gap-1">
+                        <span className="text-xs font-medium text-zinc-500">{label}</span>
+                        <div className="bg-zinc-50 dark:bg-zinc-800 px-3 py-2 rounded-md border border-zinc-200 dark:border-zinc-700 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                          {val || <span className="text-zinc-400 italic">Empty</span>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
 
           {/* Section 2: Subject Grades Tables */}
-          {Array.isArray(fields.grades) && fields.grades.length > 0 && (() => {
+          {!isSf1 && !isSf2 && Array.isArray(fields.grades) && fields.grades.length > 0 && (() => {
             const normAllGrades = normalizeGradeRecords(fields.grades, fields.semester);
             const isShsSemestral =
               normalizeSemesterContext(fields.semester) !== undefined ||
@@ -1198,7 +1606,7 @@ export default function OcrResultCard({
           })()}
 
           {/* Section 2B: General Average Summary Row / Card (Distinct from Subjects) */}
-          {fields.general_average !== undefined && (
+          {!isSf1 && !isSf2 && fields.general_average !== undefined && (
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 bg-zinc-50 dark:bg-zinc-800/70 rounded-lg border border-zinc-200 dark:border-zinc-700">
               <div className="flex flex-col">
                 <span className="text-xs font-bold uppercase tracking-wider text-zinc-700 dark:text-zinc-300">
@@ -1236,7 +1644,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 3: Attendance Summary */}
-          {Array.isArray(fields.attendance) && fields.attendance.length > 0 && (
+          {isSf9 && Array.isArray(fields.attendance) && fields.attendance.length > 0 && (
             <div className="flex flex-col gap-2">
               <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
                 Learner Attendance Record
@@ -1377,7 +1785,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 3.5: Report on Learner's Observed Values */}
-          {fields.observed_values && (
+          {isSf9 && fields.observed_values && (
             <div className="flex flex-col gap-3 mt-5 p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 shadow-xs">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
                 <div className="flex items-center gap-2">
@@ -1519,7 +1927,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 3.6: Learner Progress and Achievement (Grading Scale) */}
-          {(fields.learner_progress_achievement || fields.grading_scale) && (
+          {isSf9 && (fields.learner_progress_achievement || fields.grading_scale) && (
             <div className="flex flex-col gap-2 mt-4 p-4 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/60 shadow-xs">
               <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 pb-2">
                 <div className="flex items-center gap-2">
@@ -1580,7 +1988,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 4: SF1 Multi-Learner School Register */}
-          {fields.document_type === "sf1" && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
+          {(isSf1 || fields.document_type === "sf1") && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
             <div className="flex flex-col gap-2 mt-4">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -1635,7 +2043,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 5: SF2 Daily Attendance Grid with Pattern Shading Recognition */}
-          {fields.document_type === "sf2" && Array.isArray((fields as any).attendance_records) && (fields as any).attendance_records.length > 0 && (
+          {(isSf2 || fields.document_type === "sf2") && Array.isArray((fields as any).attendance_records) && (fields as any).attendance_records.length > 0 && (
             <div className="flex flex-col gap-2 mt-4">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -1715,7 +2123,7 @@ export default function OcrResultCard({
           )}
 
           {/* Section 6: SF5 Promotion and Level of Proficiency */}
-          {fields.document_type === "sf5" && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
+          {(isSf5 || fields.document_type === "sf5") && Array.isArray((fields as any).learners) && (fields as any).learners.length > 0 && (
             <div className="flex flex-col gap-2 mt-4">
               <div className="flex justify-between items-center">
                 <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -1774,8 +2182,8 @@ export default function OcrResultCard({
             </div>
           )}
 
-          {/* Section 7: PSA Birth Certificate Supporting Evidence */}
-          {(fields.document_type === "birth_cert" || fields.registry_number) && (
+          {/* Section 7: Supporting Civil Registry Evidence on Academic Forms */}
+          {!isPsa && fields.registry_number && (
             <div className="flex flex-col gap-2 mt-4 p-4 rounded-lg bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200 uppercase tracking-wider flex items-center gap-1.5">
@@ -1802,8 +2210,10 @@ export default function OcrResultCard({
               </div>
             </div>
           )}
-        </div>
+        </>
       )}
-    </Card>
+    </div>
+  )}
+</Card>
   );
 }

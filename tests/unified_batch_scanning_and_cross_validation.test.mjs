@@ -5,6 +5,9 @@ import {
   classifyPageContent,
   segmentMultiPageDocument,
   reclassifyDocumentSegment,
+  CANONICAL_DOC_ORDER,
+  sortSegmentsCanonically,
+  buildSegmentsFromPreExtractedPages,
 } from "../src/lib/validation/batchDocumentSegmenter.ts";
 
 import {
@@ -426,5 +429,132 @@ test("AVV System — Unified Batch Document Scanning, Extraction, and Cross-Docu
     assert.equal(report.summary.totalLearnersDetected, 1);
     assert.equal(report.learnerDossiers[0].documentPresence.sf1, true);
     assert.equal(report.learnerDossiers[0].documentPresence.sf9, true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 9. Canonical Ordering (SF1 -> SF2 -> SF9 -> SF10 -> PSA) & SF9 Presence in Stage B
+  // ---------------------------------------------------------------------------
+  await t.test("9. Canonical Ordering & Guaranteed Inclusion of SF9 in Stage B", () => {
+    // Simulate pre-extracted pages uploaded out of order (e.g. Back uploaded before Front, PSA before SF10)
+    const stagedPages = [
+      {
+        pageNumber: 1,
+        documentType: "sf2",
+        sourceFileName: "SF2_Oct.pdf",
+        text: "School Form 2 Daily Attendance Report Grade 11 Diamond",
+        extractedFields: { section: "Diamond", attendance_records: [] },
+      },
+      {
+        pageNumber: 2,
+        documentType: "sf9",
+        documentSide: "back",
+        sourceFileName: "SF9_Back.jpg",
+        text: "REPORT ON LEARNING PROGRESS AND ACHIEVEMENT\nOral Communication 88\nGeneral Mathematics 90",
+        extractedFields: { grades: [{ subject: "Oral Communication", final: 88 }] },
+      },
+      {
+        pageNumber: 3,
+        documentType: "sf1",
+        sourceFileName: "SF1_Roster.pdf",
+        text: "School Form 1 School Register Grade 11 Diamond 109283746512 DELA CRUZ",
+        extractedFields: { section: "Diamond", learners: [{ lrn: "109283746512" }] },
+      },
+      {
+        pageNumber: 4,
+        documentType: "sf9",
+        documentSide: "front",
+        sourceFileName: "SF9_Front.jpg",
+        text: "Republic of the Philippines Department of Education\nLearner Reference Number: 109283746512\nREPORT ON ATTENDANCE",
+        extractedFields: { lrn: "109283746512", name: "DELA CRUZ, CARLOS" },
+      },
+      {
+        pageNumber: 5,
+        documentType: "birth_cert",
+        sourceFileName: "PSA_Sideways.jpg",
+        sourceFileDataUrl: "data:image/jpeg;base64,raw_sideways_psa",
+        upperSectionDataUrl: "data:image/jpeg;base64,upright_preprocessed_psa",
+        text: "CERTIFICATE OF LIVE BIRTH CARLOS DELA CRUZ",
+        extractedFields: { name: "CARLOS DELA CRUZ" },
+      },
+      {
+        pageNumber: 6,
+        documentType: "sf10",
+        sourceFileName: "SF10_Record.pdf",
+        text: "SENIOR HIGH SCHOOL STUDENT PERMANENT RECORD (SF10-SHS)",
+        extractedFields: { lrn: "109283746512" },
+      },
+    ];
+
+    const segments = buildSegmentsFromPreExtractedPages(stagedPages);
+
+    // 1. Must produce exactly 5 canonical segments (Front & Back SF9 grouped into one)
+    assert.equal(segments.length, 5, "Pre-extracted fast-path must unify SF9 into a single segment (5 total segments)");
+
+    // 2. Strict canonical order: SF1 -> SF2 -> SF9 -> SF10 -> birth_cert
+    assert.deepEqual(
+      segments.map((s) => s.documentType),
+      ["sf1", "sf2", "sf9", "sf10", "birth_cert"],
+      "Segments must be strictly sorted in canonical sequence: SF1 -> SF2 -> SF9 -> SF10 -> PSA"
+    );
+
+    // 3. Sequential IDs match canonical sequence
+    assert.deepEqual(
+      segments.map((s) => s.id),
+      ["seg-1-sf1", "seg-2-sf2", "seg-3-sf9", "seg-4-sf10", "seg-5-birth_cert"],
+      "Segment IDs must be sequentially indexed by canonical order"
+    );
+
+    // 4. SF9 segment groups both pages with Front placed first
+    const sf9Seg = segments.find((s) => s.documentType === "sf9");
+    assert.ok(sf9Seg, "SF9 segment must exist");
+    assert.equal(sf9Seg.pageCount, 2, "SF9 segment must contain both Front and Back pages");
+    assert.equal(sf9Seg.pages[0].documentSide, "front", "SF9 Front side must be ordered first");
+    assert.equal(sf9Seg.pages[1].documentSide, "back", "SF9 Back side must be ordered second");
+
+    // 5. PSA segment prioritizes upright preprocessed image
+    const psaSeg = segments.find((s) => s.documentType === "birth_cert");
+    assert.ok(psaSeg, "PSA segment must exist");
+    assert.equal(
+      psaSeg.imageUrl,
+      "data:image/jpeg;base64,upright_preprocessed_psa",
+      "PSA segment must use upright preprocessed image URL instead of raw sideways scan"
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // 10. Upright PSA Preview and Clean Parent Names Wrapping in Stage B
+  // ---------------------------------------------------------------------------
+  await t.test("10. PSA Upright Preview Preservation & Non-Overflowing Parent Names Layout", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+
+    const extractionViewPath = path.resolve("src/components/validation/IndividualDocumentExtractionView.tsx");
+    const extractionViewSrc = fs.readFileSync(extractionViewPath, "utf-8");
+
+    // Must stack Mother Maiden Name and Father Name on separate lines with break-words
+    assert.ok(
+      extractionViewSrc.includes("Mother&apos;s Maiden Name:") || extractionViewSrc.includes("Mother's Maiden Name"),
+      "Must label Mother's Maiden Name distinctly"
+    );
+    assert.ok(
+      extractionViewSrc.includes("Father&apos;s Name:") || extractionViewSrc.includes("Father's Name"),
+      "Must label Father's Name distinctly"
+    );
+    assert.ok(
+      extractionViewSrc.includes("break-words") && extractionViewSrc.includes("whitespace-normal"),
+      "Parent names must use break-words and whitespace-normal to prevent horizontal container overflow"
+    );
+
+    // Must resolve active section cleanly without defaulting to Unassigned when context is present
+    assert.ok(
+      extractionViewSrc.includes("activeSection") && extractionViewSrc.includes("contextSection"),
+      "Must compute activeSection with contextSection fallback from batch metadata"
+    );
+
+    // Must prioritize upright preprocessed PSA image over raw sideways scans
+    assert.ok(
+      extractionViewSrc.includes("upperSectionDataUrl") || extractionViewSrc.includes("upper_section_data_url"),
+      "Must inspect upperSectionDataUrl / processedDataUrl for PSA preview"
+    );
   });
 });

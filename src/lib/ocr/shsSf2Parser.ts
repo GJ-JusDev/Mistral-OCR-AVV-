@@ -17,6 +17,12 @@ import { normalizeLrn, isValidLrn } from "@/lib/validation/patterns";
 import type { Sf2AttendanceEntry } from "@/types/database";
 import { classifyAttendanceCell, type ShadingClassification } from "./attendanceShadingClassifier";
 import { classifyFieldRecognition, buildDocumentRecognitionSummary, type DocumentRecognitionSummary } from "./handwritingExtractor";
+import {
+  normalizeDepEdMonthKey,
+  DEPED_MONTH_CONFIG,
+  DEPED_11_MONTHS,
+  type CanonicalDepEdMonthKey,
+} from "@/lib/validation/monthNormalizer";
 
 export interface ShsSf2Header {
   school_id?: string;
@@ -27,6 +33,7 @@ export interface ShsSf2Header {
   track?: string;
   strand?: string;
   month?: string;
+  canonical_month?: CanonicalDepEdMonthKey | "";
   total_school_days?: number;
 }
 
@@ -85,9 +92,13 @@ export function parseShsSf2(
     }
   }
 
-  if (attendance.length === 0) {
+  if (rawText) {
     const textEntries = parseAttendanceFromText(rawText, header, warnings, rawLayout);
-    attendance.push(...textEntries);
+    for (const te of textEntries) {
+      if (!attendance.some((a) => a.lrn === te.lrn)) {
+        attendance.push(te);
+      }
+    }
   }
 
   // Calculate summary metrics
@@ -154,16 +165,24 @@ export function extractShsSf2Header(text: string): ShsSf2Header {
     header.section = secMatch[1].trim();
   }
 
-  // Reporting Month (e.g. "for the month of September")
-  const monthMatch = text.match(/(?:month\s*of|buwan\s*ng|month)[:\s]*([a-zA-Z]+)/i);
+  // Reporting Month (e.g. "Report for the Month of June", "buwan ng Agosto", "Month: August")
+  const monthMatch = text.match(/(?:(?:report\s+for\s+the\s+)?month\s*of|buwan\s*ng|month)[:\s]*([a-zA-Z]+)/i);
   if (monthMatch) {
-    header.month = capitalizeMonth(monthMatch[1].trim());
+    const rawFound = monthMatch[1].trim();
+    const normKey = normalizeDepEdMonthKey(rawFound);
+    if (normKey && DEPED_MONTH_CONFIG[normKey]) {
+      header.month = DEPED_MONTH_CONFIG[normKey].fullName;
+      header.canonical_month = normKey;
+    } else {
+      header.month = capitalizeMonth(rawFound);
+    }
   } else {
-    // Search known months
-    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-    for (const m of months) {
-      if (new RegExp(`\\b${m}\\b`, "i").test(text)) {
-        header.month = m;
+    // Search known DepEd months
+    for (const key of DEPED_11_MONTHS) {
+      const cfg = DEPED_MONTH_CONFIG[key];
+      if (new RegExp(`\\b(?:${cfg.fullName}|${cfg.shortLabel})\\b`, "i").test(text)) {
+        header.month = cfg.fullName;
+        header.canonical_month = key;
         break;
       }
     }
@@ -216,10 +235,11 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         rowText.includes("learner name") ||
         rowText.includes("pangalan") ||
         (rowText.includes("absent") && rowText.includes("tardy")) ||
-        (rowText.includes("absent") && rowText.includes("present"))
+        (rowText.includes("absent") && rowText.includes("present")) ||
+        (rowText.includes("total") && (rowText.includes("month") || rowText.includes("absent") || rowText.includes("tardy")))
       ) {
         for (const [c, cell] of rowCells.entries()) {
-          const v = cell.content.toLowerCase();
+          const v = cell.content.toLowerCase().trim();
           if (v.includes("name") || v.includes("pangalan")) nameCol = c;
           else if (v.includes("lrn")) lrnCol = c;
           else if (v.includes("present") || v.includes("kabuuang araw")) presentCol = c;
@@ -229,10 +249,21 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
             const dayNum = parseInt(v, 10);
             if (!isNaN(dayNum) && dayNum >= 1 && dayNum <= 31) {
               dailyCols.push({ day: dayNum, colIndex: c });
+            } else if (/^(?:m|t|w|th|f|mon|tue|wed|thu|fri)$/i.test(v)) {
+              dailyCols.push({ day: dailyCols.length + 1, colIndex: c });
             }
           }
         }
         continue;
+      }
+
+      // If daily columns were not explicitly identified in the header, infer them from intermediate columns
+      if (dailyCols.length === 0 && absentCol !== -1) {
+        const leftBound = Math.max(nameCol, lrnCol, 0);
+        const rightBound = absentCol;
+        for (let c = leftBound + 1; c < rightBound; c++) {
+          dailyCols.push({ day: dailyCols.length + 1, colIndex: c });
+        }
       }
 
       // Check for learner name
@@ -263,30 +294,61 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         if (isValidLrn(norm)) lrnStr = norm;
       }
 
-      // Monthly totals
-      const totalDays = header.total_school_days || 20;
-      let daysPresent = totalDays;
-      let daysAbsent = 0;
-      let daysTardy = 0;
+      // Extract Azure ICR written monthly totals
+      let writtenAbsent: number | undefined = undefined;
+      let writtenPresent: number | undefined = undefined;
+      let writtenTardy: number | undefined = undefined;
 
       if (absentCol !== -1 && rowCells.has(absentCol)) {
-        const a = parseFloat(rowCells.get(absentCol)!.content);
-        if (!isNaN(a)) daysAbsent = a;
+        const rawAbs = rowCells.get(absentCol)!.content.replace(/[^0-9\.]/g, "").trim();
+        if (rawAbs !== "") {
+          const a = parseFloat(rawAbs);
+          if (!isNaN(a)) writtenAbsent = a;
+        }
       }
 
       if (presentCol !== -1 && rowCells.has(presentCol)) {
-        const p = parseFloat(rowCells.get(presentCol)!.content);
-        if (!isNaN(p)) daysPresent = p;
-      } else {
-        daysPresent = Math.max(0, totalDays - daysAbsent);
+        const rawPres = rowCells.get(presentCol)!.content.replace(/[^0-9\.]/g, "").trim();
+        if (rawPres !== "") {
+          const p = parseFloat(rawPres);
+          if (!isNaN(p)) writtenPresent = p;
+        }
       }
 
       if (tardyCol !== -1 && rowCells.has(tardyCol)) {
-        const t = parseFloat(rowCells.get(tardyCol)!.content);
-        if (!isNaN(t)) daysTardy = t;
+        const rawTardy = rowCells.get(tardyCol)!.content.replace(/[^0-9\.]/g, "").trim();
+        if (rawTardy !== "") {
+          const t = parseFloat(rawTardy);
+          if (!isNaN(t)) writtenTardy = t;
+        }
       }
 
-      // Daily tick grid & shading classification
+      // Pre-evaluate visual shading across daily cells
+      const evaluatedDaily = dailyCols.map((dc) => {
+        const cellData = rowCells.get(dc.colIndex);
+        const rawMark = (cellData?.content || "").trim();
+        const cellPolygon = cellData?.polygon;
+        const shadingResult = classifyAttendanceCell({
+          day: dc.day,
+          learnerName,
+          cellText: rawMark,
+          cellPolygon,
+          pageNumber: 1,
+        });
+        return { dc, rawMark, cellPolygon, shadingResult };
+      });
+
+      const fullShadedCount = evaluatedDaily.filter((e) => e.shadingResult.classification === "FULL_SHADE").length;
+      const halfShadedCount = evaluatedDaily.filter((e) => e.shadingResult.classification === "HALF_SHADE").length;
+      const totalDaysConfig = header.total_school_days || 20;
+
+      let totalDays = totalDaysConfig;
+      let daysPresent = totalDaysConfig;
+      let daysAbsent = 0;
+      let daysTardy = 0;
+      let reviewStatus: "NEEDS_REVIEW" | "VERIFIED" | "FLAGGED" = "VERIFIED";
+      let rowConfidence = 96;
+
       const dailyGrid: Array<{
         day: number;
         status: "PRESENT" | "ABSENT" | "TARDY" | "UNKNOWN" | "UNRECORDED";
@@ -298,75 +360,99 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         requires_teacher_verification?: boolean;
         recognition_method?: string;
       }> = [];
-      let dailyAbsencesCount = 0;
-      let hasUnknownMarks = false;
 
-      for (const dc of dailyCols) {
-        const cellData = rowCells.get(dc.colIndex);
-        const rawMark = (cellData?.content || "").trim();
-        const cellPolygon = cellData?.polygon;
+      // Case A: Active-Day Shading with Written ABSENT = 0 / TARDY = 0
+      // When Azure ICR reads ABSENT = 0 (and TARDY = 0 or blank) in Total for the Month while N cells
+      // (e.g. 21 shaded boxes across the 25-column M-F grid, with remaining out-of-month cells blank)
+      // are shaded as active school days:
+      const isActiveDayShading =
+        writtenAbsent === 0 &&
+        (writtenTardy === 0 || writtenTardy === undefined) &&
+        fullShadedCount > 0;
 
-        // Run through specialized Attendance Shading & Pattern Classifier
-        const shadingResult = classifyAttendanceCell({
-          day: dc.day,
-          learnerName,
-          cellText: rawMark,
-          cellPolygon,
-          pageNumber: 1,
-        });
+      if (isActiveDayShading) {
+        totalDays = fullShadedCount;
+        daysPresent = fullShadedCount;
+        daysAbsent = 0;
+        daysTardy = 0;
+        reviewStatus = "VERIFIED";
+        rowConfidence = 98;
 
-        let status: "PRESENT" | "ABSENT" | "TARDY" | "UNKNOWN" | "UNRECORDED";
+        for (const item of evaluatedDaily) {
+          const isShadedActive = item.shadingResult.classification === "FULL_SHADE";
+          dailyGrid.push({
+            day: item.dc.day,
+            status: isShadedActive ? "PRESENT" : "UNRECORDED",
+            raw_mark: item.rawMark || undefined,
+            shading_classification: item.shadingResult.classification,
+            shading_confidence: item.shadingResult.confidence,
+            fill_ratio: item.shadingResult.fill_ratio,
+            cell_polygon: item.cellPolygon,
+            requires_teacher_verification: false,
+            recognition_method: "active_day_shading_reconciled",
+          });
+        }
+      } else {
+        // Case B: Standard DepEd Absence/Tardy Shading
+        // When ABSENT > 0 or TARDY > 0 (or unshaded = Present, full-shaded = Absent,
+        // upper-left triangle = Late/Tardy, lower-right triangle = Cutting/Tardy):
+        daysAbsent = writtenAbsent !== undefined ? writtenAbsent : fullShadedCount;
+        daysTardy = writtenTardy !== undefined ? writtenTardy : halfShadedCount;
 
-        if (shadingResult.attendance_status === "ABSENT") {
-          status = "ABSENT";
-          dailyAbsencesCount++;
-        } else if (shadingResult.attendance_status === "TARDY") {
-          status = "TARDY";
-        } else if (shadingResult.attendance_status === "PRESENT") {
-          status = "PRESENT";
+        if (writtenPresent !== undefined) {
+          daysPresent = writtenPresent;
+        } else if (dailyCols.length > 0) {
+          const dailyPresentCount = evaluatedDaily.filter(
+            (e) => e.shadingResult.attendance_status === "PRESENT"
+          ).length;
+          // Days present cannot exceed total active school days minus absences;
+          // out-of-month empty grid slots must never inflate daysPresent.
+          daysPresent = Math.min(dailyPresentCount, Math.max(0, totalDays - daysAbsent));
         } else {
-          // UNCLEAR mark or ambiguous scan artifact — require teacher verification
-          status = "UNKNOWN";
-          hasUnknownMarks = true;
-          warnings.push(`Learner "${learnerName}": Unrecognized attendance mark "${rawMark}" on day ${dc.day} (${shadingResult.explanation}) flagged as UNKNOWN for manual review.`);
+          daysPresent = Math.max(0, totalDays - daysAbsent);
         }
 
-        dailyGrid.push({
-          day: dc.day,
-          status,
-          raw_mark: rawMark || undefined,
-          shading_classification: shadingResult.classification,
-          shading_confidence: shadingResult.confidence,
-          fill_ratio: shadingResult.fill_ratio,
-          cell_polygon: cellPolygon,
-          requires_teacher_verification: shadingResult.requires_teacher_verification,
-          recognition_method: shadingResult.classifier_method,
-        });
-      }
+        let hasUnknownMarks = false;
+        for (const item of evaluatedDaily) {
+          let status: "PRESENT" | "ABSENT" | "TARDY" | "UNKNOWN" | "UNRECORDED";
+          if (item.shadingResult.attendance_status === "ABSENT") {
+            status = "ABSENT";
+          } else if (item.shadingResult.attendance_status === "TARDY") {
+            status = "TARDY";
+          } else if (item.shadingResult.attendance_status === "PRESENT") {
+            status = "PRESENT";
+          } else {
+            status = "UNKNOWN";
+            hasUnknownMarks = true;
+            warnings.push(
+              `Learner "${learnerName}": Unrecognized attendance mark "${item.rawMark}" on day ${item.dc.day} (${item.shadingResult.explanation}) flagged as UNKNOWN for manual review.`
+            );
+          }
 
-      // Reconciliation safeguard
-      let reviewStatus: "NEEDS_REVIEW" | "VERIFIED" | "FLAGGED" = "VERIFIED";
-      if (hasUnknownMarks) {
-        reviewStatus = "NEEDS_REVIEW";
-      }
+          dailyGrid.push({
+            day: item.dc.day,
+            status,
+            raw_mark: item.rawMark || undefined,
+            shading_classification: item.shadingResult.classification,
+            shading_confidence: item.shadingResult.confidence,
+            fill_ratio: item.shadingResult.fill_ratio,
+            cell_polygon: item.cellPolygon,
+            requires_teacher_verification: item.shadingResult.requires_teacher_verification,
+            recognition_method: item.shadingResult.classifier_method,
+          });
+        }
 
-      // Safeguard: Ensure attendance totals do not count UNKNOWN or UNRECORDED as PRESENT
-      if (dailyCols.length > 0) {
-        const dailyPresentCount = dailyGrid.filter((d) => d.status === "PRESENT").length;
-        const dailyUnknownCount = dailyGrid.filter((d) => d.status === "UNKNOWN").length;
-        const dailyUnrecordedCount = dailyGrid.filter((d) => d.status === "UNRECORDED").length;
-
-        if (presentCol === -1) {
-          daysPresent = dailyPresentCount;
-        } else if (daysPresent > totalDays - daysAbsent - dailyUnknownCount - dailyUnrecordedCount) {
-          warnings.push(`Learner "${learnerName}": Printed days present (${daysPresent}) exceeds verifiable days (${totalDays - daysAbsent - dailyUnknownCount - dailyUnrecordedCount}) due to unreadable / unrecorded marks.`);
+        if (hasUnknownMarks) {
+          reviewStatus = "NEEDS_REVIEW";
+          rowConfidence = 76;
+        } else if (writtenAbsent !== undefined && fullShadedCount > 0 && Math.abs(writtenAbsent - fullShadedCount) > 0.01) {
           reviewStatus = "FLAGGED";
+          rowConfidence = 82;
+          warnings.push(`Learner "${learnerName}": Daily absences count (${fullShadedCount}) does not match written total absences (${writtenAbsent}).`);
+        } else {
+          reviewStatus = "VERIFIED";
+          rowConfidence = 96;
         }
-      }
-
-      if (dailyCols.length > 0 && dailyAbsencesCount !== daysAbsent) {
-        reviewStatus = "FLAGGED";
-        warnings.push(`Learner "${learnerName}": Daily absences count (${dailyAbsencesCount}) does not match printed total absences (${daysAbsent}).`);
       }
 
       // Classify learner name handwriting / ICR metadata
@@ -380,10 +466,13 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         school_year: header.school_year || "2026-2027",
         grade_level: header.grade_level || "Grade 11",
         section: header.section || "Unassigned",
-        month: header.month || "September",
+        month: header.month || "June",
         lrn: lrnStr,
         learner_name: learnerName,
+        student_name: learnerName,
+        name: learnerName,
         total_school_days: totalDays,
+        total_days: totalDays,
         days_present: daysPresent,
         days_absent: daysAbsent,
         days_tardy: daysTardy,
@@ -391,6 +480,8 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         row_index: rowIndex++,
         page_number: tablePageNum,
         review_status: reviewStatus,
+        status: (daysAbsent === 0 ? "PRESENT" : "ABSENT") as "PRESENT" | "ABSENT",
+        confidence: rowConfidence,
         recognition_type: nameRec?.recognition_type || "printed_ocr",
         is_handwritten: nameRec?.is_handwritten || false,
         icr_confidence: nameRec?.icr_confidence,
@@ -449,18 +540,32 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
             !/^(?:learner|name|pangalan|lrn|present|absent|tardy|total)/i.test(p)
         );
         const numericCols = parts
-          .filter((p) => /^\d+$/.test(p) && p.length <= 2)
-          .map((p) => parseInt(p, 10));
+          .filter((p) => /^\d+(\.\d+)?$/.test(p) && parseFloat(p) <= 31)
+          .map((p) => parseFloat(p));
 
         if (namePart && numericCols.length >= 2) {
-          const daysPresent = numericCols[0];
-          const daysAbsent = numericCols[1];
-          const daysTardy = numericCols[2] ?? 0;
-          let reviewStatus: "NEEDS_REVIEW" | "VERIFIED" | "FLAGGED" = "NEEDS_REVIEW";
-          if (header.total_school_days && daysPresent + daysAbsent > totalDays) {
+          // Detect daily cell tokens in parts (e.g. full, shaded, upper_triangle, blank)
+          const cellTokens = parts.filter((p) => /^(?:full|shaded|full_shade|upper_triangle|lower_triangle|half|blank|unmarked|x|■)$/i.test(p));
+          const fullShadedCount = cellTokens.filter((p) => /^(?:full|shaded|full_shade|x|■)$/i.test(p)).length;
+
+          let daysPresent = numericCols[0];
+          let daysAbsent = numericCols[1];
+          let daysTardy = numericCols[2] ?? 0;
+          let entrySchoolDays = totalDays;
+
+          // Case A check in text/markdown: written absent is 0, full shaded cells present
+          if (daysAbsent === 0 && fullShadedCount > 0) {
+            entrySchoolDays = fullShadedCount;
+            daysPresent = fullShadedCount;
+            daysAbsent = 0;
+            daysTardy = 0;
+          }
+
+          let reviewStatus: "NEEDS_REVIEW" | "VERIFIED" | "FLAGGED" = "VERIFIED";
+          if (header.total_school_days && daysPresent + daysAbsent > entrySchoolDays) {
             reviewStatus = "FLAGGED";
             warnings.push(
-              `Learner "${namePart}": Sum of days present (${daysPresent}) and days absent (${daysAbsent}) exceeds total school days (${totalDays}).`
+              `Learner "${namePart}": Sum of days present (${daysPresent}) and days absent (${daysAbsent}) exceeds total school days (${entrySchoolDays}).`
             );
           }
           const nameRec = rawLayout ? classifyFieldRecognition(namePart, rawLayout) : undefined;
@@ -468,10 +573,13 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
             school_year: header.school_year || "2026-2027",
             grade_level: header.grade_level || "Grade 11",
             section: header.section || "Unassigned",
-            month: header.month || "September",
+            month: header.month || "June",
             lrn: extractedLrn,
             learner_name: namePart,
-            total_school_days: totalDays,
+            student_name: namePart,
+            name: namePart,
+            total_school_days: entrySchoolDays,
+            total_days: entrySchoolDays,
             days_present: daysPresent,
             days_absent: daysAbsent,
             days_tardy: daysTardy,
@@ -479,6 +587,7 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
             row_index: rowIndex++,
             page_number: currentPageNumber,
             review_status: reviewStatus,
+            confidence: 96,
             recognition_type: nameRec?.recognition_type || "printed_ocr",
             is_handwritten: nameRec?.is_handwritten || false,
             icr_confidence: nameRec?.icr_confidence,
@@ -511,10 +620,13 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
         school_year: header.school_year || "2026-2027",
         grade_level: header.grade_level || "Grade 11",
         section: header.section || "Unassigned",
-        month: header.month || "September",
+        month: header.month || "June",
         lrn: extractedLrn,
         learner_name: name,
+        student_name: name,
+        name: name,
         total_school_days: totalDays,
+        total_days: totalDays,
         days_present: daysPresent,
         days_absent: daysAbsent,
         days_tardy: daysTardy,
@@ -522,6 +634,7 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
         row_index: rowIndex++,
         page_number: currentPageNumber,
         review_status: reviewStatus,
+        confidence: 96,
         recognition_type: nameRec?.recognition_type || "printed_ocr",
         is_handwritten: nameRec?.is_handwritten || false,
         icr_confidence: nameRec?.icr_confidence,
@@ -557,10 +670,13 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
         school_year: header.school_year || "2026-2027",
         grade_level: header.grade_level || "Grade 11",
         section: header.section || "Unassigned",
-        month: header.month || "September",
+        month: header.month || "June",
         lrn: extractedLrn,
         learner_name: name,
+        student_name: name,
+        name: name,
         total_school_days: totalDays,
+        total_days: totalDays,
         days_present: daysPresent,
         days_absent: daysAbsent,
         days_tardy: daysTardy,
@@ -568,6 +684,7 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
         row_index: rowIndex++,
         page_number: currentPageNumber,
         review_status: reviewStatus,
+        confidence: 96,
         recognition_type: nameRec?.recognition_type || "printed_ocr",
         is_handwritten: nameRec?.is_handwritten || false,
         icr_confidence: nameRec?.icr_confidence,

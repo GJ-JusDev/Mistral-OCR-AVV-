@@ -1,5 +1,6 @@
 import type { ExtractedFields } from "@/types/documents";
 import { normalizeLrn, normalizeSex, isValidLrn, isValidSchoolYear } from "../validation/patterns";
+import { isBlacklistedStudentName } from "../validation/nameComparison";
 
 export interface NormalizedBBox {
   minX: number;
@@ -305,6 +306,12 @@ export function extractSpatialIdentity(
       "pangkat",
       "kasarian",
       "edad",
+      "information",
+      "scholastic",
+      "record",
+      "records",
+      "unknown",
+      "permanent",
     ]);
 
     // Gather candidate words inside the local window
@@ -369,17 +376,20 @@ export function extractSpatialIdentity(
     const firstName = formatCol(firstWords);
     const middleName = formatCol(middleWords);
 
-    if (lastName) result.last_name = lastName;
-    if (firstName) result.first_name = firstName;
-    if (middleName) result.middle_name = middleName;
+    if (lastName && !isBlacklistedStudentName(lastName)) result.last_name = lastName;
+    if (firstName && !isBlacklistedStudentName(firstName)) result.first_name = firstName;
+    if (middleName && !isBlacklistedStudentName(middleName)) result.middle_name = middleName;
 
     // Compose display name
-    if (lastName && firstName) {
-      result.name = `${lastName}, ${firstName}${middleName ? " " + middleName : ""}`;
-    } else if (firstName) {
-      result.name = `${firstName}${middleName ? " " + middleName : ""}`;
-    } else if (lastName) {
-      result.name = lastName;
+    if (result.last_name && result.first_name) {
+      result.name = `${result.last_name}, ${result.first_name}${result.middle_name ? " " + result.middle_name : ""}`;
+    } else if (result.first_name) {
+      result.name = `${result.first_name}${result.middle_name ? " " + result.middle_name : ""}`;
+    } else if (result.last_name) {
+      result.name = result.last_name;
+    }
+    if (result.name && isBlacklistedStudentName(result.name)) {
+      result.name = undefined;
     }
   }
 

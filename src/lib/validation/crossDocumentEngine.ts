@@ -23,8 +23,37 @@
  */
 
 import { normalizeNamePart, normalizeSuffix, normalizeDate } from "./nameComparison";
+import { compareBirthDates, type SplitBirthDateFields } from "./birthDateNormalizer";
+export {
+  normalizeBirthDate,
+  toIsoBirthDate,
+  formatBirthDateDisplay,
+  compareBirthDates,
+  monthToNumber,
+  monthToFullName,
+  monthToAbbreviation,
+} from "./birthDateNormalizer";
 import { normalizeSex, normalizeLrn, isValidLrn } from "./patterns";
 export { normalizeSex, normalizeLrn, isValidLrn };
+import {
+  normalizeDepEdMonthKey,
+  formatDepEdMonthDisplay,
+  getDepEdMonthFullName,
+  getDepEdMonthShortLabel,
+  isDepEdMonthMatch,
+  DEPED_11_MONTHS,
+  DEPED_MONTH_CONFIG,
+  type CanonicalDepEdMonthKey,
+} from "./monthNormalizer";
+export {
+  normalizeDepEdMonthKey,
+  formatDepEdMonthDisplay,
+  getDepEdMonthFullName,
+  getDepEdMonthShortLabel,
+  isDepEdMonthMatch,
+  DEPED_11_MONTHS,
+  DEPED_MONTH_CONFIG,
+};
 import { normalizeSubjectName } from "./gradeComparator";
 import { verifyStudentCollision } from "./studentMatcher";
 import type {
@@ -44,7 +73,7 @@ export interface DiscrepancyItem {
   targetValue: any;
   severity: "CRITICAL" | "WARNING" | "INFO" | "ERROR";
   description: string;
-  category?: "NEEDS_VERIFICATION";
+  category?: "NEEDS_VERIFICATION" | "MISMATCH";
 }
 
 export interface PairwiseValidationResult {
@@ -216,12 +245,13 @@ export function comparePsaAndSf1(
   }
 
   // Date of birth
-  const normPsaDob = normalizeDate(psa.birth_date);
+  const rawPsaDob = psa.birth_date || (psa as any).date_of_birth;
+  const normPsaDob = normalizeDate(rawPsaDob);
   const normSf1Dob = normalizeDate(sf1.birth_date);
   const isDobMatch = !normPsaDob || !normSf1Dob || normPsaDob === normSf1Dob;
   comparisonResults.push({
     field: "date_of_birth",
-    doc1Value: psa.birth_date,
+    doc1Value: rawPsaDob,
     doc2Value: sf1.birth_date,
     isMatch: isDobMatch,
     notes: isDobMatch ? "DOB verified" : "DOB discrepancy",
@@ -229,10 +259,10 @@ export function comparePsaAndSf1(
   if (!isDobMatch) {
     discrepancies.push({
       field: "date_of_birth",
-      sourceValue: psa.birth_date,
+      sourceValue: rawPsaDob,
       targetValue: sf1.birth_date,
       severity: "CRITICAL",
-      description: `Date of birth mismatch: PSA "${psa.birth_date}" vs SF1 "${sf1.birth_date}".`,
+      description: `Date of birth mismatch: PSA "${rawPsaDob}" vs SF1 "${sf1.birth_date}".`,
     });
   }
 
@@ -531,6 +561,7 @@ export function compareSf1AndSf9(
     lrn?: string;
     last_name?: string;
     first_name?: string;
+    sex?: string;
     school_year?: string;
     grade_level?: string;
     section?: string;
@@ -542,6 +573,7 @@ export function compareSf1AndSf9(
     lrn?: string;
     last_name?: string;
     first_name?: string;
+    sex?: string;
     school_year?: string;
     grade_level?: string;
     section?: string;
@@ -572,7 +604,7 @@ export function compareSf1AndSf9(
     });
   }
 
-  // Name match
+  // Name match: last_name
   const normSf1Last = normalizeNamePart(sf1Entry.last_name);
   const normSf9Last = normalizeNamePart(sf9Doc.last_name);
   const isLastMatch = !normSf1Last || !normSf9Last || normSf1Last === normSf9Last;
@@ -591,6 +623,50 @@ export function compareSf1AndSf9(
       severity: "CRITICAL",
       description: `Learner surname mismatch: SF1 "${sf1Entry.last_name}" vs SF9 "${sf9Doc.last_name}".`,
     });
+  }
+
+  // Name match: first_name
+  const normSf1First = normalizeNamePart(sf1Entry.first_name);
+  const normSf9First = normalizeNamePart(sf9Doc.first_name);
+  const isFirstMatch = !normSf1First || !normSf9First || normSf1First === normSf9First;
+  comparisonResults.push({
+    field: "first_name",
+    doc1Value: sf1Entry.first_name,
+    doc2Value: sf9Doc.first_name,
+    isMatch: isFirstMatch,
+    notes: isFirstMatch ? "First name matched" : "First name mismatch",
+  });
+  if (!isFirstMatch) {
+    discrepancies.push({
+      field: "first_name",
+      sourceValue: sf1Entry.first_name,
+      targetValue: sf9Doc.first_name,
+      severity: "CRITICAL",
+      description: `Learner first name mismatch: SF1 "${sf1Entry.first_name}" vs SF9 "${sf9Doc.first_name}".`,
+    });
+  }
+
+  // Sex match
+  if (sf1Entry.sex && sf9Doc.sex) {
+    const normSf1Sex = normalizeSex(sf1Entry.sex);
+    const normSf9Sex = normalizeSex(sf9Doc.sex);
+    const isSexMatch = !normSf1Sex || !normSf9Sex || normSf1Sex === normSf9Sex;
+    comparisonResults.push({
+      field: "sex",
+      doc1Value: sf1Entry.sex,
+      doc2Value: sf9Doc.sex,
+      isMatch: isSexMatch,
+      notes: isSexMatch ? "Sex verified" : "Sex conflict",
+    });
+    if (!isSexMatch) {
+      discrepancies.push({
+        field: "sex",
+        sourceValue: sf1Entry.sex,
+        targetValue: sf9Doc.sex,
+        severity: "CRITICAL",
+        description: `Sex conflict: SF1 "${sf1Entry.sex}" vs SF9 "${sf9Doc.sex}".`,
+      });
+    }
   }
 
   // Section match
@@ -2085,20 +2161,8 @@ export function extractAcademicGradeRecords(
 
 export function normalizeAttendanceMonthKey(m: string | undefined | null): string {
   if (!m) return "";
-  const lower = String(m).toLowerCase().trim();
-  if (lower.startsWith("jun")) return "JUN";
-  if (lower.startsWith("jul")) return "JUL";
-  if (lower.startsWith("aug")) return "AUG";
-  if (lower.startsWith("sep")) return "SEP";
-  if (lower.startsWith("oct")) return "OCT";
-  if (lower.startsWith("nov")) return "NOV";
-  if (lower.startsWith("dec")) return "DEC";
-  if (lower.startsWith("jan")) return "JAN";
-  if (lower.startsWith("feb")) return "FEB";
-  if (lower.startsWith("mar")) return "MAR";
-  if (lower.startsWith("apr")) return "APR";
-  if (lower.startsWith("may")) return "MAY";
-  return lower.slice(0, 3).toUpperCase();
+  const key = normalizeDepEdMonthKey(m);
+  return key || String(m).toLowerCase().slice(0, 3);
 }
 
 function attendanceValueSignature(raw: any): string {
@@ -2320,7 +2384,11 @@ function mergeUnifiedDocumentRecords(
     }>();
     for (const [recordIndex, raw] of rawRecords.entries()) {
       const months = Array.isArray(raw.attendance_months) ? raw.attendance_months : [];
-      const rows = Array.isArray(raw.attendance) ? raw.attendance : [];
+      const rows = Array.isArray(raw.attendance)
+        ? raw.attendance
+        : Array.isArray(raw.attendance_records)
+        ? raw.attendance_records
+        : [];
       months.forEach((month: string, monthIndex: number) => {
         const key = normalizeAttendanceMonthKey(month);
         const monthEntry = attendanceByMonth.get(key) || {
@@ -2355,7 +2423,16 @@ function mergeUnifiedDocumentRecords(
     if (attendanceByMonth.size > 0) {
       const months = Array.from(attendanceByMonth.values());
       const labels = Array.from(
-        new Set(rawRecords.flatMap((raw) => (Array.isArray(raw.attendance) ? raw.attendance : []).map((row: any) => row.label)))
+        new Set(
+          rawRecords.flatMap((raw) => {
+            const arr = Array.isArray(raw.attendance)
+              ? raw.attendance
+              : Array.isArray(raw.attendance_records)
+              ? raw.attendance_records
+              : [];
+            return arr.map((row: any) => row.label);
+          })
+        )
       );
       merged.attendance_months = months.map((entry) => entry.month);
       merged.attendance_conflicts = months.flatMap((month) =>
@@ -2377,7 +2454,14 @@ function mergeUnifiedDocumentRecords(
           const candidates = entry.values.get(String(label)) || [];
           return candidates.length === 1 ? candidates[0].value : undefined;
         });
-        const numericValues = values.map(parseNumericVal).filter((value): value is number => value !== undefined);
+        const numericValues = months
+          .filter((entry) => normalizeAttendanceMonthKey(entry.month) !== "total")
+          .map((entry) => {
+            const candidates = entry.values.get(String(label)) || [];
+            return candidates.length === 1 ? candidates[0].value : undefined;
+          })
+          .map(parseNumericVal)
+          .filter((value): value is number => value !== undefined);
         return {
           label,
           values,
@@ -3342,7 +3426,11 @@ export function evaluateUnifiedStudentValidation(
   // ---------------------------------------------------------------------------
   // C. ATTENDANCE MATRIX (SF2 Daily / Monthly vs SF9 Monthly Table)
   // ---------------------------------------------------------------------------
-  const sf9AttendanceRecords: any[] = Array.isArray(sf9Raw.attendance) ? sf9Raw.attendance : [];
+  const sf9AttendanceRecords: any[] = Array.isArray(sf9Raw.attendance)
+    ? sf9Raw.attendance
+    : Array.isArray(sf9Raw.attendance_records)
+    ? sf9Raw.attendance_records
+    : [];
   const sf9AttendanceMonths: string[] = Array.isArray(sf9Raw.attendance_months) ? sf9Raw.attendance_months : [];
 
   const sf2ByMonth = groupAttendanceRecords(sf2Records);
@@ -3432,20 +3520,28 @@ export function evaluateUnifiedStudentValidation(
         description: `Conflicting SF9 attendance values were found for ${monthName}. Review the listed source records; their values were excluded from annual totals.`,
       });
     } else if (matchingSf2 && sf9Formatted) {
-      const presMatch = (sf2Pres !== undefined && sf9Pres !== undefined) ? sf2Pres === sf9Pres : true;
-      const absMatch = (sf2Abs !== undefined && sf9Abs !== undefined) ? sf2Abs === sf9Abs : true;
+      const presMatch = (sf2Pres !== undefined && sf9Pres !== undefined) ? Math.abs(sf2Pres - sf9Pres) < 0.01 : true;
+      const absMatch = (sf2Abs !== undefined && sf9Abs !== undefined) ? Math.abs(sf2Abs - sf9Abs) < 0.01 : true;
+      const daysMatch = (sf2Days !== undefined && sf9Days !== undefined) ? Math.abs(sf2Days - sf9Days) < 0.01 : true;
 
-      if (!presMatch || !absMatch) {
-        attStatus = "NEEDS_VERIFICATION";
-        attNotes = `Monthly discrepancy for ${monthName}: SF2 (${sf2Formatted}) vs SF9 (${sf9Formatted}).`;
+      if (!presMatch || !absMatch || !daysMatch) {
+        attStatus = "MISMATCH";
+        const deltaDays = (sf2Days ?? 0) - (sf9Days ?? 0);
+        const deltaPres = (sf2Pres ?? 0) - (sf9Pres ?? 0);
+        const deltaAbs = (sf2Abs ?? 0) - (sf9Abs ?? 0);
+        const formattedMonthLabel = formatDepEdMonthDisplay(monthName);
+        attNotes = `Monthly discrepancy for ${formattedMonthLabel}: SF2 (${sf2Formatted}) vs SF9 (${sf9Formatted}). Deltas: Pres ${deltaPres >= 0 ? `+${deltaPres}` : deltaPres}, Abs ${deltaAbs >= 0 ? `+${deltaAbs}` : deltaAbs}.`;
         discrepancies.push({
-          field: `monthly_attendance_${monthName.toLowerCase()}`,
+          field: `monthly_attendance_${mKey.toLowerCase()}`,
           sourceValue: sf2Formatted,
           targetValue: sf9Formatted,
-          severity: "WARNING",
-          category: "NEEDS_VERIFICATION",
-          description: `Attendance variance in ${monthName}: SF2 reports "${sf2Formatted}", while SF9 report card reports "${sf9Formatted}". Teacher verification required.`,
+          severity: "CRITICAL",
+          category: "MISMATCH",
+          description: `Attendance mismatch in ${formattedMonthLabel}: SF2 reports "${sf2Formatted}", while SF9 report card reports "${sf9Formatted}". Pres delta: ${deltaPres}, Abs delta: ${deltaAbs}.`,
         });
+      } else {
+        attStatus = "MATCH";
+        attNotes = `Monthly attendance reconciled for ${formatDepEdMonthDisplay(monthName)} (School Days: ${sf2Days ?? sf9Days ?? "-"}, Present: ${sf2Pres ?? sf9Pres ?? "-"}, Absent: ${sf2Abs ?? sf9Abs ?? 0}).`;
       }
 
       // Check daily grid for unreadable marks
@@ -3458,16 +3554,17 @@ export function evaluateUnifiedStudentValidation(
       }
     } else if (sf9Formatted && !matchingSf2) {
       attStatus = "NOT_APPLICABLE";
-      attNotes = `SF2 monthly report for ${monthName} is pending upload.`;
+      attNotes = `SF2 monthly report for ${formatDepEdMonthDisplay(monthName)} is pending upload.`;
     } else if (matchingSf2 && !sf9Formatted) {
       attStatus = "NOT_APPLICABLE";
-      attNotes = `SF2 attendance recorded for ${monthName}, but SF9 has blank column.`;
+      attNotes = `SF2 attendance recorded for ${formatDepEdMonthDisplay(monthName)}, but SF9 has blank column.`;
     }
 
-    fieldsMatrix.push({
-      field: `attendance_${monthName.toLowerCase()}`,
+    const fullName = getDepEdMonthFullName(mKey).toLowerCase();
+    const primaryAttRow: UnifiedFieldComparisonRow = {
+      field: `attendance_${mKey.toLowerCase()}`,
       category: "ATTENDANCE",
-      label: `Attendance — ${monthName}`,
+      label: `Attendance — ${formatDepEdMonthDisplay(monthName)}`,
       sf1Value: hasSf1 ? "Enrolled" : undefined,
       sf2Value: sf2Formatted,
       sf9Value: sf9Formatted,
@@ -3481,13 +3578,27 @@ export function evaluateUnifiedStudentValidation(
           .flatMap((source: any) => source.sourceDocumentIds || []),
       ])),
       sourcesPresent,
-    });
+    };
+    fieldsMatrix.push(primaryAttRow);
+    if (fullName && fullName !== mKey.toLowerCase()) {
+      fieldsMatrix.push({
+        ...primaryAttRow,
+        field: `attendance_${fullName}`,
+      });
+    }
   }
 
   // Attendance Annual Summary Totals
-  const sf9PrintedTotPres = parseNumericVal(daysPresentRow?.total);
-  const sf9PrintedTotAbs = parseNumericVal(daysAbsentRow?.total);
-  const sf9PrintedTotDays = parseNumericVal(schoolDaysRow?.total);
+  const totalColIdx = sf9AttendanceMonths.findIndex((m) => normalizeAttendanceMonthKey(m) === "total");
+  const sf9PrintedTotPres = totalColIdx >= 0
+    ? parseNumericVal(daysPresentRow?.values?.[totalColIdx]) ?? parseNumericVal(daysPresentRow?.total)
+    : parseNumericVal(daysPresentRow?.total);
+  const sf9PrintedTotAbs = totalColIdx >= 0
+    ? parseNumericVal(daysAbsentRow?.values?.[totalColIdx]) ?? parseNumericVal(daysAbsentRow?.total)
+    : parseNumericVal(daysAbsentRow?.total);
+  const sf9PrintedTotDays = totalColIdx >= 0
+    ? parseNumericVal(schoolDaysRow?.values?.[totalColIdx]) ?? parseNumericVal(schoolDaysRow?.total)
+    : parseNumericVal(schoolDaysRow?.total);
 
   let totalSf2Pres = 0;
   let totalSf2Abs = 0;
@@ -3511,25 +3622,68 @@ export function evaluateUnifiedStudentValidation(
     }
   }
 
+  const uploadedMonths = attendanceMonthGroups.filter((g) => !g.hasConflict);
+  const uploadedMonthsCount = uploadedMonths.length;
+  const uploadedMonthNames = uploadedMonths.map((g) => formatDepEdMonthDisplay(g.month));
+
   const annualSources: string[] = [];
   if (hasPopulatedSf2) annualSources.push("SF2-SHS");
   if (hasSf9) annualSources.push("SF9-SHS");
+
+  let annualStatus: UnifiedFieldComparisonRow["status"] = "MATCH";
+  let annualNotes = "Annual attendance summary evaluated with one contribution per learner/month.";
+  let isAnnualMatch = true;
+
+  if (hasAttendanceConflict) {
+    annualStatus = "NEEDS_VERIFICATION";
+    isAnnualMatch = false;
+    annualNotes = "Attendance totals exclude conflicting duplicate records; review the monthly discrepancies.";
+  } else if (hasPopulatedSf2 && (sf9PrintedTotPres !== undefined || sf9PrintedTotAbs !== undefined)) {
+    if (uploadedMonthsCount >= 11) {
+      // Complete 11-month SF2 attendance uploaded: compare cumulative totals directly
+      const presTotalMatch = sf9PrintedTotPres !== undefined ? Math.abs(totalSf2Pres - sf9PrintedTotPres) < 0.01 : true;
+      const absTotalMatch = sf9PrintedTotAbs !== undefined ? Math.abs(totalSf2Abs - sf9PrintedTotAbs) < 0.01 : true;
+      const daysTotalMatch = sf9PrintedTotDays !== undefined ? Math.abs(totalSf2Days - sf9PrintedTotDays) < 0.01 : true;
+
+      if (!presTotalMatch || !absTotalMatch || !daysTotalMatch) {
+        annualStatus = "MISMATCH";
+        isAnnualMatch = false;
+        annualNotes = `Cumulative total attendance mismatch across all 11 months: SF2 sum (Days: ${totalSf2Days}, Pres: ${totalSf2Pres}, Abs: ${totalSf2Abs}) vs SF9 Total (Days: ${sf9PrintedTotDays ?? "-"}, Pres: ${sf9PrintedTotPres ?? "-"}, Abs: ${sf9PrintedTotAbs ?? "-"}).`;
+        discrepancies.push({
+          field: "annual_attendance_total",
+          sourceValue: `SF2 Sum: Pres ${totalSf2Pres}, Abs ${totalSf2Abs}, Days ${totalSf2Days}`,
+          targetValue: `SF9 Total: Pres ${sf9PrintedTotPres}, Abs ${sf9PrintedTotAbs}, Days ${sf9PrintedTotDays}`,
+          severity: "CRITICAL",
+          category: "MISMATCH",
+          description: annualNotes,
+        });
+      } else {
+        annualStatus = "MATCH";
+        annualNotes = `All 11 months reconciled. Cumulative totals match SF9 Front Total column (School Days: ${totalSf2Days}, Present: ${totalSf2Pres}, Absent: ${totalSf2Abs}).`;
+      }
+    } else {
+      // Partial coverage (e.g. 1 month uploaded, e.g. June): show progress without false mismatch
+      annualStatus = "MATCH";
+      isAnnualMatch = true;
+      annualNotes = `${uploadedMonthsCount} of 11 months compared (${uploadedMonthNames.join(", ")}); cumulative total comparison pending remaining ${11 - uploadedMonthsCount} months.`;
+    }
+  }
 
   const annualRow: UnifiedFieldComparisonRow = {
     field: "attendance_annual_summary",
     category: "ATTENDANCE",
     label: "Annual Attendance Summary",
     sf2Value: hasPopulatedSf2
-      ? `Aggregated (${attendanceMonthGroups.length} unique months; conflicts excluded): Pres: ${totalSf2Pres}, Abs: ${totalSf2Abs}`
+      ? `Aggregated (${attendanceMonthGroups.length} unique months; conflicts excluded): Pres: ${totalSf2Pres}, Abs: ${totalSf2Abs}${totalSf2Days > 0 ? `, Tot: ${totalSf2Days}` : ""}`
       : undefined,
-    sf9Value: (sf9PrintedTotPres !== undefined || sf9PrintedTotAbs !== undefined) ? `Report Card Totals: Pres: ${sf9PrintedTotPres ?? "-"}, Abs: ${sf9PrintedTotAbs ?? "-"}` : undefined,
-    status: hasAttendanceConflict ? "NEEDS_VERIFICATION" : "MATCH",
-    isMatch: !hasAttendanceConflict,
+    sf9Value: (sf9PrintedTotPres !== undefined || sf9PrintedTotAbs !== undefined)
+      ? `Report Card Totals: Pres: ${sf9PrintedTotPres ?? "-"}, Abs: ${sf9PrintedTotAbs ?? "-"}${sf9PrintedTotDays !== undefined ? `, Tot: ${sf9PrintedTotDays}` : ""}`
+      : undefined,
+    status: annualStatus,
+    isMatch: isAnnualMatch,
     sourcesPresent: annualSources,
     sourceDocumentIds: Array.from(new Set(attendanceMonthGroups.flatMap((group) => group.sourceDocumentIds))),
-    notes: hasAttendanceConflict
-      ? "Attendance totals exclude conflicting duplicate records; review the monthly discrepancies."
-      : "Annual attendance summary evaluated with one contribution per learner/month.",
+    notes: annualNotes,
   };
 
   // High absenteeism screening (>20% of school days without dropping)
@@ -4206,5 +4360,439 @@ export function evaluateUnifiedStudentValidation(
       requiredAvailable,
       hasRequiredCoverage,
     },
+  };
+}
+
+
+// =============================================================================
+// SF10-SHS CROSS-DOCUMENT COMPARATORS
+//   - compareSf10AndSf1 : LRN, Full Name, Sex, normalized Birth Date
+//   - compareSf10AndSf9 : LRN, Full Name, Sex, Grade Level, Section, School Year,
+//                         Track/Strand + per-semester Subject Grades & General Averages
+//   - compareSf10AndPsa : civil identity ONLY (Full Name, Sex, Birth Date). PSA has NO LRN.
+// Birth dates are month-normalized: "06/23/2004" (SF10) == "6/23/04" (SF1) == "June 23, 2004" (PSA).
+// =============================================================================
+
+export interface Sf10IdentityDocLike {
+  document_id?: string;
+  lrn?: string | null;
+  name?: string | null;
+  full_name?: string | null;
+  complete_name?: string | null;
+  last_name?: string | null;
+  first_name?: string | null;
+  middle_name?: string | null;
+  suffix?: string | null;
+  sex?: string | null;
+  gender?: string | null;
+  birth_date?: string | null;
+  date_of_birth?: string | null;
+  birthdate?: string | null;
+  birth_month?: string | number | null;
+  birth_day?: string | number | null;
+  birth_year?: string | number | null;
+  grade_level?: string | null;
+  school_year?: string | null;
+  section?: string | null;
+  track_strand?: string | null;
+  strand?: string | null;
+  [key: string]: any;
+}
+
+type ComparisonRow = PairwiseValidationResult["comparisonResults"][number];
+
+interface IdentityAccumulator {
+  rows: ComparisonRow[];
+  discrepancies: DiscrepancyItem[];
+}
+
+function sf10ResolveNameParts(doc: Sf10IdentityDocLike): { last: string; first: string; middle: string; display: string } {
+  let last = (doc.last_name || "").trim();
+  let first = (doc.first_name || "").trim();
+  let middle = (doc.middle_name || "").trim();
+  const full = (doc.full_name || doc.name || doc.complete_name || "").trim();
+  if ((!last || !first) && full) {
+    if (full.includes(",")) {
+      const [l, ...rest] = full.split(",").map((s) => s.trim());
+      const tokens = rest.join(" ").split(/\s+/).filter(Boolean);
+      last = last || l;
+      first = first || (tokens.length > 1 ? tokens.slice(0, -1).join(" ") : tokens[0] || "");
+      middle = middle || (tokens.length > 1 ? tokens[tokens.length - 1] : "");
+    } else {
+      const tokens = full.split(/\s+/).filter(Boolean);
+      if (tokens.length >= 2) {
+        // Civil-registry order (PSA): FIRST [MIDDLE] LAST
+        last = last || tokens[tokens.length - 1];
+        first = first || (tokens.length > 2 ? tokens.slice(0, -2).join(" ") : tokens[0]);
+        middle = middle || (tokens.length > 2 ? tokens[tokens.length - 2] : "");
+      }
+    }
+  }
+  const display = last || first ? `${last}, ${first}${middle ? " " + middle : ""}`.trim() : full;
+  return { last, first, middle, display };
+}
+
+function sf10ResolveBirthDate(doc: Sf10IdentityDocLike): string | SplitBirthDateFields | null {
+  const direct = doc.birth_date || doc.date_of_birth || doc.birthdate;
+  if (direct) return direct;
+  if (doc.birth_month || doc.birth_day || doc.birth_year) {
+    return { month: doc.birth_month ?? null, day: doc.birth_day ?? null, year: doc.birth_year ?? null };
+  }
+  return null;
+}
+
+function sf10CompareLrn(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b: Sf10IdentityDocLike, la: string, lb: string) {
+  const va = normalizeLrn(a.lrn || "");
+  const vb = normalizeLrn(b.lrn || "");
+  if (!va || !vb) {
+    acc.rows.push({ field: "lrn", doc1Value: a.lrn || null, doc2Value: b.lrn || null, isMatch: false, notes: "LRN missing on one document" });
+    acc.discrepancies.push({ field: "lrn", sourceValue: a.lrn || null, targetValue: b.lrn || null, severity: "INFO", category: "NEEDS_VERIFICATION", description: `LRN not available on ${!va ? la : lb}; LRN comparison skipped.` });
+    return;
+  }
+  const isMatch = va === vb;
+  acc.rows.push({ field: "lrn", doc1Value: va, doc2Value: vb, isMatch, notes: isMatch ? "LRN verified" : "LRN conflict" });
+  if (!isMatch) {
+    acc.discrepancies.push({ field: "lrn", sourceValue: va, targetValue: vb, severity: "CRITICAL", category: "MISMATCH", description: `LRN conflict: ${la} "${va}" vs ${lb} "${vb}".` });
+  }
+}
+
+function sf10CompareFullName(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b: Sf10IdentityDocLike, la: string, lb: string) {
+  const na = sf10ResolveNameParts(a);
+  const nb = sf10ResolveNameParts(b);
+  if (!na.last || !na.first || !nb.last || !nb.first) {
+    acc.rows.push({ field: "full_name", doc1Value: na.display || null, doc2Value: nb.display || null, isMatch: false, notes: "Full name incomplete on one document" });
+    acc.discrepancies.push({ field: "full_name", sourceValue: na.display || null, targetValue: nb.display || null, severity: "WARNING", category: "NEEDS_VERIFICATION", description: `Full name could not be fully extracted from ${!na.last || !na.first ? la : lb}; manual verification required.` });
+    return;
+  }
+  const lastOk = normalizeNamePart(na.last) === normalizeNamePart(nb.last);
+  const firstOk = normalizeNamePart(na.first) === normalizeNamePart(nb.first);
+  const ma = normalizeNamePart(na.middle);
+  const mb = normalizeNamePart(nb.middle);
+  const midOk = !ma || !mb || ma === mb || ma.startsWith(mb) || mb.startsWith(ma);
+  const isMatch = lastOk && firstOk && midOk;
+  acc.rows.push({
+    field: "full_name",
+    doc1Value: na.display,
+    doc2Value: nb.display,
+    isMatch,
+    notes: isMatch ? "Full name verified" : !lastOk || !firstOk ? "Surname/given name difference" : "Middle name difference",
+  });
+  if (!lastOk || !firstOk) {
+    acc.discrepancies.push({ field: "full_name", sourceValue: na.display, targetValue: nb.display, severity: "CRITICAL", category: "MISMATCH", description: `Full name mismatch: ${la} "${na.display}" vs ${lb} "${nb.display}".` });
+  } else if (!midOk) {
+    acc.discrepancies.push({ field: "middle_name", sourceValue: na.middle, targetValue: nb.middle, severity: "WARNING", category: "NEEDS_VERIFICATION", description: `Middle name difference: ${la} "${na.middle}" vs ${lb} "${nb.middle}".` });
+  }
+}
+
+function sf10CompareSex(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b: Sf10IdentityDocLike, la: string, lb: string) {
+  const ra = a.sex || a.gender || "";
+  const rb = b.sex || b.gender || "";
+  const va = normalizeSex(ra);
+  const vb = normalizeSex(rb);
+  if (!va || !vb) {
+    acc.rows.push({ field: "sex", doc1Value: ra || null, doc2Value: rb || null, isMatch: false, notes: "Sex missing on one document" });
+    acc.discrepancies.push({ field: "sex", sourceValue: ra || null, targetValue: rb || null, severity: "INFO", category: "NEEDS_VERIFICATION", description: `Sex not available on ${!va ? la : lb}; comparison skipped.` });
+    return;
+  }
+  const isMatch = va === vb;
+  acc.rows.push({ field: "sex", doc1Value: ra, doc2Value: rb, isMatch, notes: isMatch ? "Sex verified" : "Sex conflict" });
+  if (!isMatch) {
+    acc.discrepancies.push({ field: "sex", sourceValue: ra, targetValue: rb, severity: "CRITICAL", category: "MISMATCH", description: `Sex conflict: ${la} "${ra}" vs ${lb} "${rb}".` });
+  }
+}
+
+function sf10CompareBirthDate(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b: Sf10IdentityDocLike, la: string, lb: string) {
+  const cmp = compareBirthDates(sf10ResolveBirthDate(a), sf10ResolveBirthDate(b));
+  acc.rows.push({
+    field: "birth_date",
+    doc1Value: cmp.leftDisplay || null,
+    doc2Value: cmp.rightDisplay || null,
+    isMatch: cmp.outcome === "MATCH",
+    notes: cmp.note,
+  });
+  if (cmp.outcome === "MISMATCH") {
+    acc.discrepancies.push({ field: "birth_date", sourceValue: cmp.leftDisplay, targetValue: cmp.rightDisplay, severity: "CRITICAL", category: "MISMATCH", description: `Birth date mismatch: ${la} ${cmp.leftDisplay} vs ${lb} ${cmp.rightDisplay}.` });
+  } else if (cmp.outcome === "UNVERIFIABLE") {
+    const bothPresent = !!cmp.leftDisplay && !!cmp.rightDisplay;
+    acc.discrepancies.push({ field: "birth_date", sourceValue: cmp.leftDisplay || null, targetValue: cmp.rightDisplay || null, severity: bothPresent ? "WARNING" : "INFO", category: "NEEDS_VERIFICATION", description: `${cmp.note} (${la} vs ${lb})` });
+  }
+}
+
+function sf10NormGradeLevel(v?: string | null): string {
+  const t = String(v || "").toUpperCase();
+  if (/\b(?:12|XII)\b/.test(t)) return "12";
+  if (/\b(?:11|XI)\b/.test(t)) return "11";
+  return "";
+}
+
+function sf10NormSchoolYear(v?: string | null): string {
+  const m = String(v || "").match(/(20\d{2})\s*[-–/]\s*(20\d{2})/);
+  return m ? `${m[1]}-${m[2]}` : "";
+}
+
+function sf10NormSemester(v?: string | null): "1st Semester" | "2nd Semester" | "" {
+  const t = String(v || "").toLowerCase();
+  if (/\b(?:1st|first|sem\s*1|semester\s*1)\b/.test(t)) return "1st Semester";
+  if (/\b(?:2nd|second|sem\s*2|semester\s*2)\b/.test(t)) return "2nd Semester";
+  return "";
+}
+
+function sf10NormText(v?: string | null): string {
+  return String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function sf10CompareContextField(
+  acc: IdentityAccumulator,
+  field: string,
+  label: string,
+  va: string | null | undefined,
+  vb: string | null | undefined,
+  normalize: (v?: string | null) => string,
+  la: string,
+  lb: string,
+  tolerantContains = false
+) {
+  const na = normalize(va);
+  const nb = normalize(vb);
+  if (!na || !nb) {
+    acc.rows.push({ field, doc1Value: va || null, doc2Value: vb || null, isMatch: false, notes: `${label} missing on one document` });
+    acc.discrepancies.push({ field, sourceValue: va || null, targetValue: vb || null, severity: "INFO", category: "NEEDS_VERIFICATION", description: `${label} not available on ${!na ? la : lb}; comparison skipped.` });
+    return;
+  }
+  const isMatch = na === nb || (tolerantContains && (na.includes(nb) || nb.includes(na)));
+  acc.rows.push({ field, doc1Value: va, doc2Value: vb, isMatch, notes: isMatch ? `${label} verified` : `${label} difference` });
+  if (!isMatch) {
+    acc.discrepancies.push({ field, sourceValue: va, targetValue: vb, severity: "WARNING", category: "NEEDS_VERIFICATION", description: `${label} difference: ${la} "${va}" vs ${lb} "${vb}".` });
+  }
+}
+
+function sf10StatusOf(rows: ComparisonRow[], discrepancies: DiscrepancyItem[]): CrossDocumentValidationStatus {
+  if (rows.length === 0) return "NOT_APPLICABLE";
+  if (discrepancies.some((d) => d.severity === "CRITICAL")) return "MISMATCH";
+  if (discrepancies.some((d) => d.severity === "WARNING")) return "NEEDS_VERIFICATION";
+  return "MATCH";
+}
+
+/** SF10 <-> SF1: LRN, Full Name, Sex, normalized Birth Date. */
+export function compareSf10AndSf1(sf10: Sf10IdentityDocLike, sf1: Sf10IdentityDocLike): PairwiseValidationResult {
+  const acc: IdentityAccumulator = { rows: [], discrepancies: [] };
+  const la = "SF10";
+  const lb = "SF1";
+  sf10CompareLrn(acc, sf10, sf1, la, lb);
+  sf10CompareFullName(acc, sf10, sf1, la, lb);
+  sf10CompareSex(acc, sf10, sf1, la, lb);
+  sf10CompareBirthDate(acc, sf10, sf1, la, lb);
+  const status = sf10StatusOf(acc.rows, acc.discrepancies);
+  const gl = sf10NormGradeLevel(sf1.grade_level || sf10.grade_level);
+  return {
+    validationType: "SF1_SF10",
+    status,
+    needsHumanReview: status !== "MATCH",
+    schoolYear: sf1.school_year || sf10.school_year || "Unknown",
+    gradeLevel: gl === "12" ? "Grade 12" : gl === "11" ? "Grade 11" : undefined,
+    sourceDoc1Id: sf10.document_id,
+    sourceDoc2Id: sf1.document_id,
+    comparisonResults: acc.rows,
+    discrepancies: acc.discrepancies,
+    summaryMessage:
+      status === "MATCH"
+        ? "SF10 learner's information (LRN, full name, sex, birth date) matches the SF1 school register."
+        : `SF10 vs SF1 identity review: ${acc.discrepancies.filter((d) => d.severity !== "INFO").map((d) => d.description).join("; ") || "incomplete data"}`,
+  };
+}
+
+/** SF10 <-> PSA: civil identity ONLY (Full Name, Sex, month-normalized Birth Date). No LRN on PSA. */
+export function compareSf10AndPsa(sf10: Sf10IdentityDocLike, psa: Sf10IdentityDocLike): PairwiseValidationResult {
+  const acc: IdentityAccumulator = { rows: [], discrepancies: [] };
+  const la = "SF10";
+  const lb = "PSA";
+  sf10CompareFullName(acc, sf10, psa, la, lb);
+  sf10CompareSex(acc, sf10, psa, la, lb);
+  sf10CompareBirthDate(acc, sf10, psa, la, lb);
+  const status = sf10StatusOf(acc.rows, acc.discrepancies);
+  return {
+    validationType: "PSA_SF10",
+    status,
+    needsHumanReview: status !== "MATCH",
+    schoolYear: sf10.school_year || "Unknown",
+    sourceDoc1Id: sf10.document_id,
+    sourceDoc2Id: psa.document_id,
+    comparisonResults: acc.rows,
+    discrepancies: acc.discrepancies,
+    summaryMessage:
+      status === "MATCH"
+        ? "SF10 civil identity (full name, sex, birth date) matches the PSA birth certificate."
+        : `SF10 vs PSA civil identity review: ${acc.discrepancies.filter((d) => d.severity !== "INFO").map((d) => d.description).join("; ") || "incomplete data"}`,
+  };
+}
+
+export interface Sf10SemesterBlockLike {
+  school_id?: string;
+  school_year?: string;
+  grade_level?: string;
+  semester?: string;
+  section?: string;
+  track_strand?: string;
+  general_average?: number | null;
+  subjects?: Array<Record<string, any>>;
+}
+
+function sf10NumOrNull(v: any): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v));
+  return isNaN(n) ? null : n;
+}
+
+/** Resolve SF10 semester blocks from scholastic_records, completed_semesters, or flat grades. */
+export function resolveSf10SemesterBlocks(sf10: Sf10IdentityDocLike): Sf10SemesterBlockLike[] {
+  const fromRecords: any[] = Array.isArray(sf10.scholastic_records) && sf10.scholastic_records.length > 0
+    ? sf10.scholastic_records
+    : Array.isArray(sf10.completed_semesters) ? sf10.completed_semesters : [];
+  if (fromRecords.length > 0) {
+    return fromRecords.map((r) => ({
+      school_id: r.school_id,
+      school_year: r.school_year || r.schoolYear || sf10.school_year || undefined,
+      grade_level: r.grade_level || r.gradeLevel || sf10.grade_level || undefined,
+      semester: r.semester,
+      section: r.section || sf10.section || undefined,
+      track_strand: r.track_strand || sf10.track_strand || sf10.strand || undefined,
+      general_average: sf10NumOrNull(r.general_average),
+      subjects: (r.subjects || []).map((s: any) => ({
+        subject: s.subject,
+        q1: s.q1,
+        q2: s.q2,
+        q3: s.q3,
+        q4: s.q4,
+        final: s.sem_final_grade ?? s.final_grade ?? s.final,
+      })),
+    }));
+  }
+  const groups = new Map<string, Sf10SemesterBlockLike>();
+  for (const g of Array.isArray(sf10.grades) ? sf10.grades : []) {
+    const sem = sf10NormSemester(g.semester || sf10.semester) || "1st Semester";
+    const gl = g.grade_level || sf10.grade_level || undefined;
+    const sy = g.school_year || sf10.school_year || undefined;
+    const key = `${gl}|${sy}|${sem}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        school_year: sy,
+        grade_level: gl,
+        semester: sem,
+        section: sf10.section || undefined,
+        track_strand: sf10.track_strand || sf10.strand || undefined,
+        general_average:
+          sem === "2nd Semester"
+            ? sf10NumOrNull(sf10.sem2_printed_general_average ?? sf10.sem2_general_average)
+            : sf10NumOrNull(sf10.sem1_printed_general_average ?? sf10.sem1_general_average ?? sf10.general_average),
+        subjects: [],
+      });
+    }
+    groups.get(key)!.subjects!.push(g);
+  }
+  return Array.from(groups.values());
+}
+
+/**
+ * SF10 <-> SF9: identity (LRN, Full Name, Sex) + scholastic context (Grade Level,
+ * Section, School Year, Track/Strand) + per-semester Subject Grades & General Averages.
+ */
+export function compareSf10AndSf9(sf10: Sf10IdentityDocLike, sf9: Sf10IdentityDocLike): PairwiseValidationResult {
+  const acc: IdentityAccumulator = { rows: [], discrepancies: [] };
+  const la = "SF10";
+  const lb = "SF9";
+  sf10CompareLrn(acc, sf10, sf9, la, lb);
+  sf10CompareFullName(acc, sf10, sf9, la, lb);
+  sf10CompareSex(acc, sf10, sf9, la, lb);
+
+  const blocks = resolveSf10SemesterBlocks(sf10);
+  const sf9Gl = sf10NormGradeLevel(sf9.grade_level);
+  const sf9Sy = sf10NormSchoolYear(sf9.school_year);
+  const contextBlocks = blocks.filter(
+    (b) => (!sf9Gl || sf10NormGradeLevel(b.grade_level) === sf9Gl) && (!sf9Sy || sf10NormSchoolYear(b.school_year) === sf9Sy)
+  );
+  const ctx: Sf10SemesterBlockLike =
+    contextBlocks[0] ||
+    blocks.find((b) => sf9Gl && sf10NormGradeLevel(b.grade_level) === sf9Gl) ||
+    blocks[0] || {
+      school_year: sf10.school_year || undefined,
+      grade_level: sf10.grade_level || undefined,
+      section: sf10.section || undefined,
+      track_strand: sf10.track_strand || sf10.strand || undefined,
+    };
+
+  sf10CompareContextField(acc, "grade_level", "Grade level", ctx.grade_level, sf9.grade_level, sf10NormGradeLevel, la, lb);
+  sf10CompareContextField(acc, "school_year", "School year", ctx.school_year, sf9.school_year, sf10NormSchoolYear, la, lb);
+  sf10CompareContextField(acc, "section", "Section", ctx.section, sf9.section, sf10NormText, la, lb);
+  sf10CompareContextField(acc, "track_strand", "Track/Strand", ctx.track_strand, sf9.track_strand || sf9.strand, sf10NormText, la, lb, true);
+
+  // Per-semester subject grades & general averages
+  const sf9Grades: any[] = Array.isArray(sf9.grades) ? sf9.grades : [];
+  const sf9DefaultSem = sf10NormSemester(sf9.semester) || "1st Semester";
+  const sf9Ctx = { schoolYear: sf9.school_year || ctx.school_year, gradeLevel: sf9.grade_level || ctx.grade_level };
+  const semesters: Array<"1st Semester" | "2nd Semester"> = ["1st Semester", "2nd Semester"];
+  const semesterSummaries: string[] = [];
+
+  for (const sem of semesters) {
+    const sf9SemGrades = sf9Grades.filter((g) => (sf10NormSemester(g.semester) || sf9DefaultSem) === sem);
+    const sf9Ga = sf10NumOrNull(
+      sem === "1st Semester"
+        ? sf9.sem1_general_average ?? sf9.sem1_displayed_general_average ?? (sf9DefaultSem === sem && !sf9.sem2_general_average ? sf9.general_average : null)
+        : sf9.sem2_general_average ?? sf9.sem2_displayed_general_average ?? (sf9DefaultSem === sem ? sf9.general_average : null)
+    );
+    const block = (contextBlocks.length > 0 ? contextBlocks : blocks).find((b) => sf10NormSemester(b.semester) === sem);
+    if (sf9SemGrades.length === 0 && sf9Ga === null) continue;
+    if (!block) {
+      acc.rows.push({ field: `semester_${sem}`, doc1Value: "MISSING", doc2Value: `${sf9SemGrades.length} subjects`, isMatch: false, notes: `No SF10 ${sem} block for this school year / grade level.` });
+      acc.discrepancies.push({ field: `semester_${sem}`, sourceValue: null, targetValue: sf9SemGrades.length, severity: "WARNING", category: "NEEDS_VERIFICATION", description: `SF9 has ${sem} grades but no matching SF10 ${sem} scholastic record was found.` });
+      continue;
+    }
+
+    const schoolYear = sf9Ctx.schoolYear || block.school_year;
+    const gradeLevel = sf9Ctx.gradeLevel || block.grade_level;
+    const toItem = (g: any): AcademicGradeItem => ({
+      subject: String(g.subject || ""),
+      semester: sem,
+      gradeLevel,
+      schoolYear,
+      quarter1: sf10NumOrNull(sem === "2nd Semester" ? g.q3 ?? g.q1 : g.q1),
+      quarter2: sf10NumOrNull(sem === "2nd Semester" ? g.q4 ?? g.q2 : g.q2),
+      finalGrade: sf10NumOrNull(g.final ?? g.finalGrade ?? g.final_grade ?? g.recomputed_final_grade),
+    });
+
+    const semRes = compareSf9AndSf10(
+      { document_id: sf9.document_id, school_year: schoolYear, grade_level: gradeLevel, semester: sem, grades: sf9SemGrades.map(toItem), general_average: null },
+      { document_id: sf10.document_id, school_year: schoolYear, grade_level: gradeLevel, semester: sem, grades: (block.subjects || []).map(toItem), general_average: null }
+    );
+    acc.rows.push(...semRes.comparisonResults);
+    acc.discrepancies.push(...semRes.discrepancies);
+
+    // Per-semester General Average (printed SF10 "General Ave." vs SF9 semester average)
+    const sf10Ga = sf10NumOrNull(block.general_average);
+    if (sf9Ga !== null && sf10Ga !== null) {
+      const isGaMatch = Math.round(sf9Ga) === Math.round(sf10Ga);
+      acc.rows.push({ field: `general_average_${sem}`, doc1Value: sf10Ga, doc2Value: sf9Ga, isMatch: isGaMatch, notes: isGaMatch ? `${sem} general average verified` : `${sem} general average mismatch` });
+      if (!isGaMatch) {
+        acc.discrepancies.push({ field: `general_average_${sem}`, sourceValue: sf10Ga, targetValue: sf9Ga, severity: "CRITICAL", category: "MISMATCH", description: `${sem} General Average discrepancy: SF10 has ${sf10Ga}, SF9 has ${sf9Ga}.` });
+      }
+    }
+    semesterSummaries.push(`${sem}: ${semRes.status}`);
+  }
+
+  const status = sf10StatusOf(acc.rows, acc.discrepancies);
+  return {
+    validationType: "SF9_SF10",
+    status,
+    needsHumanReview: status !== "MATCH",
+    schoolYear: sf9.school_year || ctx.school_year || "Unknown",
+    gradeLevel: sf9Gl === "12" ? "Grade 12" : sf9Gl === "11" ? "Grade 11" : undefined,
+    semester: "Full Year",
+    sourceDoc1Id: sf9.document_id,
+    sourceDoc2Id: sf10.document_id,
+    comparisonResults: acc.rows,
+    discrepancies: acc.discrepancies,
+    summaryMessage:
+      status === "MATCH"
+        ? `SF10 permanent record matches SF9 report card (identity, scholastic context${semesterSummaries.length ? ", " + semesterSummaries.join(", ") : ""}).`
+        : `SF10 vs SF9 review: ${acc.discrepancies.filter((d) => d.severity !== "INFO").map((d) => d.description).join("; ") || "incomplete data"}`,
   };
 }

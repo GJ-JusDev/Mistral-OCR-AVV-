@@ -5,6 +5,9 @@ import {
   getAuthoritativeSemesterFinalGrade,
   recalculateSubjectGradeStatus,
   normalizeGradeRecords,
+  computeSemesterGeneralAverage,
+  formatDisplayedGrade,
+  getConfidencePercentage,
 } from "../src/lib/validation/gradeUtils.ts";
 import { compareDocuments } from "../src/lib/validation/documentComparator.ts";
 
@@ -227,6 +230,70 @@ test("Grade Norm 6: No cross-semester grade contamination", () => {
 
   assert.equal(norm2.sem2_final_grade, 95);
   assert.equal(norm2.sem1_final_grade, undefined, "2nd semester must NEVER contaminate 1st semester field");
+});
+
+test("Grade Norm 7: 2nd Semester table with Q3 & Q4 populated and blank Semester Final Grade auto-computes whole-number (no decimal) Final Grades and General Average with valid 0–100% confidence scores", () => {
+  const sem2Records = [
+    {
+      subject: "Physical Science",
+      semester: "2nd Semester",
+      q3: 85,
+      q4: 88,
+      sem2_final_grade: undefined,
+      final: undefined,
+      status: "Missing",
+      confidence: 0.94,
+    },
+    {
+      subject: "Statistics and Probability",
+      semester: "2nd Semester",
+      q3: 89,
+      q4: 92,
+      sem2_final_grade: undefined,
+      final: undefined,
+      status: "Missing",
+      confidence: 0.96,
+    },
+  ];
+
+  const normalized = normalizeGradeRecords(sem2Records, "2nd Semester");
+  assert.equal(normalized.length, 2);
+
+  const [s1, s2] = normalized;
+
+  // Subject 1: (85+88)/2 = 86.5 -> 87
+  assert.equal(s1.is_auto_computed, true);
+  assert.equal(s1.displayed_final_grade, 87);
+  assert.equal(Number.isInteger(s1.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
+  assert.equal(formatDisplayedGrade(s1.displayed_final_grade), "87");
+  assert.ok(!formatDisplayedGrade(s1.displayed_final_grade).includes("."));
+  assert.equal(s1.status, "Passed");
+  assert.ok(typeof s1.confidence === "number" && s1.confidence >= 0 && s1.confidence <= 100);
+  const conf1 = getConfidencePercentage(s1.confidence);
+  assert.ok(conf1 >= 0 && conf1 <= 100);
+
+  // Subject 2: (89+92)/2 = 90.5 -> 91
+  assert.equal(s2.is_auto_computed, true);
+  assert.equal(s2.displayed_final_grade, 91);
+  assert.equal(Number.isInteger(s2.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
+  assert.equal(formatDisplayedGrade(s2.displayed_final_grade), "91");
+  assert.ok(!formatDisplayedGrade(s2.displayed_final_grade).includes("."));
+  assert.equal(s2.status, "Passed");
+  assert.ok(typeof s2.confidence === "number" && s2.confidence >= 0 && s2.confidence <= 100);
+  const conf2 = getConfidencePercentage(s2.confidence);
+  assert.ok(conf2 >= 0 && conf2 <= 100);
+
+  // General Average calculation:
+  // Raw: (86.5 + 90.5) / 2 = 88.5 -> Math.round(88.5) = 89
+  const avgResult = computeSemesterGeneralAverage(normalized, "2nd Semester");
+  assert.equal(avgResult.completeness, "COMPLETE");
+  assert.equal(avgResult.displayedAverage, 89);
+  assert.equal(Number.isInteger(avgResult.displayedAverage), true, "Strictly NO decimals in displayedAverage");
+  assert.equal(formatDisplayedGrade(avgResult.displayedAverage), "89");
+  assert.ok(!formatDisplayedGrade(avgResult.displayedAverage).includes("."));
+  assert.ok(typeof avgResult.confidence === "number" && avgResult.confidence >= 0 && avgResult.confidence <= 100);
+  const avgConf = getConfidencePercentage(avgResult.confidence);
+  assert.ok(avgConf >= 0 && avgConf <= 100);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -38,10 +38,17 @@ import {
   Camera,
   Loader2,
   Edit3,
+  Heart,
+  BookOpen,
+  Calendar,
 } from "lucide-react";
 import DocumentCameraCaptureModal from "@/components/camera/DocumentCameraCaptureModal";
 import { preprocessPsaImage } from "@/lib/ocr/psaPreprocessing";
 import type { PsaFieldStatusItem } from "@/lib/ocr/psaParser";
+import { formatDepEdMonthDisplay } from "@/lib/validation/monthNormalizer";
+import { mergeSf9FrontAndBack } from "@/lib/validation/sf9Merger";
+import { computeSemesterGeneralAverage, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
+import type { ExtractedFields, GradeRecord } from "@/types/documents";
 
 export type UnifiedProcessingStage =
   | "idle"
@@ -517,14 +524,8 @@ export default function UnifiedUploadPage() {
                 documentSide: it.documentSide,
                 pairId: it.pairId,
                 extractionStatus: it.extractionStatus,
-                extractedText: it.extractedText,
                 extractedFields: it.extractedFields,
-                rawLayout: it.rawLayout,
                 extractionError: it.extractionError,
-                dataUrl: it.dataUrl,
-                originalDataUrl: it.originalDataUrl,
-                upperSectionDataUrl: it.upperSectionDataUrl,
-                processedDataUrl: it.processedDataUrl,
                 previewMode: it.previewMode,
                 rotation: it.rotation,
               })),
@@ -532,11 +533,104 @@ export default function UnifiedUploadPage() {
           );
           sessionStorage.setItem(`avv_staged_ocr_${currentBatchId}`, JSON.stringify(serializable));
         } catch (e) {
-          console.warn("[upload] Unable to cache extraction to sessionStorage:", e);
+          console.warn("[upload] Unable to cache extraction to sessionStorage, attempting eviction:", e);
+          try {
+            const keysToRemove: string[] = [];
+            for (let i = 0; i < sessionStorage.length; i++) {
+              const k = sessionStorage.key(i);
+              if (k && k.startsWith("avv_staged_ocr_") && k !== `avv_staged_ocr_${currentBatchId}`) {
+                keysToRemove.push(k);
+              }
+            }
+            keysToRemove.forEach((k) => sessionStorage.removeItem(k));
+
+            const strippedSerializable = Object.fromEntries(
+              Object.entries(nextStepFiles).map(([cat, items]) => [
+                cat,
+                (items as WizardDocumentItem[]).map((it) => ({
+                  id: it.id,
+                  name: it.name,
+                  documentType: it.documentType,
+                  stepCategory: it.stepCategory,
+                  documentSide: it.documentSide,
+                  extractionStatus: it.extractionStatus,
+                  extractedFields: it.extractedFields,
+                })),
+              ])
+            );
+            sessionStorage.setItem(`avv_staged_ocr_${currentBatchId}`, JSON.stringify(strippedSerializable));
+          } catch (retryErr) {
+            console.warn("[upload] Final sessionStorage failure after eviction:", retryErr);
+          }
         }
       }
 
       return nextStepFiles;
+    });
+  };
+
+  /**
+   * Client-side downscaling and compression: ensures images with max dimension > 2400px
+   * or estimated size > 2.5 MB are converted to JPEG (< 3.0 MB) before sending to /api/ocr.
+   */
+  const compressClientImageForOcr = async (
+    dataUrl: string,
+    options: { maxDimension?: number; maxSizeBytes?: number; quality?: number } = {}
+  ): Promise<string> => {
+    if (typeof window === "undefined" || !dataUrl || !dataUrl.startsWith("data:image/")) {
+      return dataUrl;
+    }
+    const maxDim = options.maxDimension ?? 2400;
+    const maxBytes = options.maxSizeBytes ?? 2.5 * 1024 * 1024;
+    const quality = options.quality ?? 0.85;
+    const estimatedBytes = Math.floor((dataUrl.length * 3) / 4);
+
+    return new Promise<string>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+        const exceedsDim = width > maxDim || height > maxDim;
+        const exceedsSize = estimatedBytes > maxBytes;
+
+        if (!exceedsDim && !exceedsSize) {
+          resolve(dataUrl);
+          return;
+        }
+
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        let q = quality;
+        let result = canvas.toDataURL("image/jpeg", q);
+        while (result.length * 0.75 > 3.0 * 1024 * 1024 && q > 0.5) {
+          q -= 0.1;
+          result = canvas.toDataURL("image/jpeg", q);
+        }
+        resolve(result);
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
     });
   };
 
@@ -552,12 +646,24 @@ export default function UnifiedUploadPage() {
     let attempt = 0;
     let lastError: Error | null = null;
 
-    const imageToSend =
+    let imageToSend =
       category === "birth_cert" && item.upperSectionDataUrl
         ? item.upperSectionDataUrl
         : category === "birth_cert" && item.processedDataUrl
         ? item.processedDataUrl
         : item.dataUrl;
+
+    if (imageToSend && imageToSend.startsWith("data:image/")) {
+      try {
+        imageToSend = await compressClientImageForOcr(imageToSend, {
+          maxDimension: 2400,
+          maxSizeBytes: 2.5 * 1024 * 1024,
+          quality: 0.85,
+        });
+      } catch (cErr) {
+        console.warn("[upload] Client-side image compression fallback:", cErr);
+      }
+    }
 
     while (attempt <= maxRetries) {
       try {
@@ -1170,6 +1276,7 @@ export default function UnifiedUploadPage() {
                 documentType: currentFile.documentType || "sf9",
                 documentSide: currentFile.documentSide,
                 pairId: currentFile.pairId,
+                extractedFields: currentFile.extractedFields,
               }))
             : [
                 {
@@ -1184,6 +1291,7 @@ export default function UnifiedUploadPage() {
                   documentType: currentFile.documentType || "sf9",
                   documentSide: currentFile.documentSide,
                   pairId: currentFile.pairId,
+                  extractedFields: currentFile.extractedFields,
                 },
               ];
 
@@ -1885,6 +1993,190 @@ export default function UnifiedUploadPage() {
                                 </div>
                               )}
 
+                              {/* Step 1 SF1 Extracted Learners Table / No Student Found Alert */}
+                              {item.stepCategory === "sf1" && item.extractionStatus === "extracted" && item.extractedFields && (() => {
+                                const fields = item.extractedFields;
+                                const learners = Array.isArray(fields.learners) ? fields.learners : [];
+                                const isNoStudentFound = Boolean(learners.length === 0);
+
+                                if (isNoStudentFound) {
+                                  return (
+                                    <div
+                                      data-testid="sf1-empty-alert"
+                                      className="pt-3 border-t border-slate-200 dark:border-slate-800"
+                                    >
+                                      <div className="flex items-center gap-2 p-3 rounded-lg border border-amber-300 dark:border-amber-800/80 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 text-xs">
+                                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                                        <div>
+                                          <span className="font-bold">No student found: </span>
+                                          <span>The uploaded SF1 roster contains empty LRN and Learner Name columns.</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                          Extracted Roster ({learners.length} {learners.length === 1 ? "Learner" : "Learners"})
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                                      <table className="w-full text-xs text-left border-collapse" data-testid="sf1-extracted-learners-table">
+                                        <thead>
+                                          <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                                            <th className="py-2 px-3">LRN</th>
+                                            <th className="py-2 px-3">Full Name</th>
+                                            <th className="py-2 px-3">Sex</th>
+                                            <th className="py-2 px-3">Birth Date</th>
+                                            <th className="py-2 px-3 text-right">Confidence</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium text-slate-700 dark:text-slate-300">
+                                          {learners.map((learner: any, idx: number) => (
+                                            <tr key={learner.lrn || idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                              <td className="py-2 px-3 font-mono font-bold text-slate-900 dark:text-slate-100">
+                                                {learner.lrn || "—"}
+                                              </td>
+                                              <td className="py-2 px-3 font-semibold text-slate-900 dark:text-slate-100">
+                                                {learner.full_name || `${learner.last_name || ""}, ${learner.first_name || ""} ${learner.middle_name || ""}`.trim() || "—"}
+                                              </td>
+                                              <td className="py-2 px-3">{learner.sex || "—"}</td>
+                                              <td className="py-2 px-3">{learner.birth_date || "—"}</td>
+                                              <td className="py-2 px-3 text-right">
+                                                {typeof learner.confidence === "number"
+                                                  ? `${Math.round(learner.confidence <= 1 ? learner.confidence * 100 : learner.confidence)}%`
+                                                  : "95%"}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Step 2 SF2 Extracted Monthly Attendance Preview */}
+                              {item.stepCategory === "sf2" && item.extractionStatus === "extracted" && item.extractedFields && (() => {
+                                const fields = item.extractedFields;
+                                const attendanceRecords = Array.isArray(fields.attendance_records)
+                                  ? fields.attendance_records
+                                  : Array.isArray(fields.attendance)
+                                  ? fields.attendance
+                                  : Array.isArray(fields.learners)
+                                  ? fields.learners
+                                  : [];
+                                const rawMonth = fields.attendance_month || fields.month || fields.header?.month || "Not specified";
+                                const displayMonth = formatDepEdMonthDisplay(rawMonth);
+
+                                if (attendanceRecords.length === 0) {
+                                  return (
+                                    <div
+                                      data-testid="sf2-empty-alert"
+                                      className="pt-3 border-t border-slate-200 dark:border-slate-800"
+                                    >
+                                      <div className="flex items-center gap-2 p-3 rounded-lg border border-amber-300 dark:border-amber-800/80 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 text-xs">
+                                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                                        <div>
+                                          <span className="font-bold">No attendance records found: </span>
+                                          <span>The uploaded SF2 sheet did not yield any learner attendance rows.</span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                          Report for the Month of: <span className="text-slate-800 dark:text-slate-200 font-bold">{displayMonth}</span>
+                                        </span>
+                                        <span className="text-[10px] text-slate-400">
+                                          ({attendanceRecords.length} {attendanceRecords.length === 1 ? "Learner" : "Learners"})
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                                      <table className="w-full text-xs text-left border-collapse" data-testid="sf2-attendance-preview-table">
+                                        <thead>
+                                          <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                                            <th className="py-2 px-3">Learner Name</th>
+                                            <th className="py-2 px-3">Month</th>
+                                            <th className="py-2 px-3 text-center">School Days</th>
+                                            <th className="py-2 px-3 text-center">Present</th>
+                                            <th className="py-2 px-3 text-center">Absent</th>
+                                            <th className="py-2 px-3 text-center">Tardy</th>
+                                            <th className="py-2 px-3 text-right">Confidence</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium text-slate-700 dark:text-slate-300">
+                                          {attendanceRecords.map((rec: any, idx: number) => {
+                                            const recName = rec.student_name || rec.name || "—";
+                                            const recDays = typeof rec.total_days === "number" ? rec.total_days : typeof rec.school_days === "number" ? rec.school_days : "—";
+                                            const recPresent = typeof rec.days_present === "number" ? rec.days_present : "—";
+                                            const recAbsent = typeof rec.days_absent === "number" ? rec.days_absent : "—";
+                                            const recTardy = typeof rec.days_tardy === "number" ? rec.days_tardy : "—";
+                                            const recConf = typeof rec.confidence === "number"
+                                              ? `${Math.round(rec.confidence <= 1 ? rec.confidence * 100 : rec.confidence)}%`
+                                              : "95%";
+                                            return (
+                                              <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                                <td className="py-2 px-3 font-semibold text-slate-900 dark:text-slate-100">
+                                                  {recName}
+                                                </td>
+                                                <td className="py-2 px-3 font-medium text-slate-600 dark:text-slate-400">
+                                                  {displayMonth}
+                                                </td>
+                                                <td className="py-2 px-3 text-center font-mono">{recDays}</td>
+                                                <td className="py-2 px-3 text-center font-mono text-emerald-600 dark:text-emerald-400 font-bold">{recPresent}</td>
+                                                <td className="py-2 px-3 text-center font-mono text-amber-600 dark:text-amber-400 font-bold">{recAbsent}</td>
+                                                <td className="py-2 px-3 text-center font-mono">{recTardy}</td>
+                                                <td className="py-2 px-3 text-right">{recConf}</td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Step 3 SF9 Per-File Side Status Indicator */}
+                              {item.stepCategory === "sf9" && item.extractionStatus === "extracted" && item.extractedFields && (() => {
+                                const fields = item.extractedFields;
+                                const isBack = item.documentSide === "back";
+                                const subjectsCount = Array.isArray(fields.grades) ? fields.grades.length : 0;
+                                const attendanceRows = Array.isArray(fields.attendance) ? fields.attendance.length : 0;
+
+                                return (
+                                  <div className="pt-2 border-t border-slate-200 dark:border-slate-800 text-xs flex flex-wrap items-center justify-between gap-2" data-testid="sf9-side-status">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                        isBack ? "bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300" : "bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300"
+                                      }`}>
+                                        {isBack ? "Back Side (Grades & Behavior)" : "Front Side (Identity & Attendance)"}
+                                      </span>
+                                      <span className="text-slate-600 dark:text-slate-400 font-medium">
+                                        {isBack
+                                          ? `${subjectsCount} subjects extracted${fields.observed_values ? " • Observed Values detected" : ""}`
+                                          : `LRN: ${fields.lrn || "Detected"} • ${attendanceRows} attendance rows detected`}
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-slate-400 italic">
+                                      Unified into SF9 Preview below
+                                    </span>
+                                  </div>
+                                );
+                              })()}
+
                               {/* Extracted Civil Identity Summary & Inline Manual Correction for Step 5 (PSA) */}
                               {item.stepCategory === "birth_cert" && item.extractionStatus === "extracted" && item.extractedFields && (() => {
                                 const fields = item.extractedFields;
@@ -2126,6 +2418,446 @@ export default function UnifiedUploadPage() {
                             </div>
                           ))}
                         </div>
+
+                        {/* Step 3 SF9-SHS Extracted Data Preview Card (Attendance, Grades & Behavior) */}
+                        {currentStep.id === "sf9" && (() => {
+                          const sf9Files = (stepFiles.sf9 || []).filter(
+                            (f) => f.extractionStatus === "extracted" && f.extractedFields
+                          );
+                          if (sf9Files.length === 0) return null;
+
+                          const frontFile = sf9Files.find((f) => f.documentSide === "front");
+                          const backFile = sf9Files.find((f) => f.documentSide === "back");
+
+                          let merged: ExtractedFields;
+                          let isUnifiedTwoSides = false;
+
+                          if (frontFile && backFile && frontFile.id !== backFile.id) {
+                            const res = mergeSf9FrontAndBack(
+                              { fields: frontFile.extractedFields, rawText: frontFile.extractedText, pageNumber: 1 },
+                              { fields: backFile.extractedFields, rawText: backFile.extractedText, pageNumber: 2 }
+                            );
+                            merged = res.unifiedFields;
+                            isUnifiedTwoSides = true;
+                          } else {
+                            const primary = frontFile || backFile || sf9Files[0];
+                            const secondary = sf9Files.find((f) => f.id !== primary?.id);
+                            if (primary && secondary) {
+                              const res = mergeSf9FrontAndBack(
+                                { fields: primary.extractedFields, rawText: primary.extractedText, pageNumber: 1 },
+                                { fields: secondary.extractedFields, rawText: secondary.extractedText, pageNumber: 2 }
+                              );
+                              merged = res.unifiedFields;
+                              isUnifiedTwoSides = true;
+                            } else {
+                              merged = updateExtractedFieldsAverages({ ...(primary?.extractedFields || {}) });
+                            }
+                          }
+
+                          // 1. Learner Identity Summary
+                          const lrn = merged.lrn || "—";
+                          const fullName = merged.name || [merged.last_name, merged.first_name, merged.middle_name].filter(Boolean).join(", ") || "—";
+                          const sex = merged.sex === "M" ? "Male" : merged.sex === "F" ? "Female" : merged.sex || "—";
+                          const gradeLevel = merged.grade_level || "Grade 11";
+                          const section = merged.section || "—";
+                          const schoolYear = merged.school_year || "—";
+                          const trackStrand = merged.track_strand || merged.shs_track || "—";
+
+                          // 2. Report on Attendance (from Front)
+                          const defaultMonths = ["Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
+                          const months = (merged.attendance_months && merged.attendance_months.length > 0)
+                            ? merged.attendance_months
+                            : defaultMonths;
+
+                          const rawAttendance = Array.isArray(merged.attendance) ? merged.attendance : [];
+                          const schoolDaysRow = rawAttendance.find((r) => /school\s*days|days\s*of\s*school/i.test(r.label || ""));
+                          const daysPresentRow = rawAttendance.find((r) => /days\s*present|present/i.test(r.label || "") && !/absent/i.test(r.label || ""));
+                          const daysAbsentRow = rawAttendance.find((r) => /days\s*absent|absent/i.test(r.label || ""));
+
+                          const attTotals = merged.attendance_totals;
+                          const schoolDaysTotal = schoolDaysRow?.total ?? attTotals?.computed_school_days ?? attTotals?.printed_school_days ?? "—";
+                          const daysPresentTotal = daysPresentRow?.total ?? attTotals?.computed_days_present ?? attTotals?.printed_days_present ?? "—";
+                          const daysAbsentTotal = daysAbsentRow?.total ?? attTotals?.computed_days_absent ?? attTotals?.printed_days_absent ?? "—";
+
+                          // 3. Per-Semester Academic Grades (from Back)
+                          const allGrades = Array.isArray(merged.grades) ? merged.grades : [];
+                          const sem1Grades = allGrades.filter((g) => {
+                            const s = (g.semester || "").toLowerCase();
+                            return s.includes("1") || s.includes("first") || ((g.q1 !== undefined || g.q2 !== undefined) && g.q3 === undefined && g.q4 === undefined);
+                          });
+                          const sem2Grades = allGrades.filter((g) => {
+                            const s = (g.semester || "").toLowerCase();
+                            return s.includes("2") || s.includes("second") || ((g.q3 !== undefined || g.q4 !== undefined) && g.q1 === undefined && g.q2 === undefined);
+                          });
+                          const unassigned = allGrades.filter((g) => !sem1Grades.includes(g) && !sem2Grades.includes(g));
+                          const effectiveSem1 = sem1Grades.length > 0 ? sem1Grades : (sem2Grades.length === 0 ? unassigned : []);
+                          const effectiveSem2 = sem2Grades;
+
+                          const formatQuarterGrade = (val: any) => {
+                            if (val === undefined || val === null || val === "" || val === "—") return "—";
+                            const n = Number(val);
+                            if (!isNaN(n)) return Math.round(n).toString();
+                            return String(val);
+                          };
+
+                          const sem1Avg = merged.sem1_displayed_general_average ?? merged.sem1_general_average ?? computeSemesterGeneralAverage(effectiveSem1, "1st Semester").displayedAverage ?? "—";
+                          const sem2Avg = merged.sem2_displayed_general_average ?? merged.sem2_general_average ?? computeSemesterGeneralAverage(effectiveSem2, "2nd Semester").displayedAverage ?? "—";
+
+                          // 4. Observed Values / Learner Behavior (from Back)
+                          const obs = merged.observed_values;
+                          const coreValues = Array.isArray(obs?.core_values) && obs.core_values.length > 0
+                            ? obs.core_values
+                            : Array.isArray(obs?.statements) && obs.statements.length > 0
+                            ? [
+                                { name: "Maka-Diyos", statements: obs.statements.filter((s: any) => s.core_value === "Maka-Diyos" || s.core_value_index === 1) },
+                                { name: "Makatao", statements: obs.statements.filter((s: any) => s.core_value === "Makatao" || s.core_value_index === 2) },
+                                { name: "Makakalikasan", statements: obs.statements.filter((s: any) => s.core_value === "Makakalikasan" || s.core_value_index === 3) },
+                                { name: "Makabansa", statements: obs.statements.filter((s: any) => s.core_value === "Makabansa" || s.core_value_index === 4) },
+                              ].filter((g) => g.statements.length > 0)
+                            : [];
+
+                          const renderAttendanceRow = (label: string, row: any, fallbackTotal: any) => {
+                            const vals: any[] = row?.values || [];
+                            const tot = row?.total ?? fallbackTotal;
+                            return (
+                              <tr className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                                <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                                  {label}
+                                </td>
+                                {months.map((m, mIdx) => {
+                                  const val = vals[mIdx];
+                                  const displayVal = val !== undefined && val !== null && String(val).trim() !== "" ? String(val) : "—";
+                                  return (
+                                    <td key={mIdx} className="py-2 px-2 text-center font-mono text-slate-700 dark:text-slate-300">
+                                      {displayVal}
+                                    </td>
+                                  );
+                                })}
+                                <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-50 dark:bg-slate-800/50">
+                                  {tot !== undefined && tot !== null && String(tot).trim() !== "" ? String(tot) : "—"}
+                                </td>
+                              </tr>
+                            );
+                          };
+
+                          return (
+                            <div
+                              data-testid="sf9-extracted-preview-card"
+                              className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-900/60 shadow-sm space-y-5 mt-4"
+                            >
+                              {/* Header */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                                <div className="flex items-center gap-2">
+                                  <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-[#174EA6] dark:text-blue-300">
+                                    <FileText className="w-5 h-5" />
+                                  </div>
+                                  <div>
+                                    <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                                      SF9-SHS Extracted Data Preview
+                                    </h4>
+                                    <p className="text-xs text-slate-500">
+                                      DepEd Form 138 • Senior High School Progress Report Card
+                                    </p>
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1 ${
+                                    isUnifiedTwoSides
+                                      ? "bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-300 dark:border-purple-800"
+                                      : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                                  }`}>
+                                    <Check className="w-3.5 h-3.5" />
+                                    {isUnifiedTwoSides ? "Unified Front + Back Sides" : "Real-Time Extracted"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* 1. Learner Identity Summary */}
+                              <div className="space-y-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                    Learner Identity Summary
+                                  </span>
+                                </div>
+                                <div
+                                  data-testid="sf9-identity-summary"
+                                  className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 bg-slate-50/70 dark:bg-slate-800/40 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 text-xs"
+                                >
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">LRN</span>
+                                    <span className="font-mono font-bold text-slate-900 dark:text-slate-100 text-sm">{lrn}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Full Name</span>
+                                    <span className="font-semibold text-slate-900 dark:text-slate-100">{fullName}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Sex</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-medium">{sex}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Grade Level & Section</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-medium">{gradeLevel} — {section}</span>
+                                  </div>
+                                  <div>
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">School Year</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-medium">{schoolYear}</span>
+                                  </div>
+                                  <div className="col-span-2 sm:col-span-1 lg:col-span-1">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Track / Strand</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-medium">{trackStrand}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 2. Report on Attendance (from Front) */}
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                                    <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                                    Report on Attendance (from Front)
+                                  </span>
+                                  {merged.attendance_risk_status && (
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                      merged.attendance_risk_status === "NORMAL"
+                                        ? "bg-emerald-100 text-emerald-800"
+                                        : "bg-amber-100 text-amber-800"
+                                    }`}>
+                                      {merged.attendance_risk_status}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                                  <table className="w-full text-xs text-left border-collapse" data-testid="sf9-attendance-preview-table">
+                                    <thead>
+                                      <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                                        <th className="py-2.5 px-3 min-w-[140px]">Month</th>
+                                        {months.map((m, mIdx) => (
+                                          <th key={mIdx} className="py-2.5 px-2 text-center min-w-[36px]">
+                                            {m}
+                                          </th>
+                                        ))}
+                                        <th className="py-2.5 px-3 text-center min-w-[50px] bg-slate-100/70 dark:bg-slate-800 font-bold text-slate-800 dark:text-slate-200">
+                                          Total
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium text-slate-700 dark:text-slate-300">
+                                      {renderAttendanceRow("No. of School Days", schoolDaysRow, schoolDaysTotal)}
+                                      {renderAttendanceRow("No. of Days Present", daysPresentRow, daysPresentTotal)}
+                                      {renderAttendanceRow("No. of Days Absent", daysAbsentRow, daysAbsentTotal)}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+
+                              {/* 3. Per-Semester Academic Grades (from Back) */}
+                              <div className="space-y-3" data-testid="sf9-grades-preview">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                                    <BookOpen className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                                    Per-Semester Academic Grades (from Back)
+                                  </span>
+                                  {merged.general_average !== undefined && (
+                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                                      Annual General Average: <strong className="text-emerald-600 dark:text-emerald-400 font-mono text-sm">{merged.general_average}</strong>
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                  {/* First Semester */}
+                                  <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                      <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                                        First Semester
+                                      </span>
+                                      <span className="text-[11px] text-slate-500">
+                                        General Average: <strong className="font-mono font-bold text-slate-900 dark:text-slate-100">{sem1Avg}</strong>
+                                      </span>
+                                    </div>
+                                    {effectiveSem1.length > 0 ? (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-xs text-left border-collapse" data-testid="sf9-sem1-grades-table">
+                                          <thead>
+                                            <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                              <th className="py-1.5 px-2">Subject</th>
+                                              <th className="py-1.5 px-1.5 text-center">Q1</th>
+                                              <th className="py-1.5 px-1.5 text-center">Q2</th>
+                                              <th className="py-1.5 px-2 text-center font-bold">Final</th>
+                                              <th className="py-1.5 px-2">Remarks</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                                            {effectiveSem1.map((g, gIdx) => {
+                                              const fVal = g.sem1_final_grade ?? g.final;
+                                              const numF = Number(fVal);
+                                              const rem = g.remark || (!isNaN(numF) && numF >= 75 ? "Passed" : !isNaN(numF) && numF > 0 ? "Failed" : "—");
+                                              return (
+                                                <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                                  <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{g.subject}</td>
+                                                  <td className="py-1.5 px-1.5 text-center font-mono">{formatQuarterGrade(g.q1)}</td>
+                                                  <td className="py-1.5 px-1.5 text-center font-mono">{formatQuarterGrade(g.q2)}</td>
+                                                  <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">{fVal ?? "—"}</td>
+                                                  <td className="py-1.5 px-2">
+                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                                      rem.toLowerCase() === "passed" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400" : rem.toLowerCase() === "failed" ? "bg-rose-50 text-rose-700" : "text-slate-400"
+                                                    }`}>
+                                                      {rem}
+                                                    </span>
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <div className="py-6 text-center text-xs text-slate-400 italic">
+                                        No First Semester subjects extracted on this side.
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* Second Semester */}
+                                  <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                                      <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                                        Second Semester
+                                      </span>
+                                      <span className="text-[11px] text-slate-500">
+                                        General Average: <strong className="font-mono font-bold text-slate-900 dark:text-slate-100">{sem2Avg}</strong>
+                                      </span>
+                                    </div>
+                                    {effectiveSem2.length > 0 ? (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-xs text-left border-collapse" data-testid="sf9-sem2-grades-table">
+                                          <thead>
+                                            <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                              <th className="py-1.5 px-2">Subject</th>
+                                              <th className="py-1.5 px-1.5 text-center">Q3</th>
+                                              <th className="py-1.5 px-1.5 text-center">Q4</th>
+                                              <th className="py-1.5 px-2 text-center font-bold">Final</th>
+                                              <th className="py-1.5 px-2">Remarks</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                                            {effectiveSem2.map((g, gIdx) => {
+                                              const fVal = g.sem2_final_grade ?? g.final;
+                                              const numF = Number(fVal);
+                                              const rem = g.remark || (!isNaN(numF) && numF >= 75 ? "Passed" : !isNaN(numF) && numF > 0 ? "Failed" : "—");
+                                              return (
+                                                <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                                  <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{g.subject}</td>
+                                                  <td className="py-1.5 px-1.5 text-center font-mono">{formatQuarterGrade(g.q3)}</td>
+                                                  <td className="py-1.5 px-1.5 text-center font-mono">{formatQuarterGrade(g.q4)}</td>
+                                                  <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">{fVal ?? "—"}</td>
+                                                  <td className="py-1.5 px-2">
+                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                                      rem.toLowerCase() === "passed" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400" : rem.toLowerCase() === "failed" ? "bg-rose-50 text-rose-700" : "text-slate-400"
+                                                    }`}>
+                                                      {rem}
+                                                    </span>
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <div className="py-6 text-center text-xs text-slate-400 italic">
+                                        No Second Semester subjects extracted on this side.
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* 4. Observed Values / Learner Behavior (from Back) */}
+                              <div className="space-y-2" data-testid="sf9-observed-values-preview">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                                    <Heart className="w-3.5 h-3.5 text-rose-500" />
+                                    Report on Learners&apos; Observed Values (Core Values &amp; Behavior)
+                                  </span>
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                                    <span><strong className="text-emerald-700 dark:text-emerald-400">AO</strong>: Always</span>
+                                    <span><strong className="text-blue-700 dark:text-blue-400">SO</strong>: Sometimes</span>
+                                    <span><strong className="text-amber-700 dark:text-amber-400">RO</strong>: Rarely</span>
+                                    <span><strong className="text-rose-700 dark:text-rose-400">NO</strong>: Not Observed</span>
+                                  </div>
+                                </div>
+
+                                {coreValues.length > 0 ? (
+                                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                                    <table className="w-full text-xs text-left border-collapse" data-testid="sf9-observed-values-table">
+                                      <thead>
+                                        <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                                          <th className="py-2 px-3 min-w-[120px]">Core Value</th>
+                                          <th className="py-2 px-3 min-w-[220px]">Behavior Statement</th>
+                                          <th className="py-2 px-2 text-center min-w-[40px]">Q1</th>
+                                          <th className="py-2 px-2 text-center min-w-[40px]">Q2</th>
+                                          <th className="py-2 px-2 text-center min-w-[40px]">Q3</th>
+                                          <th className="py-2 px-2 text-center min-w-[40px]">Q4</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                                        {coreValues.map((group: any, grpIdx: number) =>
+                                          (group.statements || []).map((stmt: any, sIdx: number) => {
+                                            const renderRatingBadge = (qRec: any) => {
+                                              const rating = qRec?.normalized_rating ?? qRec?.original_mark ?? qRec;
+                                              if (!rating || rating === "—") return <span className="text-slate-400 font-mono">—</span>;
+                                              const strRating = String(rating).toUpperCase().trim();
+                                              const cls =
+                                                strRating === "AO"
+                                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                                  : strRating === "SO"
+                                                  ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400"
+                                                  : strRating === "RO"
+                                                  ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400"
+                                                  : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400";
+                                              return (
+                                                <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${cls}`}>
+                                                  {strRating}
+                                                </span>
+                                              );
+                                            };
+
+                                            return (
+                                              <tr key={`${grpIdx}-${sIdx}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                                {sIdx === 0 && (
+                                                  <td
+                                                    rowSpan={group.statements.length}
+                                                    className="py-2 px-3 font-bold text-slate-900 dark:text-slate-100 bg-slate-50/40 dark:bg-slate-900/40 align-top border-r border-slate-100 dark:border-slate-800"
+                                                  >
+                                                    {group.name}
+                                                  </td>
+                                                )}
+                                                <td className="py-2 px-3 text-slate-700 dark:text-slate-300 font-medium">
+                                                  {stmt.statement}
+                                                </td>
+                                                <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q1)}</td>
+                                                <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q2)}</td>
+                                                <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q3)}</td>
+                                                <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q4)}</td>
+                                              </tr>
+                                            );
+                                          })
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                ) : (
+                                  <div className="py-5 text-center text-xs text-slate-400 italic rounded-xl border border-dashed border-slate-200 dark:border-slate-800">
+                                    Observed values / core behavior ratings not yet extracted. (Included on Back side of DepEd SF9-SHS).
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
 

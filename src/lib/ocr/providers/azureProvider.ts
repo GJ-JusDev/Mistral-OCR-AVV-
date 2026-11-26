@@ -1,6 +1,8 @@
 import type { IOcrProvider, OcrInput, OcrProviderResult } from "./types";
 import { OcrProviderError } from "./types";
 import { parseRetryAfterHeader } from "../mistral";
+import { compressServerImageBuffer } from "../serverImageCompressor";
+import { extractEmbeddedPdfText, getPdfPageCount } from "../pdfTextExtractor";
 
 export interface AzureProviderConfig {
   endpoint?: string;
@@ -309,14 +311,14 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
     const apiBasePath = apiVersion.startsWith("2022-") || apiVersion.startsWith("2023-07")
       ? "formrecognizer"
       : "documentintelligence";
-    const analyzeUrl = `${cleanEndpoint}/${apiBasePath}/documentModels/${effectiveModelId}:analyze?api-version=${apiVersion}`;
+    let analyzeUrl = `${cleanEndpoint}/${apiBasePath}/documentModels/${effectiveModelId}:analyze?api-version=${apiVersion}`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
       // Step 1: Submit Document for Asynchronous Analysis
-      const binaryBody = Buffer.from(base64Content, "base64");
+      let binaryBody: Buffer = Buffer.from(base64Content, "base64");
       const normalizedMime = mimeType === "image/jpg" ? "image/jpeg" : mimeType;
       const validAzureMimes = new Set([
         "application/pdf",
@@ -326,9 +328,36 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
         "image/bmp",
         "image/heif",
       ]);
-      const effectiveContentType = validAzureMimes.has(normalizedMime)
+      let effectiveContentType = validAzureMimes.has(normalizedMime)
         ? normalizedMime
         : "application/octet-stream";
+
+      // Auto-compress / downscale images > 2400px or > 2.5 MB to JPEG (< 3.0 MB)
+      if (effectiveContentType !== "application/pdf") {
+        try {
+          const compRes = await compressServerImageBuffer(binaryBody, effectiveContentType, {
+            maxDimension: 2400,
+            maxSizeBytes: 2.5 * 1024 * 1024,
+            quality: 85,
+          });
+          if (compRes.wasCompressed) {
+            binaryBody = Buffer.from(compRes.buffer);
+            effectiveContentType = compRes.mimeType;
+          }
+        } catch (compErr) {
+          console.warn("[azureProvider] Image pre-compression error:", compErr);
+        }
+      }
+
+      // Handle multi-page PDFs: extract embedded text and constrain F0 requests to pages=1-2 if > 2 pages
+      let embeddedPdfText = "";
+      if (effectiveContentType === "application/pdf") {
+        embeddedPdfText = extractEmbeddedPdfText(binaryBody);
+        const pageCount = getPdfPageCount(binaryBody);
+        if (pageCount > 2 && !analyzeUrl.includes("pages=")) {
+          analyzeUrl += (analyzeUrl.includes("?") ? "&" : "?") + "pages=1-2";
+        }
+      }
 
       // Application-level dimension validation for image payloads
       const dimensions = getImageDimensionsFromBuffer(binaryBody, normalizedMime);
@@ -361,15 +390,116 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
         }
       }
 
-      const submitRes = await fetch(analyzeUrl, {
+      const pollOpLocation = async (opLoc: string): Promise<OcrProviderResult> => {
+        const startTime = Date.now();
+        while (Date.now() - startTime < this.timeoutMs) {
+          await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
+
+          const pollRes = await fetch(opLoc, {
+            method: "GET",
+            headers: {
+              "Ocp-Apim-Subscription-Key": apiKey,
+            },
+            signal: controller.signal,
+          });
+
+          if (pollRes.status === 429) {
+            const retryAfter = parseRetryAfterHeader(pollRes.headers.get("Retry-After"));
+            throw new OcrProviderError(
+              "Azure Document Intelligence rate limit exceeded during operation polling.",
+              {
+                provider: "azure",
+                status: 429,
+                code: "RATE_LIMIT_EXCEEDED",
+                retryAfter,
+              }
+            );
+          }
+
+          if (!pollRes.ok) {
+            const status = pollRes.status;
+            throw new OcrProviderError(
+              `Azure Document Intelligence polling failed with HTTP status ${status}.`,
+              {
+                provider: "azure",
+                status: status >= 500 ? status : 502,
+                code: "UPSTREAM_ERROR",
+              }
+            );
+          }
+
+          const pollData = await pollRes.json().catch(() => ({}));
+          const opStatus = pollData.status;
+
+          if (opStatus === "succeeded") {
+            clearTimeout(timeoutId);
+            const res = this.processAnalyzeResult(pollData.analyzeResult, effectiveModelId);
+            if (embeddedPdfText && embeddedPdfText.trim().length > 0) {
+              if (!res.text.includes(embeddedPdfText.trim().slice(0, 30))) {
+                res.text = res.text ? `${res.text}\n\n${embeddedPdfText}` : embeddedPdfText;
+              }
+            }
+            return res;
+          }
+
+          if (opStatus === "failed") {
+            clearTimeout(timeoutId);
+            const extracted = extractAzureErrorInfo(
+              pollData,
+              "Azure Document Intelligence operation reported failure.",
+              "UPSTREAM_ERROR"
+            );
+            throw new OcrProviderError(extracted.message, {
+              provider: "azure",
+              status: 502,
+              code: "UPSTREAM_ERROR",
+              diagnosticCode: extracted.diagnosticCode,
+              innerCode: extracted.innerCode,
+              azureErrorCode: extracted.azureErrorCode,
+            });
+          }
+        }
+
+        clearTimeout(timeoutId);
+        throw new OcrProviderError(
+          `Azure Document Intelligence operation timed out after ${this.timeoutMs}ms.`,
+          {
+            provider: "azure",
+            status: 504,
+            code: "TIMEOUT",
+          }
+        );
+      };
+
+      let submitRes = await fetch(analyzeUrl, {
         method: "POST",
         headers: {
           "Ocp-Apim-Subscription-Key": apiKey,
           "Content-Type": effectiveContentType,
         },
-        body: binaryBody,
+        body: binaryBody as unknown as BodyInit,
         signal: controller.signal,
       });
+
+      if (submitRes.status === 400 && effectiveContentType === "application/pdf" && !analyzeUrl.includes("pages=")) {
+        const fallbackUrl = analyzeUrl + (analyzeUrl.includes("?") ? "&" : "?") + "pages=1-2";
+        try {
+          const retryRes = await fetch(fallbackUrl, {
+            method: "POST",
+            headers: {
+              "Ocp-Apim-Subscription-Key": apiKey,
+              "Content-Type": effectiveContentType,
+            },
+            body: binaryBody as unknown as BodyInit,
+            signal: controller.signal,
+          });
+          if (retryRes.ok || retryRes.status === 202) {
+            submitRes = retryRes;
+          }
+        } catch {
+          // keep original submitRes
+        }
+      }
 
       if (submitRes.status === 401 || submitRes.status === 403) {
         throw new OcrProviderError(
@@ -439,71 +569,8 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
         );
       }
 
-      // Step 3: Poll the Asynchronous Operation until terminal state or timeout
-      const startTime = Date.now();
-      while (Date.now() - startTime < this.timeoutMs) {
-        await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
-
-        const pollRes = await fetch(operationLocation, {
-          method: "GET",
-          headers: {
-            "Ocp-Apim-Subscription-Key": apiKey,
-          },
-          signal: controller.signal,
-        });
-
-        if (pollRes.status === 429) {
-          const retryAfter = parseRetryAfterHeader(pollRes.headers.get("Retry-After"));
-          throw new OcrProviderError(
-            "Azure Document Intelligence rate limit exceeded during operation polling.",
-            {
-              provider: "azure",
-              status: 429,
-              code: "RATE_LIMIT_EXCEEDED",
-              retryAfter,
-            }
-          );
-        }
-
-        if (!pollRes.ok) {
-          const status = pollRes.status;
-          throw new OcrProviderError(
-            `Azure Document Intelligence polling failed with HTTP status ${status}.`,
-            {
-              provider: "azure",
-              status: status >= 500 ? status : 502,
-              code: "UPSTREAM_ERROR",
-            }
-          );
-        }
-
-        const pollData = await pollRes.json().catch(() => ({}));
-        const opStatus = pollData.status;
-
-        if (opStatus === "succeeded") {
-          clearTimeout(timeoutId);
-          return this.processAnalyzeResult(pollData.analyzeResult, effectiveModelId);
-        }
-
-        if (opStatus === "failed") {
-          clearTimeout(timeoutId);
-          const extracted = extractAzureErrorInfo(
-            pollData,
-            "Azure Document Intelligence operation reported failure.",
-            "UPSTREAM_ERROR"
-          );
-          throw new OcrProviderError(extracted.message, {
-            provider: "azure",
-            status: 502,
-            code: "UPSTREAM_ERROR",
-            diagnosticCode: extracted.diagnosticCode,
-            innerCode: extracted.innerCode,
-            azureErrorCode: extracted.azureErrorCode,
-          });
-        }
-
-        // Status is 'notStarted' or 'running': continue polling
-      }
+      // Step 3: Poll the Asynchronous Operation
+      return await pollOpLocation(operationLocation);
 
       // Polling exceeded server-side timeout window
       clearTimeout(timeoutId);

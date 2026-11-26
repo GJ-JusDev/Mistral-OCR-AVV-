@@ -183,6 +183,8 @@ export type CrossDocumentValidationType =
   | 'SF9_SF10'
   | 'SF5_SF9'
   | 'SF5_SF10'
+  | 'SF1_SF10'
+  | 'PSA_SF10'
   | 'CONSOLIDATED_SHS'
 
 export type CrossDocumentValidationStatus =

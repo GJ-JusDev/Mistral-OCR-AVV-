@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { handleOcrRoute } from "@/lib/ocr/mistral";
+import { preprocessOcrRequest } from "@/lib/ocr/serverImageCompressor";
 import { parseGradesText } from "@/lib/ocr/gradesParser";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
 import { createClient } from "@/lib/supabase/server";
@@ -107,7 +108,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const res = await handleOcrRoute(request, apiKey, parseGradesText);
+  const processedRequest = await preprocessOcrRequest(request);
+  const res = await handleOcrRoute(processedRequest, apiKey, parseGradesText);
   const durationMs = Date.now() - startTime;
 
   try {

@@ -21,6 +21,9 @@ import { parseOcrText } from "../ocr/parser";
 export type ShsDocumentType =
   | "sf1"
   | "sf2"
+  | "sf5"
+  | "sf5a"
+  | "sf5b"
   | "sf9"
   | "sf10"
   | "birth_cert"
@@ -174,6 +177,9 @@ const PSA_KEYWORDS = [
 export const DOCUMENT_TITLES: Record<ShsDocumentType, string> = {
   sf1: "SF1-SHS — School Register",
   sf2: "SF2-SHS — Daily Attendance Report",
+  sf5: "SF5-SHS — Report on Promotion and Learning Progress & Achievement",
+  sf5a: "SF5A-SHS — End of Semester Promotion Status",
+  sf5b: "SF5B-SHS — List of Candidates for Graduation",
   sf9: "SF9-SHS — Progress Report Card",
   sf10: "SF10-SHS — Senior High School Permanent Record",
   birth_cert: "PSA — Certificate of Live Birth",
@@ -185,9 +191,34 @@ export const DOCUMENT_TITLES: Record<ShsDocumentType, string> = {
  */
 export function classifyPageContent(
   pageText: string,
-  pageMeta?: { pageNumber?: number; lines?: any[]; words?: any[]; tables?: any[] }
+  pageMeta?: { pageNumber?: number; lines?: any[]; words?: any[]; tables?: any[]; documentType?: string; stepCategory?: string }
 ): PageClassificationResult {
   const pageNum = pageMeta?.pageNumber ?? 1;
+
+  // 0. Explicit Step Category Lock:
+  // If the page already has an explicit documentType or stepCategory from the wizard,
+  // lock it strictly to prevent keyword heuristics from misclassifying DepEd forms
+  // (e.g. preventing SF1 rosters with Birth Certificate columns from misclassifying as PSA birth_cert).
+  const explicitType = ((pageMeta as any)?.documentType || (pageMeta as any)?.stepCategory || "").trim().toLowerCase();
+  if (
+    explicitType &&
+    explicitType !== "auto" &&
+    explicitType !== "unknown" &&
+    ["sf1", "sf2", "sf9", "sf10", "birth_cert"].includes(explicitType)
+  ) {
+    const validDocType = explicitType as ShsDocumentType;
+    return {
+      pageNumber: pageNum,
+      detectedType: validDocType,
+      confidence: 1.0,
+      reasons: [`Explicit wizard step category: ${DOCUMENT_TITLES[validDocType] || validDocType}`],
+      matchedKeywords: [validDocType],
+      isContinuation: false,
+      needsTeacherReview: false,
+      title: DOCUMENT_TITLES[validDocType] || validDocType,
+    };
+  }
+
   const lower = (pageText || "").toLowerCase().trim();
   const reasons: string[] = [];
   const matchedKeywords: string[] = [];
@@ -528,6 +559,112 @@ export function segmentMultiPageDocument(params: {
   }
 
   return segments;
+}
+
+/**
+ * Canonical DepEd document order for Senior High School:
+ * SF1 (School Register) -> SF2 (Attendance) -> SF9 (Report Card) -> SF10 (Permanent Record) -> PSA (Birth Certificate)
+ */
+export const CANONICAL_DOC_ORDER: Record<string, number> = {
+  sf1: 1,
+  sf2: 2,
+  sf9: 3,
+  sf10: 4,
+  birth_cert: 5,
+  psa: 5,
+};
+
+/**
+ * Sorts document segments canonically according to official DepEd Senior High School sequence.
+ */
+export function sortSegmentsCanonically(segments: DocumentSegment[]): DocumentSegment[] {
+  return [...segments].sort((a, b) => {
+    const orderA = CANONICAL_DOC_ORDER[a.documentType?.toLowerCase()] ?? 99;
+    const orderB = CANONICAL_DOC_ORDER[b.documentType?.toLowerCase()] ?? 99;
+    return orderA - orderB;
+  });
+}
+
+/**
+ * Fast-path segment construction for pre-extracted pages from the 6-step wizard.
+ * Groups pages by document type / pairId, guarantees SF9 Front and Back side pairing,
+ * attaches upright PSA preprocessed preview image URLs, and sorts canonically.
+ */
+export function buildSegmentsFromPreExtractedPages(pages: any[]): DocumentSegment[] {
+  const segments: DocumentSegment[] = [];
+  const groups: Map<string, any[]> = new Map();
+
+  for (const page of pages) {
+    const docType: ShsDocumentType = (page.documentType || "sf9") as ShsDocumentType;
+    let groupKey: string;
+    if (docType === "sf9") {
+      if (page.pairId) {
+        groupKey = `sf9-pair-${page.pairId}`;
+      } else {
+        groupKey = `sf9-unified`;
+      }
+    } else if (docType === "birth_cert" || (docType as string) === "psa") {
+      groupKey = `psa-${page.sourceFileName || page.pageNumber}`;
+    } else {
+      groupKey = `${docType}-${page.sourceFileName || `page-${page.pageNumber}`}`;
+    }
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey)!.push(page);
+  }
+
+  let segIndex = 1;
+  for (const [, grpPages] of groups.entries()) {
+    // For paired SF9, guarantee front page comes first and back page second
+    const docType: ShsDocumentType = (grpPages[0].documentType || "sf9") as ShsDocumentType;
+    if (docType === "sf9" && grpPages.length === 2) {
+      const p0Side = grpPages[0].documentSide || grpPages[0].side;
+      const p1Side = grpPages[1].documentSide || grpPages[1].side;
+      const p0HasFrontMarkers = /certificate of transfer|dear parent|learner reference no|\blrn[:\s]*\d{12}\b/i.test(grpPages[0].text || "");
+      const p1HasFrontMarkers = /certificate of transfer|dear parent|learner reference no|\blrn[:\s]*\d{12}\b/i.test(grpPages[1].text || "");
+      if (p0Side === "back" || p1Side === "front" || (!p0HasFrontMarkers && p1HasFrontMarkers)) {
+        grpPages.reverse();
+      }
+    }
+
+    const firstPage = grpPages[0];
+    const combinedText = grpPages.map((p) => p.text || p.extractedText || "").join("\n\n");
+    const pageNumbers = grpPages.map((p) => p.pageNumber);
+    const startPage = Math.min(...pageNumbers);
+    const endPage = Math.max(...pageNumbers);
+    const sourceFileName = firstPage.sourceFileName || "Document.pdf";
+
+    const effectiveImageUrl =
+      docType === "birth_cert" || (docType as string) === "psa"
+        ? (firstPage.upperSectionDataUrl || firstPage.processedDataUrl || firstPage.sourceFileDataUrl || firstPage.imageUrl)
+        : (firstPage.sourceFileDataUrl || firstPage.imageUrl);
+
+    segments.push({
+      id: `seg-${segIndex}-${docType}`,
+      documentType: docType,
+      formTitle: DOCUMENT_TITLES[docType] || docType.toUpperCase(),
+      startPage,
+      endPage,
+      pageNumbers,
+      pageCount: grpPages.length,
+      combinedText,
+      confidence: 1.0,
+      needsClassification: false,
+      reasons: ["Fast-path: Pre-extracted in Step 1-5 upload wizard"],
+      pages: grpPages,
+      sourceFileName,
+      imageUrl: effectiveImageUrl,
+    });
+    segIndex++;
+  }
+
+  const sorted = sortSegmentsCanonically(segments);
+  sorted.forEach((seg, idx) => {
+    seg.id = `seg-${idx + 1}-${seg.documentType}`;
+  });
+  return sorted;
 }
 
 /**

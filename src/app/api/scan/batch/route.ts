@@ -4,6 +4,9 @@ import { createClient } from "@/lib/supabase/server";
 import {
   segmentMultiPageDocument,
   DOCUMENT_TITLES,
+  CANONICAL_DOC_ORDER,
+  sortSegmentsCanonically,
+  buildSegmentsFromPreExtractedPages,
   type DocumentSegment,
   type ShsDocumentType,
 } from "@/lib/validation/batchDocumentSegmenter";
@@ -91,6 +94,13 @@ function parseBase64DataUrl(dataUrl: string): { buffer: Buffer; mimeType: string
   }
   return null;
 }
+
+// Re-export canonical order and pre-extracted fast-path helpers from batchDocumentSegmenter
+export {
+  CANONICAL_DOC_ORDER,
+  sortSegmentsCanonically,
+  buildSegmentsFromPreExtractedPages,
+};
 
 // -----------------------------------------------------------------------------
 // GET: Retrieve Previously Saved Batch Validation Results for Assigned Section
@@ -344,13 +354,15 @@ export async function GET(request: NextRequest) {
     const activeBatchId =
       requestedBatchId || (docs[0]?.extracted_fields as any)?.batch_id || `batch-${verifiedSection}`;
 
+    const sortedSegments = sortSegmentsCanonically(segments);
+
     // Evaluate cross-document validation for the restored records
     const report = evaluateBatchCrossDocumentValidation({
       batchId: activeBatchId,
       schoolYear: verifiedSchoolYear,
       gradeLevel: verifiedGradeLevel,
       section: verifiedSection,
-      segments,
+      segments: sortedSegments,
       extractedSegmentData: extractedData,
     });
 
@@ -358,7 +370,7 @@ export async function GET(request: NextRequest) {
       hasSavedBatch: true,
       batchId: activeBatchId,
       report,
-      segments,
+      segments: sortedSegments,
       extractedData,
     });
   } catch (err: any) {
@@ -515,10 +527,28 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      segments = segmentMultiPageDocument({
-        pages,
-        fallbackDocType: "sf9",
-      });
+      // Pre-Extracted Fast-Path: Detect when incoming batch pages already include
+      // extractedText or extractedFields from Steps 1–5.
+      // Skip redundant classification and heuristic segmentation.
+      const isPreExtracted =
+        pages.length > 0 &&
+        pages.every(
+          (p: any) =>
+            Boolean(
+              (p.extractedFields && typeof p.extractedFields === "object" && Object.keys(p.extractedFields).length > 0) ||
+              (p.extractedText && typeof p.extractedText === "string" && p.extractedText.trim().length > 0) ||
+              (p.text && typeof p.text === "string" && p.text.trim().length > 0 && p.documentType)
+            )
+        );
+
+      if (isPreExtracted) {
+        segments = buildSegmentsFromPreExtractedPages(pages);
+      } else {
+        segments = segmentMultiPageDocument({
+          pages,
+          fallbackDocType: "sf9",
+        });
+      }
     }
 
     // If only classification was requested, return segments for teacher confirmation
@@ -678,8 +708,12 @@ export async function POST(request: NextRequest) {
           const frontRawLayout = { pages: [frontPage], pageCount: 1, tables: frontPage.tables || [] };
           const backRawLayout = { pages: [backPage], pageCount: 1, tables: backPage.tables || [] };
 
-          const frontFields = parseGradesText(frontPage.text, verifiedGradeLevel, frontRawLayout, "sf9");
-          const backFields = parseGradesText(backPage.text, verifiedGradeLevel, backRawLayout, "sf9");
+          const frontFields = (frontPage as any).extractedFields && Object.keys((frontPage as any).extractedFields).length > 0
+            ? (frontPage as any).extractedFields
+            : parseGradesText(frontPage.text, verifiedGradeLevel, frontRawLayout, "sf9");
+          const backFields = (backPage as any).extractedFields && Object.keys((backPage as any).extractedFields).length > 0
+            ? (backPage as any).extractedFields
+            : parseGradesText(backPage.text, verifiedGradeLevel, backRawLayout, "sf9");
 
           const mergedResult = mergeSf9FrontAndBack(
             { fields: frontFields, rawText: frontPage.text, pageNumber: frontPage.pageNumber, confidence: seg.confidence },
@@ -707,17 +741,22 @@ export async function POST(request: NextRequest) {
             }
           }
         } else {
-          const segRawLayout = {
-            pages: seg.pages,
-            pageCount: seg.pageCount,
-          };
+          const firstPagePreExtracted = (seg.pages?.[0] as any)?.extractedFields;
+          if (firstPagePreExtracted && Object.keys(firstPagePreExtracted).length > 0) {
+            parsed = { ...firstPagePreExtracted };
+          } else {
+            const segRawLayout = {
+              pages: seg.pages,
+              pageCount: seg.pageCount,
+            };
 
-          parsed = parseGradesText(
-            seg.combinedText,
-            verifiedGradeLevel,
-            segRawLayout,
-            seg.documentType
-          );
+            parsed = parseGradesText(
+              seg.combinedText,
+              verifiedGradeLevel,
+              segRawLayout,
+              seg.documentType
+            );
+          }
 
           if (seg.documentType === "sf9" && Array.isArray(seg.pages) && seg.pages.length === 1) {
             const hasGrades = Array.isArray(parsed.grades) && parsed.grades.length > 0;
@@ -727,6 +766,38 @@ export async function POST(request: NextRequest) {
             } else if (!hasLrn && hasGrades) {
               parsed.is_back_only = true;
             }
+          }
+
+          if (seg.documentType === "sf1") {
+            const aggregatedLearners: any[] = [];
+            const seenLrns = new Set<string>();
+
+            if (Array.isArray(parsed.learners)) {
+              for (const l of parsed.learners) {
+                const key = l.lrn || `${l.last_name || ""}-${l.first_name || ""}`;
+                if (key && !seenLrns.has(key)) {
+                  seenLrns.add(key);
+                  aggregatedLearners.push(l);
+                }
+              }
+            }
+
+            for (const p of (seg.pages || [])) {
+              const pLearners = (p as any)?.extractedFields?.learners;
+              if (Array.isArray(pLearners)) {
+                for (const l of pLearners) {
+                  const key = l.lrn || `${l.last_name || ""}-${l.first_name || ""}`;
+                  if (key && !seenLrns.has(key)) {
+                    seenLrns.add(key);
+                    aggregatedLearners.push(l);
+                  }
+                }
+              }
+            }
+
+            parsed.learners = aggregatedLearners;
+            parsed.no_student_found = aggregatedLearners.length === 0;
+            parsed.error = aggregatedLearners.length === 0 ? "No student found" : undefined;
           }
         }
 
@@ -1083,11 +1154,51 @@ export async function POST(request: NextRequest) {
           continue;
         } else {
           // Brand-new document insertion
+          const targetLrn = parsed?.lrn ? String(parsed.lrn).replace(/[^0-9]/g, "") : null;
+
+          // Proactively archive prior active SF9 record for the same learner in this school_year & grade_level
+          // to prevent PostgreSQL unique constraint violation 23505 (idx_documents_canonical_sf9_active)
+          if (docTypeForDb === "sf9" && targetLrn && targetLrn.length === 12) {
+            try {
+              const { data: priorActiveDocs } = await supabase
+                .from("documents")
+                .select("id, status")
+                .eq("school_id", assignment.school_id)
+                .eq("document_type", "sf9")
+                .eq("school_year", verifiedSchoolYear)
+                .eq("grade_level", verifiedGradeLevel)
+                .or(`canonical_lrn.eq.${targetLrn},extracted_fields->>lrn.eq.${targetLrn}`)
+                .not("status", "in", "('archived','rejected')");
+
+              if (priorActiveDocs && priorActiveDocs.length > 0) {
+                console.log(`[scan/batch] Archiving ${priorActiveDocs.length} prior active SF9 document(s) for LRN ${targetLrn} before inserting re-scan`);
+                for (const prior of priorActiveDocs) {
+                  const { error: rpcErr } = await (supabase as any).rpc("archive_review_document", {
+                    p_document_id: prior.id,
+                    p_confirmation_phrase: "ARCHIVE",
+                  });
+                  if (rpcErr) {
+                    await (supabase as any)
+                      .from("documents")
+                      .update({
+                        status: "archived",
+                        archived_at: new Date().toISOString(),
+                      })
+                      .eq("id", prior.id);
+                  }
+                }
+              }
+            } catch (archiveErr) {
+              console.warn(`[scan/batch] Proactive SF9 archive check warning:`, archiveErr);
+            }
+          }
+
           const parentDocPayload: Record<string, any> = {
             id: docId,
             school_id: assignment.school_id,
             teacher_assignment_id: assignment.id,
             student_id: null,
+            canonical_lrn: targetLrn && targetLrn.length === 12 ? targetLrn : null,
             document_type: docTypeForDb,
             image_url: realSignedUrl,
             storage_path: realStoragePath,
@@ -1103,15 +1214,78 @@ export async function POST(request: NextRequest) {
             uploaded_by: user.id,
           };
 
-          const { error: insertDocErr } = await supabase
+          const privilegedDbForParent = createVerifiedServerPrivilegedClient(supabase);
+
+          let { error: insertDocErr } = await privilegedDbForParent
             .from("documents")
             .insert(parentDocPayload);
+
+          // Reactive fallback for code 23505 (idx_documents_canonical_sf9_active duplicate)
+          if (
+            insertDocErr &&
+            ((insertDocErr as any).code === "23505" || insertDocErr.message?.includes("idx_documents_canonical_sf9")) &&
+            docTypeForDb === "sf9"
+          ) {
+            console.warn(`[scan/batch] 23505 conflict on idx_documents_canonical_sf9. Attempting reactive archive and retry...`);
+            try {
+              let query = privilegedDbForParent
+                .from("documents")
+                .select("id")
+                .eq("school_id", assignment.school_id)
+                .eq("document_type", "sf9")
+                .eq("school_year", verifiedSchoolYear)
+                .eq("grade_level", verifiedGradeLevel)
+                .not("status", "in", "('archived','rejected')");
+
+              if (targetLrn && targetLrn.length === 12) {
+                query = query.or(`canonical_lrn.eq.${targetLrn},extracted_fields->>lrn.eq.${targetLrn}`);
+              }
+              const { data: conflictDocs } = await query;
+              if (conflictDocs && conflictDocs.length > 0) {
+                for (const cDoc of conflictDocs) {
+                  const { error: rpcErr } = await (privilegedDbForParent as any).rpc("archive_review_document", {
+                    p_document_id: cDoc.id,
+                    p_confirmation_phrase: "ARCHIVE",
+                  });
+                  if (rpcErr) {
+                    await (privilegedDbForParent as any)
+                      .from("documents")
+                      .update({
+                        status: "archived",
+                        archived_at: new Date().toISOString(),
+                      })
+                      .eq("id", cDoc.id);
+                  }
+                }
+              }
+
+              const retryRes = await privilegedDbForParent.from("documents").insert(parentDocPayload);
+              if (!retryRes.error) {
+                insertDocErr = null;
+              } else {
+                insertDocErr = retryRes.error;
+              }
+            } catch (reactErr) {
+              console.error(`[scan/batch] Reactive SF9 conflict resolution failed:`, reactErr);
+            }
+          }
 
           if (insertDocErr) {
             console.error(`[scan/batch] Parent document insert failed for segment ${seg.id}:`, insertDocErr);
             persistenceErrors.push({ segmentId: seg.id, error: insertDocErr.message });
             seg.persistenceStatus = "failed";
             seg.persistenceError = insertDocErr.message;
+            seg.documentId = docId;
+            seg.sourceFileName = sourceFileName;
+            seg.imageUrl = realSignedUrl;
+            seg.storagePath = realStoragePath || undefined;
+
+            if (Array.isArray(seg.pages)) {
+              for (const p of seg.pages) {
+                p.sourceFileDataUrl = realSignedUrl;
+                p.sourceFileName = sourceFileName;
+              }
+            }
 
             // Safe orphan cleanup: only delete if NO other document references this storage_path
             if (realStoragePath) {
@@ -1363,9 +1537,8 @@ export async function POST(request: NextRequest) {
             recommendedAction: "Review student record in database and retry batch validation.",
           };
           dossier.overallStatus = "NEEDS_REVIEW";
-          dossier.unifiedMatrix = [];
+          // Preserve computed cross-document comparison matrix and pairwise results
           dossier.persistedDiscrepancies = [];
-          dossier.pairwiseResults = [];
         }
       } else {
         dossier.validationPersistence = {
@@ -1374,9 +1547,8 @@ export async function POST(request: NextRequest) {
           recommendedAction: "Resolve learner identity manually by inspecting the original scanned document and assigning a valid 12-digit LRN.",
         };
         dossier.overallStatus = "NEEDS_REVIEW";
-        dossier.unifiedMatrix = [];
+        // Preserve computed cross-document comparison matrix and pairwise results
         dossier.persistedDiscrepancies = [];
-        dossier.pairwiseResults = [];
       }
     }
 
@@ -1420,23 +1592,20 @@ export async function POST(request: NextRequest) {
       console.warn("[scan/batch] Audit log deferred:", auditErr);
     }
 
-    if (persistenceErrors.length > 0 || crossValidationPersistenceErrors.length > 0) {
-      return NextResponse.json(
-        {
-          error: "Batch scan completed with one or more required persistence failures.",
-          persistenceErrors,
-          crossValidationPersistenceErrors,
-        },
-        { status: 500 }
-      );
-    }
+    const persistenceWarnings: string[] = [
+      ...persistenceErrors.map((e) => e.error),
+      ...crossValidationPersistenceErrors.map((e) => e.error),
+    ];
+
+    const sortedSegments = sortSegmentsCanonically(segments);
 
     return NextResponse.json({
       success: true,
       batchId: validationReport.batchId || batchId,
       report: validationReport,
-      segments,
+      segments: sortedSegments,
       extractedData: extractedSegmentData,
+      persistenceWarnings: persistenceWarnings.length > 0 ? persistenceWarnings : undefined,
     });
   } catch (err: any) {
     console.error("[api/scan/batch] Internal Server Error:", err);

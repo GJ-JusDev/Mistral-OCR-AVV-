@@ -52,6 +52,7 @@ export type GradeRecord = {
   recognition_type?: string;
   is_handwritten?: boolean;
   icr_confidence?: number;
+  confidence?: number;
   bounding_box?: number[];
 };
 
@@ -59,6 +60,9 @@ export type AttendanceRecord = {
   label: string;
   values: string[];
   total?: string | number;
+  confidence?: number;
+  source_side?: "front" | "back" | "both";
+  source_page?: number | string;
 };
 
 export type ObservedValueRating = "AO" | "SO" | "RO" | "NO";
@@ -253,14 +257,17 @@ export type ExtractedFields = {
   sem1_displayed_general_average?: number
   sem1_subject_count?: number
   sem1_completeness?: "COMPLETE" | "INCOMPLETE" | "EMPTY"
+  sem1_confidence?: number
   sem2_raw_general_average?: number
   sem2_general_average?: number
   sem2_precise_general_average?: number
   sem2_displayed_general_average?: number
   sem2_subject_count?: number
   sem2_completeness?: "COMPLETE" | "INCOMPLETE" | "EMPTY"
+  sem2_confidence?: number
   attendance?: AttendanceRecord[]
   attendance_months?: string[]
+  attendance_confidence?: number
   attendance_totals?: {
     computed_school_days?: number
     computed_days_present?: number

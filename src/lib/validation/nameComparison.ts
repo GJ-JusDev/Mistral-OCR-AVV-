@@ -18,6 +18,8 @@
  *    - Kahit magkapareho ang pangalan, kapag magkaiba ang LRN, mahigpit na ipinagbabawal ang pag-merge ng records!
  */
 
+import { toIsoBirthDate } from "./birthDateNormalizer";
+
 export interface RawNameFields {
   firstName?: string | null;
   middleName?: string | null;
@@ -26,6 +28,110 @@ export interface RawNameFields {
   fullName?: string | null;
   lrn?: string | null;
   birthDate?: string | null;
+}
+
+/**
+ * DepEd form section headers, agency titles, and placeholder markers that must NEVER
+ * be treated or stored as a student's legal name.
+ */
+export const BLACKLISTED_STUDENT_NAMES: string[] = [
+  "information",
+  "learner's information",
+  "learners information",
+  "learner information",
+  "learner's",
+  "learners",
+  "learner",
+  "student information",
+  "student's information",
+  "scholastic record",
+  "republic of the philippines",
+  "department of education",
+  "senior high school",
+  "unknown",
+  "school register",
+  "daily attendance report",
+  "progress report card",
+  "permanent record",
+  "certificate of live birth",
+  "eligibility for shs enrolment",
+  "deped",
+  "not found",
+  "unassigned",
+  "sf10",
+  "sf10-shs",
+  "sf10 shs",
+  "sf9",
+  "sf9-shs",
+  "sf9 shs",
+  "form 137",
+  "form 138",
+  "last name",
+  "first name",
+  "middle name",
+  "given name",
+  "surname",
+  "family name",
+  "student name",
+  "learners name",
+  "learner name",
+  "child name",
+];
+
+/**
+ * Validates whether an extracted string is a blacklisted DepEd document header rather than a valid student name.
+ */
+export function isBlacklistedStudentName(name: string | null | undefined): boolean {
+  if (!name || typeof name !== "string") return true;
+  const cleaned = name
+    .toLowerCase()
+    .replace(/['"`]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned || cleaned.length < 2) return true;
+
+  // Exact single-token blacklist matches
+  if (
+    cleaned === "information" ||
+    cleaned === "unknown" ||
+    cleaned === "deped" ||
+    cleaned === "unassigned" ||
+    cleaned === "not found" ||
+    cleaned === "na" ||
+    cleaned === "n a" ||
+    cleaned === "none" ||
+    cleaned === "learner" ||
+    cleaned === "learners"
+  ) {
+    return true;
+  }
+
+  // Strong header containment checks (case/punctuation-insensitive)
+  if (
+    cleaned.includes("information") ||
+    cleaned.includes("scholastic record") ||
+    cleaned.includes("republic of the philippines") ||
+    cleaned.includes("department of education") ||
+    cleaned.includes("senior high school") ||
+    cleaned.includes("student permanent record") ||
+    cleaned.includes("permanent record") ||
+    cleaned.includes("certificate of live birth") ||
+    cleaned.includes("progress report card")
+  ) {
+    return true;
+  }
+
+  return BLACKLISTED_STUDENT_NAMES.some((b) => {
+    const normB = b.toLowerCase().replace(/['"`]/g, "").replace(/\s+/g, " ").trim();
+    return (
+      cleaned === normB ||
+      cleaned.startsWith(normB + " ") ||
+      cleaned.endsWith(" " + normB) ||
+      cleaned.includes(" " + normB + " ")
+    );
+  });
 }
 
 export interface NormalizedNameFields {
@@ -104,6 +210,11 @@ export function normalizeDate(val?: string | null): string {
   if (!val || typeof val !== "string") return "";
   const trimmed = val.trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+
+  // Universal birthdate normalizer: MM/DD/YYYY (SF10), M/D/YY (SF1),
+  // "June 23, 2004" / "23 June 2004" / "JUN 23, 2004" (PSA) -> YYYY-MM-DD.
+  const universal = toIsoBirthDate(trimmed);
+  if (universal) return universal;
 
   const slashMatch = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (slashMatch) {
@@ -407,3 +518,168 @@ export function compareUnifiedStudentDocuments(docs: {
     summaryMessage,
   };
 }
+
+/**
+ * Resolves and sanitizes the student name to display in the Document Records table (/documents).
+ * - Reconstructs "Last Name, First Name Middle Name" from extracted_fields or linked students record.
+ * - Rejects blacklisted DepEd form section headers (e.g. "INFORMATION", "LEARNER'S INFORMATION").
+ * - Returns clean "Section Roster: <Section> (Grade <Level>)" for SF1-SHS, SF2-SHS, and SF5.
+ * - Labels single-word fragments (e.g., "LOQUILLANO") clearly as "Incomplete Name (LOQUILLANO — Needs Review)".
+ */
+export function resolveDocumentStudentNameDisplay(doc: any): string {
+  if (!doc) return "-";
+  const fields = (doc.extracted_fields || {}) as Record<string, any>;
+  const rawType = String(doc.document_type || "").toLowerCase().trim();
+  const isRoster = ["sf1", "sf2", "sf5", "sf5a", "sf5b"].includes(rawType);
+  const isPsa = rawType === "birth_cert" || rawType === "psa";
+
+  // 1. SF1 School Register (Multi-learner roster or empty roster)
+  if (rawType === "sf1") {
+    const learners = Array.isArray(fields.learners)
+      ? fields.learners
+      : Array.isArray(doc.learners)
+      ? doc.learners
+      : Array.isArray(doc.sf1_entries)
+      ? doc.sf1_entries
+      : [];
+
+    const isNoStudent = learners.length === 0;
+    if (isNoStudent) {
+      return "No student found";
+    }
+
+    const formatLearnerName = (l: any) => {
+      const last = l.last_name && !isBlacklistedStudentName(l.last_name) ? l.last_name : "";
+      const first = l.first_name && !isBlacklistedStudentName(l.first_name) ? l.first_name : "";
+      const mid = l.middle_name && !isBlacklistedStudentName(l.middle_name) ? l.middle_name : "";
+      if (last && first) {
+        return `${last}, ${first}${mid ? ` ${mid}` : ""}`;
+      }
+      if (l.full_name && !isBlacklistedStudentName(l.full_name)) {
+        return l.full_name;
+      }
+      if (l.name && !isBlacklistedStudentName(l.name)) {
+        return l.name;
+      }
+      return "Unnamed Student";
+    };
+
+    if (learners.length === 1) {
+      return formatLearnerName(learners[0]);
+    }
+
+    return `${formatLearnerName(learners[0])} (+${learners.length - 1} more)`;
+  }
+
+  // 1b. Multi-learner rosters (SF2-SHS, SF5)
+  if (["sf2", "sf5", "sf5a", "sf5b"].includes(rawType)) {
+    const rawSection = String(doc.section || fields.section || "").trim();
+    const section = rawSection && !isBlacklistedStudentName(rawSection) ? rawSection : "Unassigned";
+
+    const rawGrade = String(doc.grade_level || fields.grade_level || "").trim();
+    let gradeLabel = "Grade 11";
+    if (rawGrade) {
+      if (/^grade\s*\d+/i.test(rawGrade)) {
+        gradeLabel = rawGrade.replace(/^grade\s*/i, "Grade ");
+      } else if (/^\d+$/.test(rawGrade)) {
+        gradeLabel = `Grade ${rawGrade}`;
+      } else {
+        gradeLabel = rawGrade;
+      }
+    }
+    return `Section Roster: ${section} (${gradeLabel})`;
+  }
+
+  // 2. PSA Civil Registry Documents
+  if (isPsa) {
+    const idObj = fields.identity && typeof fields.identity === "object" ? fields.identity : {};
+    const psaRec = doc.psa_record;
+
+    const last = String(psaRec?.last_name || idObj.last_name || fields.last_name || "").trim();
+    const first = String(psaRec?.first_name || idObj.first_name || fields.first_name || "").trim();
+    const middle = String(psaRec?.middle_name || idObj.middle_name || fields.middle_name || "").trim();
+
+    const validLast = last && !isBlacklistedStudentName(last) ? last : "";
+    const validFirst = first && !isBlacklistedStudentName(first) ? first : "";
+    const validMiddle = middle && !isBlacklistedStudentName(middle) ? middle : "";
+
+    if (validLast && validFirst) {
+      return `${validLast}, ${validFirst}${validMiddle ? ` ${validMiddle}` : ""}`;
+    }
+    if (fields.child_name && !isBlacklistedStudentName(String(fields.child_name))) {
+      const child = String(fields.child_name).trim();
+      const words = child.split(/[\s,]+/).filter(Boolean);
+      if (child.includes(",") || words.length >= 2) {
+        return child;
+      }
+      return `Incomplete Name (${words[0]} — Needs Review)`;
+    }
+    if (validLast || validFirst) {
+      const fragment = validLast || validFirst;
+      return `Incomplete Name (${fragment} — Needs Review)`;
+    }
+    return "PSA Child Identity Record";
+  }
+
+  // 3. Single-Learner Academic Forms (SF9, SF10, etc.)
+  // Priority 1: Reconstruct from extracted_fields (last_name, first_name, middle_name)
+  const efLast = String(fields.last_name || "").trim();
+  const efFirst = String(fields.first_name || "").trim();
+  const efMiddle = String(fields.middle_name || "").trim();
+
+  const validEfLast = efLast && !isBlacklistedStudentName(efLast) ? efLast : "";
+  const validEfFirst = efFirst && !isBlacklistedStudentName(efFirst) ? efFirst : "";
+  const validEfMiddle = efMiddle && !isBlacklistedStudentName(efMiddle) ? efMiddle : "";
+
+  if (validEfLast && validEfFirst) {
+    return `${validEfLast}, ${validEfFirst}${validEfMiddle ? ` ${validEfMiddle}` : ""}`;
+  }
+
+  // Priority 2: Reconstruct from linked students record
+  if (doc.students && typeof doc.students === "object") {
+    const stLast = String(doc.students.last_name || "").trim();
+    const stFirst = String(doc.students.first_name || "").trim();
+    const stMiddle = String(doc.students.middle_name || "").trim();
+
+    const validStLast = stLast && !isBlacklistedStudentName(stLast) ? stLast : "";
+    const validStFirst = stFirst && !isBlacklistedStudentName(stFirst) ? stFirst : "";
+    const validStMiddle = stMiddle && !isBlacklistedStudentName(stMiddle) ? stMiddle : "";
+
+    if (validStLast && validStFirst) {
+      return `${validStLast}, ${validStFirst}${validStMiddle ? ` ${validStMiddle}` : ""}`;
+    }
+  }
+
+  // Priority 3: Check extracted_fields.name or doc.student_name (if not blacklisted)
+  const rawName = String(fields.name || doc.student_name || "").trim();
+  if (rawName && !isBlacklistedStudentName(rawName)) {
+    // If it has comma or multiple words, format/return clean full name
+    const hasComma = rawName.includes(",");
+    const words = rawName.split(/[\s,]+/).filter(Boolean);
+    if (hasComma || words.length >= 2) {
+      return rawName;
+    }
+    // Single word fragment from fields.name / doc.student_name
+    return `Incomplete Name (${words[0]} — Needs Review)`;
+  }
+
+  // Priority 4: If we only have a single-word fragment (e.g., LOQUILLANO without first_name)
+  const singleFragment =
+    validEfLast ||
+    validEfFirst ||
+    validEfMiddle ||
+    (doc.students && !isBlacklistedStudentName(doc.students.last_name) ? doc.students.last_name : "") ||
+    (doc.students && !isBlacklistedStudentName(doc.students.first_name) ? doc.students.first_name : "") ||
+    (doc.students && !isBlacklistedStudentName(doc.students.middle_name) ? doc.students.middle_name : "") ||
+    (!isBlacklistedStudentName(doc.student_name) ? doc.student_name : "");
+  if (singleFragment && !isBlacklistedStudentName(String(singleFragment))) {
+    const cleanFrag = String(singleFragment).trim();
+    if (cleanFrag) {
+      return `Incomplete Name (${cleanFrag} — Needs Review)`;
+    }
+  }
+
+  return "-";
+}
+
+export const resolveDisplayStudentName = resolveDocumentStudentNameDisplay;

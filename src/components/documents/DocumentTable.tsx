@@ -9,6 +9,9 @@ import { format } from "date-fns";
 import { FileText, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import DeleteReviewDocumentModal from "@/components/review/DeleteReviewDocumentModal";
+import { resolveDocumentStudentNameDisplay } from "@/lib/validation/nameComparison";
+
+export const resolveDisplayStudentName = resolveDocumentStudentNameDisplay;
 
 interface DocumentTableProps {
   documents: (Document | any)[];
@@ -72,32 +75,7 @@ export default function DocumentTable({
               const isPsa = rawType === "birth_cert" || rawType === "psa";
 
               // 1. Resolve student name cleanly across all supported document types
-              let studentName = fields?.name || null;
-              if (isPsa) {
-                const idObj = fields?.identity;
-                const psaRec = doc.psa_record;
-                const last = psaRec?.last_name || idObj?.last_name || fields?.last_name;
-                const first = psaRec?.first_name || idObj?.first_name || fields?.first_name;
-                const middle = psaRec?.middle_name || idObj?.middle_name || fields?.middle_name;
-                if (last && first) {
-                  studentName = `${last}, ${first}${middle ? ` ${middle}` : ""}`;
-                } else if (first || last) {
-                  studentName = String(first || last);
-                } else if (fields?.child_name) {
-                  studentName = String(fields.child_name);
-                } else {
-                  studentName = "PSA Child Identity Record";
-                }
-              } else if (isRoster) {
-                studentName = `Section Roster: ${doc.section || fields?.section || "Unassigned"} (${doc.grade_level || "SHS"})`;
-              } else if (!studentName) {
-                if (fields?.first_name || fields?.last_name) {
-                  studentName = `${fields.last_name || ""}, ${fields.first_name || ""}`.trim().replace(/^,\s*|,\s*$/g, "");
-                } else if (doc.students && typeof doc.students === "object") {
-                  studentName = `${doc.students.last_name || ""}, ${doc.students.first_name || ""}`.trim().replace(/^,\s*|,\s*$/g, "");
-                }
-              }
-              studentName = studentName || "-";
+              const studentName = resolveDisplayStudentName(doc);
 
               // 2. Resolve document type badge label
               let docType = (doc.document_type || "Unknown").replace(/_/g, " ").toUpperCase();
@@ -172,7 +150,7 @@ export default function DocumentTable({
             selectedDocForDeletion.original_filename ||
             (selectedDocForDeletion.document_type || "Document").toUpperCase()
           }
-          studentName={(selectedDocForDeletion.extracted_fields as any)?.name}
+          studentName={resolveDocumentStudentNameDisplay(selectedDocForDeletion)}
           documentType={selectedDocForDeletion.document_type}
           onSuccess={() => {
             onQueueRefresh?.();

@@ -26,6 +26,9 @@ import {
   compareSf1AndSf5,
   compareSf1AndSf9,
   compareSf9AndSf10,
+  compareSf10AndSf1,
+  compareSf10AndSf9,
+  compareSf10AndPsa,
   compareSf5AndSf9,
   compareSf5AndSf10,
   evaluateUnifiedStudentValidation,
@@ -248,6 +251,8 @@ export function evaluateBatchCrossDocumentValidation(params: {
     return learner;
   };
 
+  const allDiscrepancies: BatchDiscrepancyItem[] = [];
+
   // 2. Ingest extracted records from each segment
   for (const seg of segments) {
     const data = extractedSegmentData[seg.id] || {};
@@ -256,56 +261,81 @@ export function evaluateBatchCrossDocumentValidation(params: {
     const segDataUrl = seg.imageUrl || seg.pages?.[0]?.sourceFileDataUrl;
 
     // SF1 School Register
-    if (seg.documentType === "sf1" && Array.isArray(data.learners)) {
-      for (const item of data.learners) {
-        const l = getOrCreateLearner(
-          item.lrn,
-          { lastName: item.last_name, firstName: item.first_name, middleName: item.middle_name },
-          "sf1"
-        );
-        l.lastName = item.last_name || l.lastName;
-        l.firstName = item.first_name || l.firstName;
-        l.middleName = item.middle_name || l.middleName;
-        l.sex = item.sex || l.sex;
-        l.birthDate = item.birth_date || l.birthDate;
-        l.section = data.section || item.section || l.section;
-        l.gradeLevel = data.grade_level || item.grade_level || l.gradeLevel;
-        l.trackStrand = data.track_strand || item.track_strand || l.trackStrand;
-
-        const newRec = {
-          pageNumber: item.page_number || pageNum,
-          fileName: item.source_file_name || segFileName,
-          dataUrl: item.source_file_data_url || segDataUrl,
-          documentId: seg.id,
-          raw: item,
+    if (seg.documentType === "sf1") {
+      const learners = Array.isArray(data.learners) ? data.learners : [];
+      if (learners.length === 0) {
+        const noStudentDisc: BatchDiscrepancyItem = {
+          id: `disc-${allDiscrepancies.length + 1}-sf1-no-student-found`,
+          learnerName: "No student found",
+          lrn: "N/A",
+          field: "School Register (SF1-SHS) Roster",
+          source1Doc: "SF1-SHS School Register",
+          source1Page: pageNum,
+          source1FileName: segFileName,
+          source1DataUrl: segDataUrl,
+          source1Value: "No student found",
+          source2Doc: "DepEd SF1 Master Roster",
+          source2Value: "Populated Learner Row(s)",
+          severity: "CRITICAL",
+          category: "INCOMPLETE_DATA",
+          reason: "No student found: Uploaded SF1 has empty LRN and Name rows or no valid student records were detected.",
+          recommendedAction: "Upload or scan an official SF1 School Register containing populated learner LRN, Name, Sex, and Birth Date rows.",
         };
+        allDiscrepancies.push(noStudentDisc);
+      } else {
+        for (const item of learners) {
+          const l = getOrCreateLearner(
+            item.lrn,
+            { lastName: item.last_name, firstName: item.first_name, middleName: item.middle_name },
+            "sf1"
+          );
+          l.lastName = item.last_name || l.lastName;
+          l.firstName = item.first_name || l.firstName;
+          l.middleName = item.middle_name || l.middleName;
+          l.sex = item.sex || l.sex;
+          l.birthDate = item.birth_date || l.birthDate;
+          l.section = data.section || item.section || l.section;
+          l.gradeLevel = data.grade_level || item.grade_level || l.gradeLevel;
+          l.trackStrand = data.track_strand || item.track_strand || l.trackStrand;
 
-        if (l.sf1Record) {
-          const isIdentical =
-            l.sf1Record.raw?.last_name === item.last_name &&
-            l.sf1Record.raw?.first_name === item.first_name &&
-            l.sf1Record.raw?.birth_date === item.birth_date;
-          l.duplicateWarnings.push({
-            documentType: "SF1-SHS",
-            details: isIdentical
-              ? `Duplicate scan of SF1 School Register detected (${segFileName}). Original scan preserved.`
-              : `Conflicting duplicate scan of SF1 School Register with different learner details (${segFileName} vs ${l.sf1Record.fileName}).`,
-            existingSource: l.sf1Record.fileName || "SF1 Scan 1",
-            newSource: segFileName || "SF1 Scan 2",
-            isIdentical,
-            severity: isIdentical ? "INFO" : "CRITICAL",
-          });
-        } else {
-          l.sf1Record = newRec;
+          const newRec = {
+            pageNumber: item.page_number || pageNum,
+            fileName: item.source_file_name || segFileName,
+            dataUrl: item.source_file_data_url || segDataUrl,
+            documentId: seg.id,
+            raw: item,
+          };
+
+          if (l.sf1Record) {
+            const isIdentical =
+              l.sf1Record.raw?.last_name === item.last_name &&
+              l.sf1Record.raw?.first_name === item.first_name &&
+              l.sf1Record.raw?.birth_date === item.birth_date;
+            l.duplicateWarnings.push({
+              documentType: "SF1-SHS",
+              details: isIdentical
+                ? `Duplicate scan of SF1 School Register detected (${segFileName}). Original scan preserved.`
+                : `Conflicting duplicate scan of SF1 School Register with different learner details (${segFileName} vs ${l.sf1Record.fileName}).`,
+              existingSource: l.sf1Record.fileName || "SF1 Scan 1",
+              newSource: segFileName || "SF1 Scan 2",
+              isIdentical,
+              severity: isIdentical ? "INFO" : "CRITICAL",
+            });
+          } else {
+            l.sf1Record = newRec;
+          }
+          l.allSf1Records.push(newRec);
         }
-        l.allSf1Records.push(newRec);
       }
     }
 
     // SF2 Daily Attendance Report (Preserves multiple months, flags duplicate scans for same month)
-    if (seg.documentType === "sf2" && (Array.isArray(data.attendance_records) || Array.isArray(data.learners))) {
-      const records = data.attendance_records || data.learners;
-      const segMonth = data.month || data.attendance_summary?.month || "MONTH";
+    if (
+      seg.documentType === "sf2" &&
+      (Array.isArray(data.attendance_records) || Array.isArray(data.attendance) || Array.isArray(data.learners))
+    ) {
+      const records = data.attendance_records || data.attendance || data.learners;
+      const segMonth = data.month || data.header?.month || data.attendance_summary?.month || "June";
       for (const item of records) {
         const l = getOrCreateLearner(
           item.lrn,
@@ -354,6 +384,46 @@ export function evaluateBatchCrossDocumentValidation(params: {
           l.sf2Records.push(newRec);
         }
         l.allSf2Records.push(newRec);
+      }
+    }
+
+    // SF5 / SF5A / SF5B Promotion & Graduation Candidate Report
+    if (
+      (seg.documentType === "sf5" || seg.documentType === "sf5a" || seg.documentType === "sf5b") &&
+      Array.isArray(data.learners)
+    ) {
+      const isSf5b = seg.documentType === "sf5b" || String(data.form_variant || "").toUpperCase().includes("SF5B");
+      for (const item of data.learners) {
+        const l = getOrCreateLearner(
+          item.lrn,
+          { lastName: item.last_name, firstName: item.first_name, middleName: item.middle_name },
+          seg.documentType
+        );
+        const newRec = {
+          pageNumber: item.page_number || pageNum,
+          fileName: item.source_file_name || segFileName,
+          dataUrl: item.source_file_data_url || segDataUrl,
+          documentId: seg.id,
+          raw: {
+            ...item,
+            school_year: item.school_year || data.school_year,
+            grade_level: item.grade_level || data.grade_level,
+            section: item.section || data.section,
+            semester: item.semester || data.semester,
+            graduation_status:
+              item.action_taken === "GRADUATING" || item.graduation_status
+                ? item.graduation_status || item.action_taken
+                : undefined,
+          },
+        };
+        if (isSf5b) {
+          l.sf5bRecord = newRec;
+          l.allSf5bRecords.push(newRec);
+        } else {
+          l.sf5aRecord = newRec;
+          l.allSf5aRecords.push(newRec);
+        }
+        l.sf5Record = newRec;
       }
     }
 
@@ -428,11 +498,34 @@ export function evaluateBatchCrossDocumentValidation(params: {
     // PSA Birth Certificate
     if (seg.documentType === "birth_cert") {
       const psaId = data.identity || data;
-      const l = getOrCreateLearner(
-        data.lrn || psaId.lrn,
-        { lastName: psaId.last_name, firstName: psaId.first_name, middleName: psaId.middle_name },
-        "birth_cert"
-      );
+      let l: any = undefined;
+      const cleanLrn = normalizeLrn(data.lrn || psaId.lrn);
+      if (isValidLrn(cleanLrn) && learnersMap.has(cleanLrn)) {
+        l = learnersMap.get(cleanLrn);
+      } else {
+        // Match civil identity name against existing SF1/academic learners in batch
+        const psaLast = normalizeNamePart(psaId.last_name);
+        const psaFirst = normalizeNamePart(psaId.first_name);
+        if (psaLast && psaFirst) {
+          for (const cand of learnersMap.values()) {
+            if (
+              normalizeNamePart(cand.lastName) === psaLast &&
+              normalizeNamePart(cand.firstName) === psaFirst
+            ) {
+              l = cand;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!l) {
+        l = getOrCreateLearner(
+          data.lrn || psaId.lrn,
+          { lastName: psaId.last_name, firstName: psaId.first_name, middleName: psaId.middle_name },
+          "birth_cert"
+        );
+      }
       const newRec = {
         pageNumber: pageNum,
         fileName: data.source_file_name || segFileName,
@@ -463,7 +556,6 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
   // 3. Build learner dossiers and run pairwise comparisons
   const dossiers: LearnerValidationDossier[] = [];
-  const allDiscrepancies: BatchDiscrepancyItem[] = [];
 
   for (const [lrnKey, learner] of learnersMap.entries()) {
     const fullName = [learner.lastName, learner.firstName].filter(Boolean).join(", ") +
@@ -480,9 +572,9 @@ export function evaluateBatchCrossDocumentValidation(params: {
     const docPresence = {
       sf1: Boolean(learner.sf1Record),
       sf2: learner.sf2Records.length > 0,
-      sf5: false,
-      sf5a: false,
-      sf5b: false,
+      sf5: Boolean(learner.sf5Record || learner.sf5aRecord || learner.sf5bRecord),
+      sf5a: Boolean(learner.sf5aRecord),
+      sf5b: Boolean(learner.sf5bRecord),
       sf9: hasCompleteSf9,
       sf10: Boolean(learner.sf10Record),
       psa: Boolean(learner.psaRecord),
@@ -490,6 +582,8 @@ export function evaluateBatchCrossDocumentValidation(params: {
       totalAvailable: [
         Boolean(learner.sf1Record),
         learner.sf2Records.length > 0,
+        Boolean(learner.sf5aRecord || (!learner.sf5bRecord && learner.sf5Record)),
+        Boolean(learner.sf5bRecord),
         hasCompleteSf9,
         Boolean(learner.sf10Record),
         Boolean(learner.psaRecord),
@@ -710,6 +804,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
         lrn: sf9Data.lrn,
         last_name: sf9Data.last_name,
         first_name: sf9Data.first_name,
+        sex: sf9Data.sex || sf9Data.gender,
         school_year: sf9Data.school_year,
         grade_level: sf9Data.grade_level,
         section: sf9Data.section,
@@ -742,58 +837,104 @@ export function evaluateBatchCrossDocumentValidation(params: {
       }
     }
 
-    // Comparator 5: SF9 ↔ SF10 (Report Card Grades vs Permanent Record)
+    // Comparator 5: SF10 ↔ SF9 (identity, scholastic context, per-semester grades & general averages)
     if (learner.sf9Record && learner.sf10Record) {
-      const sf9Data = learner.sf9Record.raw;
-      const sf10Data = learner.sf10Record.raw;
+      const sf9Data = learner.sf9Record.raw || {};
+      const sf10Data = learner.sf10Record.raw || {};
 
-      const pRes = compareSf9AndSf10(
-        {
-          document_id: "doc-sf9",
-          school_year: sf9Data.school_year || schoolYear,
-          grade_level: sf9Data.grade_level || "Grade 11",
-          semester: sf9Data.semester || "1st Semester",
-          grades: (sf9Data.grades || []).map((g: any) => ({
-            subject: g.subject,
-            quarter1: g.q1,
-            quarter2: g.q2,
-            finalGrade: g.final,
-          })),
-          general_average: sf9Data.general_average,
-        },
-        {
-          document_id: "doc-sf10",
-          school_year: sf10Data.school_year || schoolYear,
-          grade_level: sf10Data.grade_level || "Grade 11",
-          semester: sf10Data.semester || "1st Semester",
-          grades: (sf10Data.grades || []).map((g: any) => ({
-            subject: g.subject,
-            finalGrade: g.final,
-          })),
-          general_average: sf10Data.general_average,
-        }
+      const pRes = compareSf10AndSf9(
+        { ...sf10Data, document_id: learner.sf10Record.documentId || "doc-sf10", school_year: sf10Data.school_year || schoolYear },
+        { ...sf9Data, document_id: learner.sf9Record.documentId || "doc-sf9", school_year: sf9Data.school_year || schoolYear, sex: sf9Data.sex || sf9Data.gender, track_strand: sf9Data.track_strand || sf9Data.strand }
       );
       pairwiseResults.push(pRes);
       for (const d of pRes.discrepancies) {
         const disc: BatchDiscrepancyItem = {
-          id: `disc-${learnerDiscrepancies.length + 1}-sf9-sf10-${d.field}`,
+          id: `disc-${learnerDiscrepancies.length + 1}-sf10-sf9-${d.field}`,
           learnerName: fullName,
           lrn: displayedLrn,
           field: d.field,
-          source1Doc: "SF9-SHS Report Card",
-          source1Page: learner.sf9Record.pageNumber,
-          source1FileName: learner.sf9Record.fileName,
-          source1DataUrl: learner.sf9Record.dataUrl,
+          source1Doc: "SF10-SHS Permanent Transcript",
+          source1Page: learner.sf10Record.pageNumber,
+          source1FileName: learner.sf10Record.fileName,
+          source1DataUrl: learner.sf10Record.dataUrl,
           source1Value: d.sourceValue,
-          source2Doc: "SF10-SHS Permanent Transcript",
-          source2Page: learner.sf10Record.pageNumber,
-          source2FileName: learner.sf10Record.fileName,
-          source2DataUrl: learner.sf10Record.dataUrl,
+          source2Doc: "SF9-SHS Report Card",
+          source2Page: learner.sf9Record.pageNumber,
+          source2FileName: learner.sf9Record.fileName,
+          source2DataUrl: learner.sf9Record.dataUrl,
           source2Value: d.targetValue,
           severity: d.severity,
-          category: "MISMATCH",
+          category: d.severity === "CRITICAL" ? "MISMATCH" : "NEEDS_VERIFICATION",
           reason: d.description,
           recommendedAction: "Cross-check physical Form 138 with teacher class record and update Form 137 accordingly.",
+        };
+        learnerDiscrepancies.push(disc);
+        allDiscrepancies.push(disc);
+      }
+    }
+
+    // Comparator 9: SF10 ↔ SF1 (LRN, Full Name, Sex, normalized Birth Date)
+    if (learner.sf10Record && learner.sf1Record) {
+      const pRes = compareSf10AndSf1(
+        { ...(learner.sf10Record.raw || {}), document_id: learner.sf10Record.documentId || "doc-sf10" },
+        { ...(learner.sf1Record.raw || {}), document_id: (learner.sf1Record as any).documentId || "doc-sf1" }
+      );
+      pairwiseResults.push(pRes);
+      for (const d of pRes.discrepancies) {
+        const disc: BatchDiscrepancyItem = {
+          id: `disc-${learnerDiscrepancies.length + 1}-sf10-sf1-${d.field}`,
+          learnerName: fullName,
+          lrn: displayedLrn,
+          field: d.field,
+          source1Doc: "SF10-SHS Permanent Transcript",
+          source1Page: learner.sf10Record.pageNumber,
+          source1FileName: learner.sf10Record.fileName,
+          source1DataUrl: learner.sf10Record.dataUrl,
+          source1Value: d.sourceValue,
+          source2Doc: "SF1-SHS School Register",
+          source2Page: learner.sf1Record.pageNumber,
+          source2FileName: learner.sf1Record.fileName,
+          source2DataUrl: learner.sf1Record.dataUrl,
+          source2Value: d.targetValue,
+          severity: d.severity,
+          category: d.severity === "CRITICAL" ? "MISMATCH" : "NEEDS_VERIFICATION",
+          reason: d.description,
+          recommendedAction: "Reconcile SF10 learner's information with the official SF1 school register entry.",
+        };
+        learnerDiscrepancies.push(disc);
+        allDiscrepancies.push(disc);
+      }
+    }
+
+    // Comparator 10: SF10 ↔ PSA (civil identity ONLY: Full Name, Sex, Birth Date — PSA has no LRN)
+    if (learner.sf10Record && learner.psaRecord) {
+      const psaRaw = { ...(learner.psaRecord.raw || {}) };
+      delete (psaRaw as any).lrn;
+      const pRes = compareSf10AndPsa(
+        { ...(learner.sf10Record.raw || {}), document_id: learner.sf10Record.documentId || "doc-sf10" },
+        { ...psaRaw, document_id: (learner.psaRecord as any).documentId || "doc-psa" }
+      );
+      pairwiseResults.push(pRes);
+      for (const d of pRes.discrepancies) {
+        const disc: BatchDiscrepancyItem = {
+          id: `disc-${learnerDiscrepancies.length + 1}-sf10-psa-${d.field}`,
+          learnerName: fullName,
+          lrn: displayedLrn,
+          field: d.field,
+          source1Doc: "SF10-SHS Permanent Transcript",
+          source1Page: learner.sf10Record.pageNumber,
+          source1FileName: learner.sf10Record.fileName,
+          source1DataUrl: learner.sf10Record.dataUrl,
+          source1Value: d.sourceValue,
+          source2Doc: "PSA Birth Certificate",
+          source2Page: learner.psaRecord.pageNumber,
+          source2FileName: learner.psaRecord.fileName,
+          source2DataUrl: learner.psaRecord.dataUrl,
+          source2Value: d.targetValue,
+          severity: d.severity,
+          category: d.severity === "CRITICAL" ? "MISMATCH" : "NEEDS_VERIFICATION",
+          reason: d.description,
+          recommendedAction: "Refer to school registrar for birth certificate civil identity verification (RA 10173).",
         };
         learnerDiscrepancies.push(disc);
         allDiscrepancies.push(disc);
@@ -991,9 +1132,9 @@ export function evaluateBatchCrossDocumentValidation(params: {
       matchedSources: {
         sf1: learner.sf1Record,
         sf2: learner.sf2Records[0],
-        sf5: undefined,
-        sf5a: undefined,
-        sf5b: undefined,
+        sf5: learner.sf5Record,
+        sf5a: learner.sf5aRecord,
+        sf5b: learner.sf5bRecord,
         sf9: learner.sf9Record,
         sf10: learner.sf10Record,
         psa: learner.psaRecord,
@@ -1005,6 +1146,39 @@ export function evaluateBatchCrossDocumentValidation(params: {
       discrepancies: learnerDiscrepancies,
       unifiedMatrix: unifiedResult.fieldsMatrix,
       duplicateWarnings: learner.duplicateWarnings,
+    });
+  }
+
+  // Fallback dossier when no valid learners were extracted (e.g. empty SF1 sheet)
+  if (dossiers.length === 0 && allDiscrepancies.some((d) => d.reason.includes("No student found"))) {
+    dossiers.push({
+      lrn: "N/A",
+      fullName: "No student found",
+      lastName: "No student found",
+      firstName: "",
+      gradeLevel,
+      section,
+      overallStatus: "INCOMPLETE",
+      documentPresence: {
+        sf1: true,
+        sf2: false,
+        sf5: false,
+        sf5a: false,
+        sf5b: false,
+        sf9: false,
+        sf10: false,
+        psa: false,
+        sf2MonthsCount: 0,
+        totalAvailable: 1,
+      },
+      matchedSources: {},
+      allSf2Records: [],
+      allSf9Records: [],
+      allSf10Records: [],
+      pairwiseResults: [],
+      discrepancies: allDiscrepancies,
+      unifiedMatrix: [],
+      duplicateWarnings: [],
     });
   }
 
@@ -1107,7 +1281,10 @@ export function rebuildBatchValidationReportFromPersistedResults(
       }
       dossier.discrepancies = reconstructed;
     } else if (dossier.validationPersistence?.status === "REQUIRES_IDENTITY_RESOLUTION") {
-      dossier.unifiedMatrix = [];
+      // Preserve existing computed unifiedMatrix if present so teachers can review the cross-document matrix
+      if (!dossier.unifiedMatrix) {
+        dossier.unifiedMatrix = [];
+      }
       dossier.discrepancies = [
         {
           id: `disc-identity-resolution-${dossier.lrn}`,

@@ -10,6 +10,7 @@
  */
 
 import { normalizeLrn, isValidLrn } from "@/lib/validation/patterns";
+import { isBlacklistedStudentName } from "@/lib/validation/nameComparison";
 import type { Sf1RosterEntry } from "@/types/database";
 import { classifyFieldRecognition, buildDocumentRecognitionSummary, type DocumentRecognitionSummary } from "./handwritingExtractor";
 
@@ -29,6 +30,7 @@ export interface ShsSf1Header {
 export interface ShsSf1ParseResult {
   header: ShsSf1Header;
   learners: Array<Omit<Sf1RosterEntry, "id" | "document_id" | "student_id" | "school_id"> & {
+    full_name?: string;
     recognition_type?: string;
     is_handwritten?: boolean;
     icr_confidence?: number;
@@ -38,6 +40,8 @@ export interface ShsSf1ParseResult {
   total_male_count: number;
   total_female_count: number;
   total_enrolled_count: number;
+  no_student_found?: boolean;
+  error?: string;
   recognition_summary?: DocumentRecognitionSummary;
   warnings: string[];
 }
@@ -56,7 +60,7 @@ export function parseShsSf1(
     ? rawLayoutOrTables.tables
     : Array.isArray(rawLayoutOrTables?.pages)
     ? rawLayoutOrTables.pages.flatMap((p: any) =>
-        (p.tables || []).map((t: any) => ({
+        (p.tables || p.rawLayout?.tables || []).map((t: any) => ({
           ...t,
           _pageNumber: p.pageNumber || p.originalPageNumber || t.boundingRegions?.[0]?.pageNumber || 1,
         }))
@@ -79,10 +83,14 @@ export function parseShsSf1(
     }
   }
 
-  // 2. Fallback to markdown/text parsing if no learners found from tables
-  if (learners.length === 0) {
+  // 2. Also aggregate any learners from text/markdown across pages not already captured by LRN
+  if (rawText) {
     const textLearners = parseLearnersFromText(rawText, header, rawLayout);
-    learners.push(...textLearners);
+    for (const tl of textLearners) {
+      if (!learners.some((l) => l.lrn === tl.lrn)) {
+        learners.push(tl);
+      }
+    }
   }
 
   // Count sex totals
@@ -93,8 +101,9 @@ export function parseShsSf1(
     else if (l.sex === "F") femaleCount++;
   }
 
-  if (learners.length === 0) {
-    warnings.push("No learner rows could be extracted from this SF1 document. Manual review required.");
+  const noStudentFound = learners.length === 0;
+  if (noStudentFound) {
+    warnings.push("No student found");
   }
 
   const recognitionSummary = rawLayout
@@ -108,6 +117,8 @@ export function parseShsSf1(
     total_male_count: maleCount,
     total_female_count: femaleCount,
     total_enrolled_count: learners.length,
+    no_student_found: noStudentFound,
+    error: noStudentFound ? "No student found" : undefined,
     recognition_summary: recognitionSummary,
     warnings,
   };
@@ -189,14 +200,12 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
   for (const table of tables) {
     if (!table.cells || table.cells.length === 0) continue;
 
-    // Detect column indexes
+    // Detect column indexes for the 4 core fields
     let lrnCol = -1;
     let nameCol = -1;
     let sexCol = -1;
     let dobCol = -1;
-    let ageCol = -1;
-    let religionCol = -1;
-    let remarksCol = -1;
+    let headerRowIndex = -1;
 
     // Build row map with content, polygon, and pageNumber
     const rowMap = new Map<number, Map<number, { content: string; polygon?: number[]; pageNumber?: number }>>();
@@ -215,57 +224,79 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
       const rowText = Array.from(rowCells.values()).map(c => c.content).join(" ").toLowerCase();
 
       // Check header or gender group headers
-      if (rowText.includes("female") && !rowText.includes("male and female")) {
+      if (rowText.includes("female") && !rowText.includes("male and female") && !rowText.includes("sex")) {
         currentSex = "F";
         continue;
       }
-      if (rowText.includes("male") && !rowText.includes("female")) {
+      if (rowText.includes("male") && !rowText.includes("female") && !rowText.includes("sex")) {
         currentSex = "M";
         continue;
       }
 
-      // Check header columns
+      // Locate SF1 table header row: LRN | NAME (Last Name, First Name, Middle Name) | Sex (M/F) | BIRTH DATE (mm/dd/yyyy)
       if (rowText.includes("lrn") || rowText.includes("learner reference number")) {
+        headerRowIndex = r;
         for (const [c, cell] of rowCells.entries()) {
-          const v = cell.content.toLowerCase();
+          const v = cell.content.toLowerCase().trim();
           if (v.includes("lrn") || v.includes("learner reference")) lrnCol = c;
-          else if (v.includes("name") || v.includes("pangalan")) nameCol = c;
-          else if (v.includes("sex") || v.includes("kasarian")) sexCol = c;
-          else if (v.includes("birth") || v.includes("kapanganakan")) dobCol = c;
-          else if (v.includes("age") || v.includes("edad")) ageCol = c;
-          else if (v.includes("religion") || v.includes("relihiyon")) religionCol = c;
-          else if (v.includes("remark") || v.includes("puna")) remarksCol = c;
+          else if (v.includes("name") || v.includes("pangalan") || v.includes("learner") || v.includes("mag-aaral")) nameCol = c;
+          else if (v.includes("sex") || v.includes("kasarian") || v.includes("gender")) sexCol = c;
+          else if (v.includes("birth") || v.includes("kapanganakan") || v.includes("dob") || v.includes("bday") || v.includes("b-day")) dobCol = c;
         }
+        continue;
+      }
+
+      // Check for empty grid line where both LRN and NAME cells are blank
+      const rawLrnCell = lrnCol !== -1 && rowCells.has(lrnCol) ? rowCells.get(lrnCol)!.content.trim() : "";
+      const rawNameCell = nameCol !== -1 && rowCells.has(nameCol) ? rowCells.get(nameCol)!.content.trim() : "";
+
+      const isLrnCellBlank = !rawLrnCell || rawLrnCell === "-" || rawLrnCell === "—";
+      const isNameCellBlank = !rawNameCell || rawNameCell === "-" || rawNameCell === "—" || isBlacklistedStudentName(rawNameCell);
+
+      if (isLrnCellBlank && isNameCellBlank && lrnCol !== -1) {
+        // Ignore empty grid lines
         continue;
       }
 
       // Check if this row has an LRN (12 digits)
       let extractedLrn = "";
-      if (lrnCol !== -1 && rowCells.has(lrnCol)) {
-        extractedLrn = normalizeLrn(rowCells.get(lrnCol)!.content);
-      } else {
-        for (const cell of rowCells.values()) {
-          const norm = normalizeLrn(cell.content);
-          if (isValidLrn(norm)) {
-            extractedLrn = norm;
-            break;
+      if (rawLrnCell) {
+        extractedLrn = normalizeLrn(rawLrnCell);
+      }
+      if (!isValidLrn(extractedLrn)) {
+        // Fallback search across row cells for a valid 12-digit LRN
+        for (const [c, cell] of rowCells.entries()) {
+          if (c !== nameCol) {
+            const norm = normalizeLrn(cell.content);
+            if (isValidLrn(norm)) {
+              extractedLrn = norm;
+              break;
+            }
           }
         }
       }
 
       if (!isValidLrn(extractedLrn)) continue;
 
-      // Extract Name
-      let rawName = "";
+      // Extract Name from NAME column
+      let rawName = rawNameCell;
       let namePolygon: number[] | undefined;
-      if (nameCol !== -1 && rowCells.has(nameCol)) {
-        rawName = rowCells.get(nameCol)!.content;
+      if (nameCol !== -1 && rowCells.has(nameCol) && !isBlacklistedStudentName(rawNameCell)) {
         namePolygon = rowCells.get(nameCol)!.polygon;
-      } else {
-        // Fallback: cell next to LRN
+      }
+      if (!rawName || isBlacklistedStudentName(rawName)) {
+        // Fallback: search row cells for a valid learner name candidate
         for (const [c, cell] of rowCells.entries()) {
-          const val = cell.content;
-          if (c !== lrnCol && val.length > 3 && /[a-zA-Z]/.test(val) && !/^\d+$/.test(val)) {
+          const val = cell.content.trim();
+          if (
+            c !== lrnCol &&
+            val.length > 2 &&
+            /[a-zA-Z]/.test(val) &&
+            !/^\d+$/.test(val) &&
+            !isBlacklistedStudentName(val) &&
+            !parseDateString(val) &&
+            !/^(?:M|F|MALE|FEMALE)$/i.test(val)
+          ) {
             rawName = val;
             namePolygon = cell.polygon;
             break;
@@ -273,27 +304,46 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
         }
       }
 
-      const { lastName, firstName, middleName, suffix } = splitLearnerName(rawName);
+      if (!rawName || isBlacklistedStudentName(rawName)) continue;
 
-      // Extract Sex
+      const { lastName, firstName, middleName, suffix } = splitLearnerName(rawName);
+      if (!lastName || lastName === "Unknown" || !firstName || firstName === "Unknown") continue;
+
+      const fullName = [lastName, firstName].filter(Boolean).join(", ") + (middleName ? ` ${middleName}` : "");
+
+      // Extract Sex (M/F)
       let rowSex = currentSex;
       if (sexCol !== -1 && rowCells.has(sexCol)) {
-        const s = rowCells.get(sexCol)!.content.toUpperCase();
+        const s = rowCells.get(sexCol)!.content.trim().toUpperCase();
         if (s.startsWith("F")) rowSex = "F";
         else if (s.startsWith("M")) rowSex = "M";
+      } else {
+        for (const [c, cell] of rowCells.entries()) {
+          if (c !== lrnCol && c !== nameCol) {
+            const s = cell.content.trim().toUpperCase();
+            if (/^(?:M|F|MALE|FEMALE)$/i.test(s)) {
+              rowSex = s.startsWith("F") ? "F" : "M";
+              break;
+            }
+          }
+        }
       }
 
-      // Extract Birth Date
+      // Extract Birth Date (mm/dd/yyyy, mm/dd/yy, or yyyy-mm-dd)
       let birthDate: string | null = null;
       if (dobCol !== -1 && rowCells.has(dobCol)) {
         birthDate = parseDateString(rowCells.get(dobCol)!.content);
       }
-
-      // Age
-      let ageNum: number | null = null;
-      if (ageCol !== -1 && rowCells.has(ageCol)) {
-        const a = parseFloat(rowCells.get(ageCol)!.content);
-        if (!isNaN(a)) ageNum = a;
+      if (!birthDate) {
+        for (const [c, cell] of rowCells.entries()) {
+          if (c !== lrnCol && c !== nameCol && c !== sexCol) {
+            const parsed = parseDateString(cell.content);
+            if (parsed) {
+              birthDate = parsed;
+              break;
+            }
+          }
+        }
       }
 
       // Classify learner name handwriting / ICR metadata
@@ -301,9 +351,10 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
       const tablePageNum =
         table._pageNumber ||
         table.boundingRegions?.[0]?.pageNumber ||
-        rowCells.get(nameCol)?.pageNumber ||
+        (nameCol !== -1 ? rowCells.get(nameCol)?.pageNumber : undefined) ||
         1;
 
+      // Extract ONLY the 4 fields (lrn, full_name, sex, birth_date) per populated student row
       learners.push({
         school_year: header.school_year || "2026-2027",
         grade_level: header.grade_level || "Grade 11",
@@ -312,15 +363,13 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
         strand: header.strand || "General Academic Strand (GAS)",
         semester: header.semester || "1st Semester",
         lrn: extractedLrn,
+        full_name: fullName,
         last_name: lastName,
         first_name: firstName,
         middle_name: middleName,
         suffix: suffix,
         sex: rowSex,
         birth_date: birthDate,
-        age: ageNum,
-        religion: religionCol !== -1 ? rowCells.get(religionCol)?.content : undefined,
-        remarks_indicator: remarksCol !== -1 ? rowCells.get(remarksCol)?.content : undefined,
         row_index: rowIndex++,
         page_number: tablePageNum,
         review_status: "NEEDS_REVIEW",
@@ -341,6 +390,13 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
   let currentPageNumber = 1;
   let rowIndex = 1;
 
+  // Header column tracking for markdown tables
+  let tableHeaderFound = false;
+  let lrnColIdx = -1;
+  let nameColIdx = -1;
+  let sexColIdx = -1;
+  let dobColIdx = -1;
+
   const lines = text.split("\n");
   for (const line of lines) {
     const trimmed = line.trim();
@@ -355,16 +411,148 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
     }
 
     const lower = trimmed.toLowerCase();
-    if ((lower === "female" || lower.startsWith("female ") || lower.includes("female learners")) && !lower.includes("male and female")) {
+    if ((lower === "female" || lower.startsWith("female ") || lower.includes("female learners")) && !lower.includes("male and female") && !lower.includes("sex")) {
       currentSex = "F";
       continue;
     }
-    if ((lower === "male" || lower.startsWith("male ") || lower.includes("male learners")) && !lower.includes("female")) {
+    if ((lower === "male" || lower.startsWith("male ") || lower.includes("male learners")) && !lower.includes("female") && !lower.includes("sex")) {
       currentSex = "M";
       continue;
     }
 
-    // Match 12-digit LRN followed by name
+    // Check for markdown / pipe table header row
+    if (trimmed.includes("|") && (lower.includes("lrn") || lower.includes("learner reference")) && (lower.includes("name") || lower.includes("pangalan"))) {
+      const rawParts = trimmed.split("|").map((p) => p.trim());
+      const parts = rawParts.filter((p, idx) => !(p === "" && (idx === 0 || idx === rawParts.length - 1)));
+      for (let i = 0; i < parts.length; i++) {
+        const pLower = parts[i].toLowerCase();
+        if (pLower.includes("lrn") || pLower.includes("learner reference")) lrnColIdx = i;
+        else if (pLower.includes("name") || pLower.includes("pangalan")) nameColIdx = i;
+        else if (pLower.includes("sex") || pLower.includes("kasarian")) sexColIdx = i;
+        else if (pLower.includes("birth") || pLower.includes("kapanganakan") || pLower.includes("dob")) dobColIdx = i;
+      }
+      tableHeaderFound = true;
+      continue;
+    }
+
+    // Skip markdown table delimiter rows like |---|---|
+    if (/^\|?\s*[-:]+[-| :]*\|?$/.test(trimmed)) {
+      continue;
+    }
+
+    // If inside a pipe table
+    if (trimmed.includes("|")) {
+      const rawParts = trimmed.split("|").map((p) => p.trim());
+      const parts = rawParts.filter((p, idx) => !(p === "" && (idx === 0 || idx === rawParts.length - 1)));
+
+      // Detect LRN and Name from columns if header was located, or by search
+      let rawLrnPart = lrnColIdx !== -1 && lrnColIdx < parts.length ? parts[lrnColIdx] : "";
+      let rawNamePart = nameColIdx !== -1 && nameColIdx < parts.length ? parts[nameColIdx] : "";
+
+      if (!rawLrnPart || !isValidLrn(normalizeLrn(rawLrnPart))) {
+        const foundLrnIdx = parts.findIndex((p) => isValidLrn(normalizeLrn(p)));
+        if (foundLrnIdx !== -1) {
+          rawLrnPart = parts[foundLrnIdx];
+          if ((!rawNamePart || isBlacklistedStudentName(rawNamePart)) && foundLrnIdx + 1 < parts.length) {
+            rawNamePart = parts[foundLrnIdx + 1];
+          }
+        }
+      }
+
+      if (!rawNamePart || isBlacklistedStudentName(rawNamePart)) {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i].trim();
+          if (
+            !isValidLrn(normalizeLrn(p)) &&
+            p.length > 2 &&
+            /[a-zA-Z]/.test(p) &&
+            !isBlacklistedStudentName(p) &&
+            !parseDateString(p) &&
+            !/^(?:M|F|MALE|FEMALE)$/i.test(p)
+          ) {
+            rawNamePart = p;
+            break;
+          }
+        }
+      }
+
+      const isLrnBlank = !rawLrnPart || rawLrnPart === "-" || rawLrnPart === "—";
+      const isNameBlank = !rawNamePart || rawNamePart === "-" || rawNamePart === "—" || isBlacklistedStudentName(rawNamePart);
+
+      // Ignore empty grid lines where both LRN and NAME cells are blank
+      if (isLrnBlank && isNameBlank) {
+        continue;
+      }
+
+      const extractedLrn = normalizeLrn(rawLrnPart);
+      if (!isValidLrn(extractedLrn)) continue;
+      if (!rawNamePart || isBlacklistedStudentName(rawNamePart)) continue;
+
+      let rowSex: "M" | "F" = currentSex;
+      if (sexColIdx !== -1 && sexColIdx < parts.length && parts[sexColIdx]) {
+        const s = parts[sexColIdx].trim().toUpperCase();
+        if (s.startsWith("F")) rowSex = "F";
+        else if (s.startsWith("M")) rowSex = "M";
+      } else {
+        for (let i = 0; i < parts.length; i++) {
+          if (i !== lrnColIdx && i !== nameColIdx) {
+            const p = parts[i].trim();
+            if (/^(?:M|F|MALE|FEMALE)$/i.test(p)) {
+              rowSex = p.toUpperCase().startsWith("F") ? "F" : "M";
+              break;
+            }
+          }
+        }
+      }
+
+      let birthDate: string | null = null;
+      if (dobColIdx !== -1 && dobColIdx < parts.length && parts[dobColIdx]) {
+        birthDate = parseDateString(parts[dobColIdx]);
+      } else {
+        for (let i = 0; i < parts.length; i++) {
+          if (i !== lrnColIdx && i !== nameColIdx) {
+            const parsed = parseDateString(parts[i]);
+            if (parsed) {
+              birthDate = parsed;
+              break;
+            }
+          }
+        }
+      }
+
+      const { lastName, firstName, middleName, suffix } = splitLearnerName(rawNamePart);
+      if (!lastName || lastName === "Unknown" || !firstName || firstName === "Unknown") continue;
+
+      const fullName = [lastName, firstName].filter(Boolean).join(", ") + (middleName ? ` ${middleName}` : "");
+      const nameRec = rawLayout ? classifyFieldRecognition(rawNamePart, rawLayout) : undefined;
+
+      learners.push({
+        school_year: header.school_year || "2026-2027",
+        grade_level: header.grade_level || "Grade 11",
+        section: header.section || "Unassigned",
+        track: header.track || "Academic Track",
+        strand: header.strand || "General Academic Strand (GAS)",
+        semester: header.semester || "1st Semester",
+        lrn: extractedLrn,
+        full_name: fullName,
+        last_name: lastName,
+        first_name: firstName,
+        middle_name: middleName,
+        suffix: suffix,
+        sex: rowSex,
+        birth_date: birthDate,
+        row_index: rowIndex++,
+        page_number: currentPageNumber,
+        review_status: "NEEDS_REVIEW",
+        recognition_type: nameRec?.recognition_type || "printed_ocr",
+        is_handwritten: nameRec?.is_handwritten || false,
+        icr_confidence: nameRec?.icr_confidence,
+        bounding_box: nameRec?.bounding_box,
+      });
+      continue;
+    }
+
+    // Match 12-digit LRN followed by name (plain text lines)
     const lrnMatch = trimmed.match(/\b([0-9]{12})\b/);
     if (!lrnMatch) continue;
 
@@ -372,64 +560,50 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
     let rawName = "Learner, Unknown";
     let rowSex: "M" | "F" = currentSex;
     let birthDate: string | null = null;
-    let ageNum: number | null = null;
-    let religion: string | undefined;
-    let remarksIndicator: string | undefined;
 
-    if (trimmed.includes("|")) {
-      const rawParts = trimmed.split("|").map((p) => p.trim());
-      // Remove empty leading/trailing elements from "| col1 | col2 |"
-      const parts = rawParts.filter((p, idx) => !(p === "" && (idx === 0 || idx === rawParts.length - 1)));
-      const lrnIdx = parts.findIndex((p) => p.includes(extractedLrn));
-      const nameIdx = lrnIdx !== -1 && lrnIdx + 1 < parts.length ? lrnIdx + 1 : 1;
-      if (parts[nameIdx]) {
-        rawName = parts[nameIdx];
-      }
-      // Inspect remaining pipe columns for sex, birth_date, age, religion, remarks
-      for (let i = nameIdx + 1; i < parts.length; i++) {
-        const colVal = parts[i].trim();
-        if (!colVal) continue;
-        if (/^(?:M|F|MALE|FEMALE)$/i.test(colVal)) {
-          rowSex = colVal.toUpperCase().startsWith("F") ? "F" : "M";
-          continue;
-        }
-        const parsedDob = parseDateString(colVal);
-        if (parsedDob && !birthDate) {
-          birthDate = parsedDob;
-          continue;
-        }
-        if (/^\d{1,2}$/.test(colVal) && ageNum === null) {
-          const parsedAge = parseInt(colVal, 10);
-          if (parsedAge >= 10 && parsedAge <= 60) {
-            ageNum = parsedAge;
-            continue;
-          }
-        }
-      }
+    let afterLrn = trimmed.slice(trimmed.indexOf(extractedLrn) + extractedLrn.length).trim();
+    let beforeLrn = trimmed.slice(0, trimmed.indexOf(extractedLrn)).trim().replace(/^\d+[\.\)]\s*/, "");
+
+    // 1. Extract date anywhere in afterLrn or beforeLrn (e.g. 6/23/04, 06/23/2004, 2004-06-23)
+    const dobMatch = afterLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+    if (dobMatch) {
+      birthDate = parseDateString(dobMatch[0]);
+      afterLrn = afterLrn.replace(dobMatch[0], " ").trim();
     } else {
-      // Remove leading row numbering like "1." or "12)" before LRN
-      let afterLrn = trimmed.slice(trimmed.indexOf(extractedLrn) + extractedLrn.length).trim();
-      // Extract trailing date (YYYY-MM-DD or MM/DD/YYYY) if present
-      const dobInlineMatch = afterLrn.match(/\b(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})\b/);
-      if (dobInlineMatch) {
-        birthDate = parseDateString(dobInlineMatch[1]);
-        afterLrn = afterLrn.replace(dobInlineMatch[0], " ").trim();
+      const dobBefore = beforeLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+      if (dobBefore) {
+        birthDate = parseDateString(dobBefore[0]);
+        beforeLrn = beforeLrn.replace(dobBefore[0], " ").trim();
       }
-      // Extract inline sex token (Male / Female / M / F) at the end of name
-      const sexInlineMatch = afterLrn.match(/\b(Male|Female|M|F)\b(?:\s+(\d{1,2}))?\s*$/i);
-      if (sexInlineMatch) {
-        rowSex = sexInlineMatch[1].toUpperCase().startsWith("F") ? "F" : "M";
-        if (sexInlineMatch[2]) {
-          const parsedAge = parseInt(sexInlineMatch[2], 10);
-          if (parsedAge >= 10 && parsedAge <= 60) ageNum = parsedAge;
-        }
-        afterLrn = afterLrn.slice(0, sexInlineMatch.index).trim();
-      }
-      const nameMatch = afterLrn.match(/([a-zA-ZñÑ\s\.\,\-]+)/);
-      if (nameMatch) rawName = nameMatch[1].trim();
     }
 
+    // 2. Extract sex token (Male / Female / M / F)
+    const sexMatch = afterLrn.match(/\b(Male|Female|M|F)\b/i);
+    if (sexMatch && sexMatch.index !== undefined) {
+      rowSex = sexMatch[1].toUpperCase().startsWith("F") ? "F" : "M";
+      const beforeSex = afterLrn.slice(0, sexMatch.index).trim();
+      const afterSex = afterLrn.slice(sexMatch.index + sexMatch[0].length).trim();
+      if (beforeSex && /[a-zA-Z]/.test(beforeSex)) {
+        rawName = beforeSex;
+      } else if (afterSex && /[a-zA-Z]/.test(afterSex)) {
+        rawName = afterSex;
+      }
+      afterLrn = `${beforeSex} ${afterSex}`.trim();
+    } else if (beforeLrn && /[a-zA-Z]/.test(beforeLrn)) {
+      rawName = beforeLrn;
+    }
+
+    if (rawName === "Learner, Unknown" && afterLrn) {
+      const cand = afterLrn.match(/([a-zA-ZñÑ\s\.\,\-]+)/);
+      if (cand) rawName = cand[1].trim();
+    }
+
+    if (!rawName || isBlacklistedStudentName(rawName)) continue;
+
     const { lastName, firstName, middleName, suffix } = splitLearnerName(rawName);
+    if (!lastName || lastName === "Unknown" || !firstName || firstName === "Unknown") continue;
+
+    const fullName = [lastName, firstName].filter(Boolean).join(", ") + (middleName ? ` ${middleName}` : "");
     const nameRec = rawLayout ? classifyFieldRecognition(rawName, rawLayout) : undefined;
 
     learners.push({
@@ -440,15 +614,13 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
       strand: header.strand || "General Academic Strand (GAS)",
       semester: header.semester || "1st Semester",
       lrn: extractedLrn,
+      full_name: fullName,
       last_name: lastName,
       first_name: firstName,
       middle_name: middleName,
       suffix: suffix,
       sex: rowSex,
       birth_date: birthDate,
-      age: ageNum,
-      religion,
-      remarks_indicator: remarksIndicator,
       row_index: rowIndex++,
       page_number: currentPageNumber,
       review_status: "NEEDS_REVIEW",
@@ -536,16 +708,29 @@ export function splitLearnerName(raw: string): {
   return { lastName, firstName, middleName: middleName || undefined, suffix };
 }
 
-function parseDateString(dateStr: string): string | null {
+export function parseDateString(dateStr: string): string | null {
+  if (!dateStr) return null;
   const cleaned = dateStr.trim();
   // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
-  // MM/DD/YYYY
-  const mdy = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  // YYYY/MM/DD
+  const ymd = cleaned.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (ymd) {
+    const year = ymd[1];
+    const month = ymd[2].padStart(2, "0");
+    const day = ymd[3].padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  // MM/DD/YYYY or MM/DD/YY or MM-DD-YYYY or MM-DD-YY
+  const mdy = cleaned.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (mdy) {
     const month = mdy[1].padStart(2, "0");
     const day = mdy[2].padStart(2, "0");
-    const year = mdy[3];
+    let year = mdy[3];
+    if (year.length === 2) {
+      const yNum = parseInt(year, 10);
+      year = yNum <= 50 ? `20${year}` : `19${year}`;
+    }
     return `${year}-${month}-${day}`;
   }
   return null;

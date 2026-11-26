@@ -230,6 +230,9 @@ export function recalculateSubjectGradeStatus(
   semesterContext?: string
 ): GradeRecord {
   const updated: GradeRecord = { ...record };
+  if (updated.confidence === undefined) {
+    updated.confidence = updated.icr_confidence ?? 0.95;
+  }
 
   const effectiveSem =
     normalizeSemesterContext(updated.semester) || normalizeSemesterContext(semesterContext);
@@ -532,6 +535,16 @@ export interface SemesterAverageResult {
   completeness: "COMPLETE" | "INCOMPLETE" | "EMPTY";
   pendingSubjects?: string[];
   eligibleGrades: GradeRecord[];
+  confidence?: number;
+}
+
+/**
+ * Normalizes an honest confidence score (ratio 0-1 or percentage 0-100) into integer percentage 0-100.
+ */
+export function getConfidencePercentage(conf?: number | null): number {
+  if (typeof conf !== "number" || isNaN(conf)) return 0;
+  if (conf > 0 && conf <= 1) return Math.min(100, Math.max(0, Math.round(conf * 100)));
+  return Math.min(100, Math.max(0, Math.round(conf)));
 }
 
 /**
@@ -665,6 +678,14 @@ export function computeSemesterGeneralAverage(
   const displayedAvg = Math.round(rawAvg);
   const officialAvg = rawAvg;
 
+  const confidences = recalculatedEligible
+    .map((g) => (typeof g.confidence === "number" ? g.confidence : typeof g.icr_confidence === "number" ? g.icr_confidence : 0.95))
+    .filter((c) => !isNaN(c));
+  const avgConfidence =
+    confidences.length > 0
+      ? Number((confidences.reduce((a, b) => a + b, 0) / confidences.length).toFixed(4))
+      : 0.95;
+
   return {
     rawAverage: rawAvg,
     officialAverage: officialAvg,
@@ -674,6 +695,7 @@ export function computeSemesterGeneralAverage(
     completeness: "COMPLETE",
     pendingSubjects: [],
     eligibleGrades: recalculatedEligible,
+    confidence: avgConfidence,
   };
 }
 
@@ -693,6 +715,7 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
   updated.sem1_raw_general_average = sem1Result.rawAverage;
   updated.sem1_precise_general_average = sem1Result.preciseAverage;
   updated.sem1_displayed_general_average = sem1Result.displayedAverage;
+  updated.sem1_confidence = sem1Result.confidence;
 
   const sem2Result = computeSemesterGeneralAverage(grades, "2nd Semester");
   updated.sem2_subject_count = sem2Result.subjectCount;
@@ -701,6 +724,7 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
   updated.sem2_raw_general_average = sem2Result.rawAverage;
   updated.sem2_precise_general_average = sem2Result.preciseAverage;
   updated.sem2_displayed_general_average = sem2Result.displayedAverage;
+  updated.sem2_confidence = sem2Result.confidence;
 
   const docSem = normalizeSemesterContext(updated.semester);
 

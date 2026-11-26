@@ -5,6 +5,11 @@ import { parseAzureLayoutGrades } from "../src/lib/ocr/tableGradesParser.ts";
 import { parseSeniorHighGradesText } from "../src/lib/ocr/seniorHighParser.ts";
 import { handleOcrRoute } from "../src/lib/ocr/mistral.ts";
 import { parseGradesText } from "../src/lib/ocr/gradesParser.ts";
+import {
+  computeSemesterGeneralAverage,
+  formatDisplayedGrade,
+  getConfidencePercentage,
+} from "../src/lib/validation/gradeUtils.ts";
 
 test("AVV Two-Sided SF9 and Azure Academic Grade Extraction Suite", async (t) => {
   const originalEnv = { ...process.env };
@@ -406,4 +411,174 @@ test("AVV Two-Sided SF9 and Azure Academic Grade Extraction Suite", async (t) =>
     assert.equal(activeFront, frontImageStorageUrl, "Front image accessible");
     assert.equal(activeBack, backImageStorageUrl, "Back image accessible");
   });
+
+  // -------------------------------------------------------------------------
+  // Test N: 2nd Semester table with Q3 & Q4 and blank Final Grade auto-computes whole-number grades & General Average
+  // -------------------------------------------------------------------------
+  await t.test(
+    "Test N — 2nd Semester table with Q3 & Q4 populated and blank Semester Final Grade auto-computes whole-number Final Grades and General Average with valid 0–100% confidence scores",
+    async () => {
+      const syntheticSem2TableWithBlankFinals = {
+        rowCount: 5,
+        columnCount: 4,
+        cells: [
+          { rowIndex: 0, columnIndex: 0, content: "Second Semester" },
+          { rowIndex: 1, columnIndex: 0, content: "Subjects" },
+          { rowIndex: 1, columnIndex: 1, content: "Quarter" },
+          { rowIndex: 1, columnIndex: 3, content: "Semester Final Grade" },
+          { rowIndex: 2, columnIndex: 1, content: "3" },
+          { rowIndex: 2, columnIndex: 2, content: "4" },
+          // Subject 1: Q3 = 85, Q4 = 88. Arithmetic mean = 86.5 -> DepEd rounded = 87. Final cell left blank.
+          { rowIndex: 3, columnIndex: 0, content: "Physical Science" },
+          { rowIndex: 3, columnIndex: 1, content: "85" },
+          { rowIndex: 3, columnIndex: 2, content: "88" },
+          // Subject 2: Q3 = 89, Q4 = 92. Arithmetic mean = 90.5 -> DepEd rounded = 91. Final cell left blank.
+          { rowIndex: 4, columnIndex: 0, content: "Statistics and Probability" },
+          { rowIndex: 4, columnIndex: 1, content: "89" },
+          { rowIndex: 4, columnIndex: 2, content: "92" },
+        ],
+      };
+
+      const result = parseAzureLayoutGrades([syntheticSem2TableWithBlankFinals]);
+
+      assert.equal(result.grades.length, 2, "Should extract 2 subjects from 2nd Semester table");
+
+      const [s1, s2] = result.grades;
+
+      // Subject 1 checks:
+      assert.equal(s1.subject, "Physical Science");
+      assert.equal(s1.q3, 85);
+      assert.equal(s1.q4, 88);
+      assert.equal(s1.is_auto_computed, true, "Must be tagged as auto-computed");
+      assert.equal(s1.displayed_final_grade, 87, "86.5 rounds to whole-number integer 87");
+      assert.equal(Number.isInteger(s1.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
+      assert.equal(formatDisplayedGrade(s1.displayed_final_grade), "87");
+      assert.ok(!formatDisplayedGrade(s1.displayed_final_grade).includes("."), "Displayed grade must not contain decimals");
+      assert.ok(typeof s1.confidence === "number" && !isNaN(s1.confidence), "Confidence must be a valid number");
+      const s1ConfPct = getConfidencePercentage(s1.confidence);
+      assert.ok(s1ConfPct >= 0 && s1ConfPct <= 100, `Confidence percentage ${s1ConfPct}% must be within 0–100%`);
+
+      // Subject 2 checks:
+      assert.equal(s2.subject, "Statistics and Probability");
+      assert.equal(s2.q3, 89);
+      assert.equal(s2.q4, 92);
+      assert.equal(s2.is_auto_computed, true, "Must be tagged as auto-computed");
+      assert.equal(s2.displayed_final_grade, 91, "90.5 rounds to whole-number integer 91");
+      assert.equal(Number.isInteger(s2.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
+      assert.equal(formatDisplayedGrade(s2.displayed_final_grade), "91");
+      assert.ok(!formatDisplayedGrade(s2.displayed_final_grade).includes("."), "Displayed grade must not contain decimals");
+      assert.ok(typeof s2.confidence === "number" && !isNaN(s2.confidence), "Confidence must be a valid number");
+      const s2ConfPct = getConfidencePercentage(s2.confidence);
+      assert.ok(s2ConfPct >= 0 && s2ConfPct <= 100, `Confidence percentage ${s2ConfPct}% must be within 0–100%`);
+
+      // General Average auto-computation checks:
+      const sem2Result = computeSemesterGeneralAverage(result.grades, "2nd Semester");
+      assert.equal(sem2Result.completeness, "COMPLETE", "2nd Semester completeness must be COMPLETE");
+      assert.equal(sem2Result.subjectCount, 2, "2 eligible subjects");
+      // Raw: (86.5 + 90.5) / 2 = 88.5 -> DepEd rounded whole number = 89
+      assert.equal(sem2Result.displayedAverage, 89, "General average must round 88.5 to 89");
+      assert.equal(Number.isInteger(sem2Result.displayedAverage), true, "General average must strictly be an integer without decimals");
+      assert.equal(formatDisplayedGrade(sem2Result.displayedAverage), "89");
+      assert.ok(!formatDisplayedGrade(sem2Result.displayedAverage).includes("."), "Formatted general average must not contain decimals");
+      assert.ok(typeof sem2Result.confidence === "number" && !isNaN(sem2Result.confidence), "General average confidence must be a valid number");
+      const genAvgConfPct = getConfidencePercentage(sem2Result.confidence);
+      assert.ok(genAvgConfPct >= 0 && genAvgConfPct <= 100, `General average confidence ${genAvgConfPct}% must be within 0–100%`);
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Test O: SF9 Front "Report on Attendance" extraction with .5 half-days, auto-sum, & confidence %
+  // -------------------------------------------------------------------------
+  await t.test(
+    "Test O — SF9 Front Report on Attendance extracts School Days, Present, & Absent with .5 half-day decimals, blank total auto-sum, and honest confidence %",
+    async () => {
+      // 1. Synthetic Azure Document Intelligence Attendance Table from SF9 Front
+      // Month headers: Jun to Apr (11 months) + Total
+      // Row 1: No. of School Days (Total blank -> should auto-sum to 205)
+      // Row 2: No. of Days Present (with 17.5 half-day -> should auto-sum to 201.5)
+      // Row 3: No. of Days Absent (with 3.5 half-day -> should auto-sum to 3.5)
+      const months = ["Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
+      const schoolDaysVals = ["15", "20", "22", "21", "20", "15", "18", "20", "18", "19", "17"]; // sum = 205
+      const daysPresentVals = ["15", "20", "21.5", "20.5", "20", "15", "17", "20", "17.5", "18", "17"]; // sum = 201.5
+      const daysAbsentVals = ["0", "0", "0.5", "0.5", "0", "0", "1", "0", "0.5", "1", "0"]; // sum = 3.5
+
+      const cells = [
+        // Row 0: Headers
+        { rowIndex: 0, columnIndex: 0, content: "No. of Days", confidence: 0.98 },
+        ...months.map((m, idx) => ({ rowIndex: 0, columnIndex: idx + 1, content: m, confidence: 0.95 })),
+        { rowIndex: 0, columnIndex: months.length + 1, content: "Total", confidence: 0.97 },
+
+        // Row 1: No. of School Days (Blank Total)
+        { rowIndex: 1, columnIndex: 0, content: "No. of School Days", confidence: 0.96 },
+        ...schoolDaysVals.map((v, idx) => ({ rowIndex: 1, columnIndex: idx + 1, content: v, confidence: 0.94 })),
+        { rowIndex: 1, columnIndex: months.length + 1, content: "", confidence: 0.90 }, // Blank total
+
+        // Row 2: No. of Days Present (Blank Total, contains 17.5)
+        { rowIndex: 2, columnIndex: 0, content: "No. of Days Present", confidence: 0.95 },
+        ...daysPresentVals.map((v, idx) => ({ rowIndex: 2, columnIndex: idx + 1, content: v, confidence: 0.93 })),
+        { rowIndex: 2, columnIndex: months.length + 1, content: "—", confidence: 0.90 }, // Dash / blank total
+
+        // Row 3: No. of Days Absent (Blank Total, contains 3.5)
+        { rowIndex: 3, columnIndex: 0, content: "No. of Days Absent", confidence: 0.94 },
+        ...daysAbsentVals.map((v, idx) => ({ rowIndex: 3, columnIndex: idx + 1, content: v, confidence: 0.92 })),
+        { rowIndex: 3, columnIndex: months.length + 1, content: "", confidence: 0.88 }, // Blank total
+      ];
+
+      const syntheticAttendanceTable = {
+        rowCount: 4,
+        columnCount: months.length + 2,
+        confidence: 0.94,
+        cells,
+      };
+
+      const tableResult = parseAzureLayoutGrades([syntheticAttendanceTable]);
+
+      assert.ok(Array.isArray(tableResult.attendance), "attendance must be an array");
+      assert.equal(tableResult.attendance.length, 3, "Must extract 3 attendance records");
+
+      const [schoolDaysRec, presentRec, absentRec] = tableResult.attendance;
+
+      // Check School Days
+      assert.equal(schoolDaysRec.label, "No. of School Days");
+      assert.deepEqual(schoolDaysRec.values, schoolDaysVals);
+      assert.equal(schoolDaysRec.total, "205", "Blank total must auto-sum to 205");
+      assert.ok(typeof schoolDaysRec.confidence === "number", "Row confidence must be a number");
+      assert.ok(schoolDaysRec.confidence >= 60 && schoolDaysRec.confidence <= 100, `Confidence ${schoolDaysRec.confidence}% must be valid 0-100%`);
+
+      // Check Days Present (Preserving .5 half-day decimals: 17.5 and 201.5)
+      assert.equal(presentRec.label, "No. of Days Present");
+      assert.ok(presentRec.values.includes("17.5"), "Values must preserve exact half-day decimal 17.5");
+      assert.equal(presentRec.total, "201.5", "Blank total must auto-sum to exact half-day decimal 201.5 without rounding to integer");
+      assert.ok(!presentRec.total.includes(".0"), "Exact half-day decimal must not append redundant .0");
+      assert.ok(typeof presentRec.confidence === "number", "Row confidence must be a number");
+      assert.ok(presentRec.confidence >= 60 && presentRec.confidence <= 100, `Confidence ${presentRec.confidence}% must be valid 0-100%`);
+
+      // Check Days Absent (Preserving .5 half-day decimals: 0.5 and 3.5)
+      assert.equal(absentRec.label, "No. of Days Absent");
+      assert.ok(absentRec.values.includes("0.5"), "Values must preserve exact half-day decimal 0.5");
+      assert.equal(absentRec.total, "3.5", "Blank total must auto-sum to exact decimal 3.5");
+      assert.ok(typeof absentRec.confidence === "number", "Row confidence must be a number");
+      assert.ok(absentRec.confidence >= 60 && absentRec.confidence <= 100, `Confidence ${absentRec.confidence}% must be valid 0-100%`);
+
+      // Overall attendance confidence
+      assert.ok(typeof tableResult.attendance_confidence === "number", "Overall attendance confidence must be populated");
+      assert.ok(tableResult.attendance_confidence >= 60 && tableResult.attendance_confidence <= 100);
+
+      // 2. Integration via parseSeniorHighGradesText with rawLayout
+      const fullSf9FrontText = `
+        Republic of the Philippines - Department of Education
+        REPORT ON ATTENDANCE
+        LRN: 109876543210
+        Name: DELA CRUZ, CARLOS MENDOZA
+        Grade Level: Grade 11 Section: STEM-A
+      `;
+
+      const parsedFront = parseSeniorHighGradesText(fullSf9FrontText, { tables: [syntheticAttendanceTable] });
+      assert.ok(Array.isArray(parsedFront.attendance), "parsedFront.attendance must be populated");
+      assert.equal(parsedFront.attendance.length, 3);
+      assert.equal(parsedFront.attendance[1].total, "201.5");
+      assert.equal(parsedFront.attendance[1].values[8], "17.5");
+      assert.ok(typeof parsedFront.attendance_confidence === "number" && parsedFront.attendance_confidence > 0);
+    }
+  );
 });

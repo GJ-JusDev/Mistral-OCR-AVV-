@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   FileText,
   CheckCircle2,
@@ -23,12 +23,28 @@ import {
 import { Button } from "@/components/ui/Button";
 import type { DocumentSegment } from "@/lib/validation/batchDocumentSegmenter";
 
+// Canonical document type ordering: SF1 -> SF2 -> SF9 -> SF10 -> PSA (birth_cert)
+export const CANONICAL_DOC_ORDER: Record<string, number> = {
+  sf1: 1,
+  sf2: 2,
+  sf9: 3,
+  sf10: 4,
+  birth_cert: 5,
+  psa: 5,
+};
+
 interface IndividualDocumentExtractionViewProps {
   segments: DocumentSegment[];
   extractedData: Record<string, any>;
   onRetrySegment?: (segmentId: string) => Promise<void>;
   onProceedToIdentityMatching?: () => void;
   documentImageUrl?: string | null;
+  batchContext?: {
+    schoolYear?: string;
+    gradeLevel?: string;
+    section?: string;
+    schoolId?: string;
+  };
 }
 
 export default function IndividualDocumentExtractionView({
@@ -37,9 +53,18 @@ export default function IndividualDocumentExtractionView({
   onRetrySegment,
   onProceedToIdentityMatching,
   documentImageUrl,
+  batchContext,
 }: IndividualDocumentExtractionViewProps) {
+  const sortedSegments = useMemo(() => {
+    return [...segments].sort((a, b) => {
+      const orderA = CANONICAL_DOC_ORDER[a.documentType?.toLowerCase()] ?? 99;
+      const orderB = CANONICAL_DOC_ORDER[b.documentType?.toLowerCase()] ?? 99;
+      return orderA - orderB;
+    });
+  }, [segments]);
+
   const [selectedSegmentId, setSelectedSegmentId] = useState<string>(
-    segments[0]?.id || ""
+    sortedSegments[0]?.id || ""
   );
   const [currentPageIndex, setCurrentPageIndex] = useState<number>(0);
   const [zoomLevel, setZoomLevel] = useState<number>(100);
@@ -47,7 +72,7 @@ export default function IndividualDocumentExtractionView({
   const [showRawText, setShowRawText] = useState<boolean>(false);
 
   const selectedSegment =
-    segments.find((s) => s.id === selectedSegmentId) || segments[0];
+    sortedSegments.find((s) => s.id === selectedSegmentId) || sortedSegments[0];
 
   if (!selectedSegment) {
     return (
@@ -66,6 +91,35 @@ export default function IndividualDocumentExtractionView({
   const segmentData = extractedData[selectedSegment.id] || {};
   const docType = selectedSegment.documentType;
 
+  // Resolve section & grade level cleanly from segmentData, batchContext, or any sibling segment
+  const contextSection =
+    batchContext?.section ||
+    Object.values(extractedData).find((d: any) => d?.section && d.section !== "Unassigned")?.section ||
+    Object.values(extractedData).find((d: any) => d?.header?.section && d.header.section !== "Unassigned")?.header?.section ||
+    Object.values(extractedData).find((d: any) => d?.learners?.[0]?.section && d.learners[0].section !== "Unassigned")?.learners?.[0]?.section;
+
+  const rawSection = segmentData.section || segmentData.header?.section || segmentData.learners?.[0]?.section;
+  const activeSection =
+    (rawSection && rawSection !== "Unassigned")
+      ? rawSection
+      : (contextSection && contextSection !== "Unassigned")
+      ? contextSection
+      : rawSection || "Unassigned";
+
+  const contextGradeLevel =
+    batchContext?.gradeLevel ||
+    Object.values(extractedData).find((d: any) => d?.grade_level && d.grade_level !== "Unassigned")?.grade_level ||
+    Object.values(extractedData).find((d: any) => d?.header?.grade_level && d.header.grade_level !== "Unassigned")?.header?.grade_level ||
+    Object.values(extractedData).find((d: any) => d?.learners?.[0]?.grade_level && d.learners[0].grade_level !== "Unassigned")?.learners?.[0]?.grade_level;
+
+  const rawGradeLevel = segmentData.grade_level || segmentData.header?.grade_level || segmentData.learners?.[0]?.grade_level;
+  const activeGradeLevel =
+    (rawGradeLevel && rawGradeLevel !== "Unassigned")
+      ? rawGradeLevel
+      : (contextGradeLevel && contextGradeLevel !== "Unassigned")
+      ? contextGradeLevel
+      : rawGradeLevel || "Grade 11";
+
   // Gather pages for current segment
   const pages =
     Array.isArray(selectedSegment.pages) && selectedSegment.pages.length > 0
@@ -80,10 +134,23 @@ export default function IndividualDocumentExtractionView({
 
   const currentPage = pages[currentPageIndex] || pages[0];
   const pageImageUrl =
-    currentPage?.sourceFileDataUrl ||
-    selectedSegment.imageUrl ||
-    documentImageUrl ||
-    "";
+    docType === "birth_cert"
+      ? (currentPage?.upperSectionDataUrl ||
+         currentPage?.upper_section_data_url ||
+         currentPage?.processedDataUrl ||
+         currentPage?.processed_data_url ||
+         segmentData.upperSectionDataUrl ||
+         segmentData.upper_section_data_url ||
+         segmentData.processedDataUrl ||
+         segmentData.processed_data_url ||
+         currentPage?.sourceFileDataUrl ||
+         selectedSegment.imageUrl ||
+         documentImageUrl ||
+         "")
+      : (currentPage?.sourceFileDataUrl ||
+         selectedSegment.imageUrl ||
+         documentImageUrl ||
+         "");
 
   // Helper to extract multi-learner rows
   const getLearnerRows = (): any[] => {
@@ -147,7 +214,7 @@ export default function IndividualDocumentExtractionView({
                 Stage B: Individual Extraction Results
               </span>
               <span className="text-[11px] font-mono text-slate-500">
-                ({segments.length} Document{segments.length > 1 ? "s" : ""} Extracted)
+                ({sortedSegments.length} Document{sortedSegments.length > 1 ? "s" : ""} Extracted)
               </span>
             </div>
             <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
@@ -175,15 +242,15 @@ export default function IndividualDocumentExtractionView({
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-            Select Document to Inspect ({segments.length})
+            Select Document to Inspect ({sortedSegments.length})
           </span>
           <span className="text-xs text-slate-400 font-mono">
             Active: {selectedSegment.formTitle}
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-          {segments.map((seg, idx) => {
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+          {sortedSegments.map((seg, idx) => {
             const isSelected = seg.id === selectedSegmentId;
             const segData = extractedData[seg.id] || {};
             const learnerCount = Array.isArray(segData.learners)
@@ -452,7 +519,7 @@ export default function IndividualDocumentExtractionView({
                   Grade & Section
                 </span>
                 <span className="font-semibold text-slate-800 dark:text-slate-200 truncate block">
-                  {segmentData.grade_level || segmentData.header?.grade_level || "Grade 11"} • {segmentData.section || segmentData.header?.section || "Unassigned"}
+                  {activeGradeLevel} • {activeSection}
                 </span>
               </div>
               <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800">
@@ -861,6 +928,9 @@ export default function IndividualDocumentExtractionView({
                           <th className="py-2.5 px-3 text-center min-w-[60px] bg-slate-100/70 dark:bg-slate-800 font-extrabold text-slate-800 dark:text-slate-200">
                             Total
                           </th>
+                          <th className="py-2.5 px-3 text-center min-w-[70px]">
+                            Confidence %
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -876,6 +946,24 @@ export default function IndividualDocumentExtractionView({
                             ))}
                             <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-50/50 dark:bg-slate-800/40">
                               {row.total !== undefined && row.total !== null ? String(row.total) : "—"}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {(() => {
+                                const conf = row.confidence ?? (segmentData.attendance_confidence ?? 92);
+                                const isGreen = conf >= 85;
+                                const isAmber = conf >= 60 && conf < 85;
+                                return (
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    isGreen
+                                      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                                      : isAmber
+                                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
+                                      : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-300 dark:border-slate-700"
+                                  }`}>
+                                    {Math.round(conf)}%
+                                  </span>
+                                );
+                              })()}
                             </td>
                           </tr>
                         ))}
@@ -1158,11 +1246,11 @@ export default function IndividualDocumentExtractionView({
                   )}
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                  <div>
+                  <div className="min-w-0 pr-2">
                     <span className="text-[10px] font-bold uppercase text-slate-400 block">
                       Registered Child Full Name
                     </span>
-                    <span className="font-bold text-slate-900 dark:text-slate-100 text-sm">
+                    <span className="font-bold text-slate-900 dark:text-slate-100 text-sm break-words whitespace-normal block">
                       {segmentData.name ||
                         [segmentData.last_name, segmentData.first_name, segmentData.middle_name]
                           .filter(Boolean)
@@ -1183,11 +1271,11 @@ export default function IndividualDocumentExtractionView({
                   )}
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                  <div>
+                  <div className="min-w-0 pr-2">
                     <span className="text-[10px] font-bold uppercase text-slate-400 block">
                       Date of Birth & Sex
                     </span>
-                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    <span className="font-semibold text-slate-800 dark:text-slate-200 break-words whitespace-normal block">
                       {segmentData.birth_date || "—"} • Sex: {segmentData.sex || "—"}
                     </span>
                   </div>
@@ -1203,26 +1291,37 @@ export default function IndividualDocumentExtractionView({
                     </span>
                   )}
                 </div>
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                  <div>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-1.5">
                     <span className="text-[10px] font-bold uppercase text-slate-400 block">
-                      Mother Maiden Name & Father
+                      Parents / Legal Guardians
                     </span>
-                    <span className="font-semibold text-slate-800 dark:text-slate-200 truncate block">
-                      Mother: {segmentData.mother_maiden_name || "—"} • Father: {segmentData.father_name || "—"}
-                    </span>
+                    {(segmentData.field_statuses?.mother_name || segmentData.field_statuses?.mother_maiden_name) && (
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 85
+                          ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                          : ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 60
+                          ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                      }`}>
+                        {Math.round((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence > 1 ? (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence : (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence * 100)}%
+                      </span>
+                    )}
                   </div>
-                  {(segmentData.field_statuses?.mother_name || segmentData.field_statuses?.mother_maiden_name) && (
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 85
-                        ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
-                        : ((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name)?.confidence || 0) >= 60
-                        ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
-                        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
-                    }`}>
-                      {Math.round((segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence > 1 ? (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence : (segmentData.field_statuses.mother_name || segmentData.field_statuses.mother_maiden_name).confidence * 100)}%
-                    </span>
-                  )}
+                  <div className="space-y-2 text-xs">
+                    <div className="min-w-0">
+                      <span className="text-[10px] text-slate-400 block font-medium">Mother&apos;s Maiden Name:</span>
+                      <span className="font-semibold text-slate-800 dark:text-slate-200 break-words whitespace-normal block">
+                        {segmentData.mother_maiden_name || segmentData.identity?.mother_maiden_name || segmentData.mother_name || "—"}
+                      </span>
+                    </div>
+                    <div className="min-w-0">
+                      <span className="text-[10px] text-slate-400 block font-medium">Father&apos;s Name:</span>
+                      <span className="font-semibold text-slate-800 dark:text-slate-200 break-words whitespace-normal block">
+                        {segmentData.father_name || segmentData.identity?.father_name || "—"}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
 

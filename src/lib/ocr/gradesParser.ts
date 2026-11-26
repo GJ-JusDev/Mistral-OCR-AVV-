@@ -7,6 +7,10 @@ import { parseShsSf2 } from "./shsSf2Parser";
 import { parseShsSf5 } from "./shsSf5Parser";
 import { parsePsaBirthCert } from "./psaParser";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
+import { isBlacklistedStudentName } from "../validation/nameComparison";
+import { isValidLrn } from "../validation/patterns";
+import { normalizeBirthDate } from "../validation/birthDateNormalizer";
+import { parseSf10ShsText, sf10RecordsToGradeRows, isSf10SectionHeader } from "./sf10ShsParser";
 
 export function parseGradesText(
   text: string,
@@ -65,6 +69,8 @@ export function parseGradesText(
       shs_track: sf1.header.track || undefined,
       semester: sf1.header.semester || undefined,
       learners: sf1.learners,
+      no_student_found: sf1.learners.length === 0,
+      error: sf1.learners.length === 0 ? (sf1.error || "No student found") : undefined,
       recognition_summary: sf1.recognition_summary,
       has_handwritten_content: sf1.recognition_summary?.has_handwriting ?? false,
       icr_confidence: sf1.recognition_summary?.handwriting_confidence,
@@ -150,6 +156,78 @@ export function parseGradesText(
     parsed.document_type = normalizedDocType;
   }
 
+  // SF10-SHS: dedicated Learner's Information + Scholastic Record extraction.
+  const sf10Parsed = normalizedDocType === "sf10" ? parseSf10ShsText(text) : undefined;
+  if (sf10Parsed) {
+    const L = sf10Parsed.learner;
+    const nameIsBad = (v?: string) => !v || isBlacklistedStudentName(v) || isSf10SectionHeader(v);
+    if (L.last_name && L.first_name && (nameIsBad(parsed.last_name) || nameIsBad(parsed.first_name))) {
+      parsed.last_name = L.last_name;
+      parsed.first_name = L.first_name;
+      parsed.middle_name = L.middle_name;
+      parsed.name = L.full_name;
+    }
+    if (L.lrn && !isValidLrn(parsed.lrn)) parsed.lrn = L.lrn;
+    if (L.sex) parsed.sex = L.sex;
+    if (L.birth_date_raw && !normalizeBirthDate(parsed.birth_date)) parsed.birth_date = L.birth_date_raw;
+
+    const recs = sf10Parsed.scholastic_records;
+    const first = recs[0];
+    if (first) {
+      parsed.school_id = parsed.school_id || first.school_id;
+      parsed.grade_level = first.grade_level || parsed.grade_level;
+      parsed.school_year = first.school_year || parsed.school_year;
+      parsed.track_strand = first.track_strand || parsed.track_strand;
+      parsed.section = first.section || parsed.section;
+      parsed.semester = first.semester || parsed.semester;
+    }
+    const sf10Rows = sf10RecordsToGradeRows(recs);
+    const existingCount = Array.isArray(parsed.grades) ? parsed.grades.length : 0;
+    if (sf10Rows.length > 0 && sf10Rows.length >= existingCount) {
+      parsed.grades = sf10Rows as any;
+    }
+    const sem1 = recs.find((r) => r.semester === "1st Semester" && r.general_average !== undefined);
+    const sem2 = recs.find((r) => r.semester === "2nd Semester" && r.general_average !== undefined);
+    (parsed as any).scholastic_records = recs;
+    (parsed as any).sf10_learner_information = L;
+    if (sem1) (parsed as any).sem1_printed_general_average = sem1.general_average;
+    if (sem2) (parsed as any).sem2_printed_general_average = sem2.general_average;
+    if (sf10Parsed.warnings.length > 0) {
+      parsed.warnings = [...((parsed as any).warnings || []), ...sf10Parsed.warnings];
+    }
+  }
+
+  // Universal birthdate normalization: store canonical ISO + display notation.
+  if (parsed.birth_date) {
+    const bd = normalizeBirthDate(parsed.birth_date);
+    if (bd) {
+      (parsed as any).birth_date_raw = (parsed as any).birth_date_raw || parsed.birth_date;
+      (parsed as any).birth_date_display = bd.display;
+      parsed.birth_date = bd.iso;
+    }
+  }
+
+  // Sanitize student name against blacklisted DepEd form headers (e.g. "LEARNER'S INFORMATION", "INFORMATION")
+  if (isBlacklistedStudentName(parsed.name)) {
+    parsed.name = "";
+  }
+  if (isBlacklistedStudentName(parsed.last_name)) {
+    parsed.last_name = "";
+  }
+  if (isBlacklistedStudentName(parsed.first_name)) {
+    parsed.first_name = "";
+  }
+  if (isBlacklistedStudentName(parsed.middle_name)) {
+    parsed.middle_name = "";
+  }
+  if (
+    !parsed.name &&
+    parsed.last_name &&
+    parsed.first_name
+  ) {
+    parsed.name = `${parsed.last_name}, ${parsed.first_name}${parsed.middle_name ? " " + parsed.middle_name : ""}`;
+  }
+
   parsed.academic_level = normalizedLevel;
   parsed.selected_grade_level =
     gradeLevel === "Grade 11" || gradeLevel === "Grade 12"
@@ -232,6 +310,30 @@ export function parseGradesText(
     if (!Array.isArray(anyParsed.unresolved_subjects)) {
       anyParsed.unresolved_subjects = unresolvedSubjects;
     }
+  }
+
+  // SF10 scholastic records carry authoritative per-semester context (SY, section,
+  // track/strand, printed General Ave.), so prefer them for completed_semesters.
+  if (sf10Parsed && sf10Parsed.scholastic_records.length > 0) {
+    (parsed as any).completed_semesters = sf10Parsed.scholastic_records.map((rec) => ({
+      school_id: rec.school_id,
+      school_year: rec.school_year,
+      grade_level: rec.grade_level,
+      semester: rec.semester,
+      section: rec.section,
+      track_strand: rec.track_strand,
+      general_average: rec.general_average,
+      subjects: rec.subjects.map((s) => ({
+        subject: s.subject,
+        subject_type: s.subject_type,
+        q1: s.q1,
+        q2: s.q2,
+        q3: s.q3,
+        q4: s.q4,
+        final_grade: s.sem_final_grade,
+        remarks: s.action_taken,
+      })),
+    }));
   }
 
   if (Array.isArray(parsed.grades) && parsed.grades.some(g => (g as any).is_handwritten)) {

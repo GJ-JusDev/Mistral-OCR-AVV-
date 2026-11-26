@@ -12,7 +12,7 @@ import ShsRosterReviewSection from "@/components/review/ShsRosterReviewSection";
 import PsaIdentityVerificationModal from "@/components/review/PsaIdentityVerificationModal";
 import DeleteReviewDocumentModal from "@/components/review/DeleteReviewDocumentModal";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
-import { AlertTriangle, ShieldCheck, UserCheck } from "lucide-react";
+import { AlertTriangle, ShieldCheck, UserCheck, RotateCw } from "lucide-react";
 
 import { submitDocumentReview, saveDocumentCorrections, updateRosterEntryReviewStatus, verifyPsaIdentityRecord } from "@/actions/review";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "@/lib/validation/gradeUtils";
@@ -37,6 +37,7 @@ export default function DocumentDetailPage() {
   const [psaRecord, setPsaRecord] = useState<any>(null);
   const [isPsaModalOpen, setIsPsaModalOpen] = useState(false);
   const [currentUserRole, setCurrentUserRole] = useState<string>("teacher");
+  const [imageRotation, setImageRotation] = useState<number>(0);
 
   const fetchDocumentDetail = async () => {
     try {
@@ -218,12 +219,13 @@ export default function DocumentDetailPage() {
   const validationResults = document.validation_results || [];
   const passCount = validationResults.filter((r: any) => r.passed).length;
   const failCount = validationResults.filter((r: any) => !r.passed).length;
+  const isPsa = String(document.document_type || "").toLowerCase().trim() === "birth_cert" || String(document.document_type || "").toLowerCase().trim() === "psa";
 
   return (
     <PageContainer>
       <Header 
         title="Document Details" 
-        description={`Record ID: ${document.id} • Type: ${(document.document_type || "sf9").toUpperCase()}`}
+        description={`Record ID: ${document.id} • Type: ${isPsa ? "PSA BIRTH CERTIFICATE" : (document.document_type || "sf9").toUpperCase()}`}
       />
 
       {actionError && (
@@ -239,46 +241,59 @@ export default function DocumentDetailPage() {
       )}
 
       {/* Assignment Context, Context Mismatch, and Quarantine Warnings */}
-      {(document.section ||
-        document.strand_or_track ||
-        document.extracted_fields?.mixed_student_front_back ||
-        (Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
-          document.extracted_fields.assignment_context_mismatches.length > 0) ||
-        document.extracted_fields?.identity_conflict_details) && (
-        <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 rounded-lg text-sm space-y-2">
-          <div className="flex flex-wrap items-center gap-2 text-blue-900 dark:text-blue-200">
-            <strong className="font-semibold">Assigned Scan Context:</strong>
-            <span>{document.grade_level || document.extracted_fields?.grade_level || "Unassigned Grade"}</span>
-            {document.section && <span>• Section {document.section}</span>}
-            {document.strand_or_track && <span>• {document.strand_or_track}</span>}
-            {document.school_year && <span>• SY {document.school_year}</span>}
-          </div>
-          {document.extracted_fields?.mixed_student_front_back && (
-            <p className="text-red-700 dark:text-red-300 font-medium">
-              Quarantined: Front and back pages appear to belong to different students and require administrator/adviser manual review.
-            </p>
-          )}
-          {Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
-            document.extracted_fields.assignment_context_mismatches.length > 0 && (
-              <ul className="list-disc list-inside text-amber-800 dark:text-amber-300 space-y-0.5">
-                {document.extracted_fields.assignment_context_mismatches.map((mismatch: unknown, idx: number) => {
-                  const renderedText = formatAssignmentContextMismatch(mismatch);
-                  if (!renderedText) return null;
-                  return <li key={idx}>{renderedText}</li>;
-                })}
-              </ul>
-            )}
-          {(typeof document.extracted_fields?.identity_conflict_details === "string"
-            ? document.extracted_fields.identity_conflict_details
-            : document.extracted_fields?.identity_conflict_details?.reason) && (
-            <p className="text-amber-800 dark:text-amber-300">
+      {isPsa ? (
+        document.extracted_fields?.identity_conflict_details ? (
+          <div className="mt-4 p-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 rounded-lg text-sm">
+            <p className="text-amber-800 dark:text-amber-300 font-medium">
               Identity Review Note:{" "}
               {typeof document.extracted_fields.identity_conflict_details === "string"
                 ? document.extracted_fields.identity_conflict_details
                 : document.extracted_fields.identity_conflict_details.reason}
             </p>
-          )}
-        </div>
+          </div>
+        ) : null
+      ) : (
+        (document.section ||
+          document.strand_or_track ||
+          document.extracted_fields?.mixed_student_front_back ||
+          (Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
+            document.extracted_fields.assignment_context_mismatches.length > 0) ||
+          document.extracted_fields?.identity_conflict_details) && (
+          <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50 rounded-lg text-sm space-y-2">
+            <div className="flex flex-wrap items-center gap-2 text-blue-900 dark:text-blue-200">
+              <strong className="font-semibold">Assigned Scan Context:</strong>
+              <span>{document.grade_level || document.extracted_fields?.grade_level || "Unassigned Grade"}</span>
+              {document.section && <span>• Section {document.section}</span>}
+              {document.strand_or_track && <span>• {document.strand_or_track}</span>}
+              {document.school_year && <span>• SY {document.school_year}</span>}
+            </div>
+            {document.extracted_fields?.mixed_student_front_back && (
+              <p className="text-red-700 dark:text-red-300 font-medium">
+                Quarantined: Front and back pages appear to belong to different students and require administrator/adviser manual review.
+              </p>
+            )}
+            {Array.isArray(document.extracted_fields?.assignment_context_mismatches) &&
+              document.extracted_fields.assignment_context_mismatches.length > 0 && (
+                <ul className="list-disc list-inside text-amber-800 dark:text-amber-300 space-y-0.5">
+                  {document.extracted_fields.assignment_context_mismatches.map((mismatch: unknown, idx: number) => {
+                    const renderedText = formatAssignmentContextMismatch(mismatch);
+                    if (!renderedText) return null;
+                    return <li key={idx}>{renderedText}</li>;
+                  })}
+                </ul>
+              )}
+            {(typeof document.extracted_fields?.identity_conflict_details === "string"
+              ? document.extracted_fields.identity_conflict_details
+              : document.extracted_fields?.identity_conflict_details?.reason) && (
+              <p className="text-amber-800 dark:text-amber-300">
+                Identity Review Note:{" "}
+                {typeof document.extracted_fields.identity_conflict_details === "string"
+                  ? document.extracted_fields.identity_conflict_details
+                  : document.extracted_fields.identity_conflict_details.reason}
+              </p>
+            )}
+          </div>
+        )
       )}
 
       {/* Flags / Warnings */}
@@ -294,7 +309,7 @@ export default function DocumentDetailPage() {
       )}
       
       {/* Document Review Section: PSA Supporting Civil Identity vs Single-Learner Grade */}
-      {document.document_type === "birth_cert" ? (
+      {isPsa ? (
         <div className="mt-6 bg-white dark:bg-zinc-900 border border-purple-200 dark:border-purple-800/60 rounded-xl p-5 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -325,34 +340,60 @@ export default function DocumentDetailPage() {
             )}
           </div>
 
-          {psaRecord && (
-            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 text-xs">
-              <div>
-                <span className="text-zinc-400 block font-medium">Child Full Name:</span>
-                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                  {psaRecord.last_name}, {psaRecord.first_name} {psaRecord.middle_name || ""}
-                </span>
+          {(() => {
+            const ef = document.extracted_fields || {};
+            const idObj = (ef.identity && typeof ef.identity === "object") ? ef.identity : {};
+            const childName = psaRecord?.last_name
+              ? `${psaRecord.last_name}, ${psaRecord.first_name || ""} ${psaRecord.middle_name || ""}`.trim()
+              : (psaRecord?.child_name || ef.child_name || ef.name || idObj.formatted_name || idObj.complete_name || "Not extracted");
+            const birthDate = psaRecord?.birth_date || ef.birth_date || ef.date_of_birth || idObj.birth_date || "Not extracted";
+            const rawSex = String(psaRecord?.sex || ef.sex || ef.gender || idObj.sex || "").trim().toUpperCase();
+            const sexLabel = rawSex === "M" || rawSex === "MALE" ? "Male (M)" : rawSex === "F" || rawSex === "FEMALE" ? "Female (F)" : rawSex || "-";
+            const regNo = psaRecord?.registry_number || ef.registry_number || ef.certificate_number || idObj.registry_number || "N/A";
+            const motherName = psaRecord?.mother_maiden_name || psaRecord?.mother_name || ef.mother_maiden_name || ef.mother_name || idObj.mother_maiden_name || "N/A";
+            const fatherName = psaRecord?.father_name || ef.father_name || idObj.father_name || "N/A";
+
+            return (
+              <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 text-xs">
+                <div>
+                  <span className="text-zinc-400 block font-medium">Child Full Name:</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200 break-words">
+                    {childName}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-400 block font-medium">Date of Birth:</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                    {birthDate}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-400 block font-medium">Sex:</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                    {sexLabel}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-400 block font-medium">Registry Number:</span>
+                  <span className="font-mono text-zinc-800 dark:text-zinc-200">
+                    {regNo}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-400 block font-medium">Mother&apos;s Maiden Name:</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200 break-words">
+                    {motherName}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-zinc-400 block font-medium">Father&apos;s Name:</span>
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200 break-words">
+                    {fatherName}
+                  </span>
+                </div>
               </div>
-              <div>
-                <span className="text-zinc-400 block font-medium">Date of Birth:</span>
-                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                  {psaRecord.birth_date || "Not extracted"}
-                </span>
-              </div>
-              <div>
-                <span className="text-zinc-400 block font-medium">Sex:</span>
-                <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                  {psaRecord.sex === "M" ? "Male" : psaRecord.sex === "F" ? "Female" : psaRecord.sex || "-"}
-                </span>
-              </div>
-              <div>
-                <span className="text-zinc-400 block font-medium">Registry Number:</span>
-                <span className="font-mono text-zinc-800 dark:text-zinc-200">
-                  {psaRecord.registry_number || "N/A"}
-                </span>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       ) : ["sf1", "sf2", "sf5"].includes(document.document_type) ? null : (
         <div className="mt-6">
@@ -367,13 +408,26 @@ export default function DocumentDetailPage() {
       )}
 
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-        {/* Left Column: Image Preview with Front / Back Toggle */}
+        {/* Left Column: Image Preview with Front / Back Toggle & 90° Rotate */}
         {(() => {
-          const backImageUrl = document.extracted_fields?.back_image_url || document.extracted_fields?.images?.back;
-          let displayImageUrl = document.image_url;
-          let imageTitle = "Original Document";
+          const ef = document.extracted_fields || {};
+          const backImageUrl = ef.back_image_url || ef.images?.back;
+          const uprightPsaUrl = isPsa && (
+            ef.upperSectionDataUrl ||
+            ef.upper_section_data_url ||
+            ef.processedDataUrl ||
+            ef.processed_data_url ||
+            ef.bwDataUrl ||
+            ef.bw_data_url ||
+            ef.full_corrected_image_url ||
+            ef.preprocessed_image_url ||
+            ef.rotated_image_url ||
+            ef.processed_image_url
+          );
+          let displayImageUrl = uprightPsaUrl || document.image_url;
+          let imageTitle = isPsa ? "PSA Original Document" : "Original Document";
 
-          if (backImageUrl) {
+          if (backImageUrl && !isPsa) {
             displayImageUrl = activeSide === "back" ? backImageUrl : document.image_url;
             imageTitle = activeSide === "front" ? "Original Document — Front Side" : "Original Document — Back Side";
           }
@@ -384,39 +438,53 @@ export default function DocumentDetailPage() {
                 <h2 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">
                   {imageTitle}
                 </h2>
-                {backImageUrl && (
-                  <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
-                    <button
-                      type="button"
-                      onClick={() => setActiveSide("front")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${
-                        activeSide === "front"
-                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
-                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
-                      }`}
-                    >
-                      Front Side (Identity)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveSide("back")}
-                      className={`px-3 py-1.5 rounded-md transition-colors ${
-                        activeSide === "back"
-                          ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
-                          : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
-                      }`}
-                    >
-                      Back Side (Grades)
-                    </button>
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setImageRotation((prev) => (prev + 90) % 360)}
+                    title="Rotate scan 90° clockwise so sideways scans appear upright"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-white dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-600 transition shadow-2xs cursor-pointer"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    <span>90° Rotate</span>
+                  </button>
+                  {backImageUrl && !isPsa && (
+                    <div className="inline-flex rounded-lg p-0.5 bg-zinc-200 dark:bg-zinc-700 text-xs font-medium">
+                      <button
+                        type="button"
+                        onClick={() => setActiveSide("front")}
+                        className={`px-3 py-1.5 rounded-md transition-colors ${
+                          activeSide === "front"
+                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Front Side (Identity)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveSide("back")}
+                        className={`px-3 py-1.5 rounded-md transition-colors ${
+                          activeSide === "back"
+                            ? "bg-white dark:bg-zinc-900 text-indigo-600 dark:text-indigo-400 font-bold shadow-xs"
+                            : "text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Back Side (Grades)
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
               {displayImageUrl && displayImageUrl !== "uploaded-document" && !displayImageUrl.startsWith("uploaded-") ? (
-                <img 
-                  src={displayImageUrl} 
-                  alt={`Document ${document.id}`} 
-                  className="max-w-full h-auto rounded-md shadow-sm border border-zinc-300 dark:border-zinc-600"
-                />
+                <div className="w-full flex items-center justify-center overflow-hidden p-1 min-h-[300px]">
+                  <img
+                    src={displayImageUrl}
+                    alt={`Document ${document.id}`}
+                    style={{ transform: `rotate(${imageRotation}deg)`, transition: "transform 0.2s ease" }}
+                    className="max-w-full h-auto rounded-md shadow-sm border border-zinc-300 dark:border-zinc-600"
+                  />
+                </div>
               ) : (
                 <div className="text-zinc-500 italic py-16 text-center">
                   Scanned capture attached to this record.
@@ -428,7 +496,30 @@ export default function DocumentDetailPage() {
 
         {/* Right Column: OCR Results, Validation, Review Panel */}
         <div className="flex flex-col gap-6">
-          {["sf1", "sf2", "sf5"].includes(document.document_type) ? (
+          <div className="flex flex-col gap-2">
+            <OcrResultCard
+              fields={document.extracted_fields}
+              rawText={document.extracted_text}
+              onFieldChange={handleFieldChange}
+              confidence={document.extracted_fields?.ocr_confidence}
+              model={document.extracted_fields?.ocr_model}
+              provider={document.extracted_fields?.ocr_provider}
+              documentType={document.document_type}
+            />
+            {hasModifications && (
+              <div className="flex justify-end mt-2">
+                <button
+                  onClick={handleSaveCorrections}
+                  disabled={isSavingCorrections}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition shadow-sm disabled:opacity-50"
+                >
+                  {isSavingCorrections ? "Saving Changes..." : "Save Corrections"}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {["sf1", "sf2", "sf5"].includes(document.document_type) && (
             <ShsRosterReviewSection
               documentType={document.document_type as "sf1" | "sf2" | "sf5"}
               documentId={document.id}
@@ -446,28 +537,6 @@ export default function DocumentDetailPage() {
                 );
               }}
             />
-          ) : (
-            <div className="flex flex-col gap-2">
-              <OcrResultCard 
-                fields={document.extracted_fields} 
-                rawText={document.extracted_text}
-                onFieldChange={handleFieldChange}
-                confidence={document.extracted_fields?.ocr_confidence}
-                model={document.extracted_fields?.ocr_model}
-                provider={document.extracted_fields?.ocr_provider}
-              />
-              {hasModifications && (
-                <div className="flex justify-end mt-2">
-                  <button
-                    onClick={handleSaveCorrections}
-                    disabled={isSavingCorrections}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition shadow-sm disabled:opacity-50"
-                  >
-                    {isSavingCorrections ? "Saving Changes..." : "Save Corrections"}
-                  </button>
-                </div>
-              )}
-            </div>
           )}
           <ValidationSummary 
             report={{ 

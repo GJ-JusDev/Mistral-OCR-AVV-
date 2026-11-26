@@ -10,7 +10,7 @@
  */
 
 import type { GradeRecord, AttendanceRecord, ExtractedFields, LearnersObservedValues, LearnerProgressAndAchievement, GradingScaleItem } from "@/types/documents";
-import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
+import { evaluateAttendanceData, parseAttendanceNumber } from "../attendance/attendanceEvaluator";
 import { normalizeGradeRecords } from "../validation/gradeUtils";
 import { classifyFieldRecognition } from "./handwritingExtractor";
 import { parseAzureObservedValuesTable, parseAzureGradingScaleTable } from "./observedValuesParser";
@@ -19,6 +19,7 @@ export interface ParsedTableGradesResult {
   grades: GradeRecord[];
   attendance?: AttendanceRecord[];
   attendance_months?: string[];
+  attendance_confidence?: number;
   attendance_totals?: {
     computed_school_days?: number;
     computed_days_present?: number;
@@ -309,7 +310,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           let values: string[] = [];
           let printedTotal: string | undefined = undefined;
 
-          // Panatilihin ang decimal/fractions (0.5, 19.5), blangko, dash, at ihiwalay ang Total column
+          // Panatilihin ang decimal/fractions (0.5, 17.5, 201.5), blangko, dash, at ihiwalay ang Total column
           if (totalColIdx > 0 && totalColIdx < row.length) {
             values = row.slice(1, totalColIdx).map((c) => c.trim());
             const rawTotal = row[totalColIdx]?.trim();
@@ -318,12 +319,54 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
             values = row.slice(1).map((c) => c.trim());
           }
 
-          attendanceRecords.push({ label, values, total: printedTotal });
+          // Auto-sum if printed total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
+          let autoSum = 0;
+          let hasMonthlyNum = false;
+          for (const v of values) {
+            const num = parseAttendanceNumber(v);
+            if (num !== undefined) {
+              autoSum += num;
+              hasMonthlyNum = true;
+            }
+          }
+          if (hasMonthlyNum && (printedTotal === undefined || printedTotal === "" || printedTotal === "-" || printedTotal === "—")) {
+            autoSum = Math.round(autoSum * 100) / 100;
+            printedTotal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+          }
+
+          // Canonical DepEd metric label normalization
+          let normalizedLabel = label.trim();
+          if (lowerLabel.includes("school days") || lowerLabel.includes("araw ng pasok")) {
+            normalizedLabel = "No. of School Days";
+          } else if (lowerLabel.includes("present") || lowerLabel.includes("pumasok")) {
+            normalizedLabel = "No. of Days Present";
+          } else if (lowerLabel.includes("absent") || lowerLabel.includes("lumiban")) {
+            normalizedLabel = "No. of Days Absent";
+          }
+
+          // Compute honest row confidence score (0-100%)
+          const rowCells = (table.cells || []).filter((cell: any) => cell.rowIndex === r);
+          const confs = rowCells.map((c: any) => typeof c.confidence === "number" ? c.confidence : 0.95);
+          const avgCellConf = confs.length > 0 ? confs.reduce((a: number, b: number) => a + b, 0) / confs.length : 0.95;
+          const validNumCount = values.filter((v) => parseAttendanceNumber(v) !== undefined).length;
+          const expectedCount = months.length > 0 ? months.length : Math.max(values.length, 1);
+          const completeness = Math.min(validNumCount / expectedCount, 1.0);
+          const rowConfidence = Math.round(avgCellConf * (0.4 + 0.6 * completeness) * 100);
+
+          attendanceRecords.push({
+            label: normalizedLabel,
+            values,
+            total: printedTotal,
+            confidence: rowConfidence,
+            source_side: "front",
+          });
         }
       }
 
       if (attendanceRecords.length > 0) {
         result.attendance = attendanceRecords;
+        const totalRowConf = attendanceRecords.reduce((acc, rec) => acc + (rec.confidence ?? 0), 0);
+        result.attendance_confidence = Math.round(totalRowConf / attendanceRecords.length);
       }
       if (months.length > 0) {
         result.attendance_months = months;
@@ -700,8 +743,23 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           existing.status = status;
         }
         if (needsVerification) existing.needsVerification = true;
+        if (existing.confidence === undefined) {
+          const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
+          existing.confidence =
+            gradeRec?.confidence ??
+            gradeRec?.icr_confidence ??
+            (typeof (table as any)?.confidence === "number" ? (table as any).confidence : undefined) ??
+            (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
+            0.95;
+        }
       } else {
         const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
+        const fieldConf =
+          gradeRec?.confidence ??
+          gradeRec?.icr_confidence ??
+          (typeof (table as any)?.confidence === "number" ? (table as any).confidence : undefined) ??
+          (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
+          0.95;
 
         const record: GradeRecord = {
           category: currentCategory || undefined,
@@ -716,6 +774,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           final: candidateFinal,
           status,
           needsVerification,
+          confidence: fieldConf,
           recognition_type: gradeRec?.recognition_type || "printed_ocr",
           is_handwritten: gradeRec?.is_handwritten || false,
           icr_confidence: gradeRec?.icr_confidence,

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -48,7 +48,16 @@ export type UnifiedWorkflowStage =
   | "stage_d" // Stage D: Unified Cross-Document Comparison
   | "stage_e"; // Stage E: Discrepancies and Human Review
 
-export interface UnifiedBatchResultsViewProps {
+export const CANONICAL_DOC_ORDER: Record<string, number> = {
+  sf1: 1,
+  sf2: 2,
+  sf9: 3,
+  sf10: 4,
+  birth_cert: 5,
+  psa: 5,
+};
+
+interface UnifiedBatchResultsViewProps {
   report: BatchValidationReport;
   segments?: DocumentSegment[];
   extractedData?: Record<string, any>;
@@ -64,6 +73,7 @@ export interface UnifiedBatchResultsViewProps {
   onBackToUpload?: () => void;
   documentImageUrl?: string | null;
   initialStage?: UnifiedWorkflowStage;
+  persistenceWarnings?: string[];
 }
 
 type ResultTab =
@@ -83,6 +93,7 @@ export default function UnifiedBatchResultsView({
   onBackToUpload,
   documentImageUrl,
   initialStage = "stage_b",
+  persistenceWarnings = [],
 }: UnifiedBatchResultsViewProps) {
   const [currentStage, setCurrentStage] = useState<UnifiedWorkflowStage>(initialStage);
   const [activeTab, setActiveTab] = useState<ResultTab>("all_issues");
@@ -109,23 +120,69 @@ export default function UnifiedBatchResultsView({
   };
 
   const { summary, categorizedResults, learnerDossiers } = report;
-  const segments =
+  const rawSegments =
     propSegments && propSegments.length > 0
       ? propSegments
       : report.segments && report.segments.length > 0
       ? report.segments
       : [];
+  const segments = useMemo(() => {
+    const sorted = [...rawSegments].sort((a, b) => {
+      const orderA = CANONICAL_DOC_ORDER[a.documentType?.toLowerCase()] ?? 99;
+      const orderB = CANONICAL_DOC_ORDER[b.documentType?.toLowerCase()] ?? 99;
+      return orderA - orderB;
+    });
+
+    // Unify any split SF9 segments if multiple exist in the raw list
+    const sf9Segments = sorted.filter((s) => s.documentType === "sf9");
+    if (sf9Segments.length > 1) {
+      const primarySf9 = sf9Segments[0];
+      const allSf9Pages = sf9Segments.flatMap((s) => s.pages || []);
+      const mergedSf9: DocumentSegment = {
+        ...primarySf9,
+        pageCount: allSf9Pages.length || primarySf9.pageCount,
+        pageNumbers: Array.from(new Set(sf9Segments.flatMap((s) => s.pageNumbers || []))).sort((a, b) => a - b),
+        pages: allSf9Pages,
+        combinedText: sf9Segments.map((s) => s.combinedText).filter(Boolean).join("\n\n"),
+      };
+      const nonSf9 = sorted.filter((s) => s.documentType !== "sf9");
+      return [...nonSf9, mergedSf9].sort((a, b) => {
+        const orderA = CANONICAL_DOC_ORDER[a.documentType?.toLowerCase()] ?? 99;
+        const orderB = CANONICAL_DOC_ORDER[b.documentType?.toLowerCase()] ?? 99;
+        return orderA - orderB;
+      });
+    }
+
+    return sorted;
+  }, [rawSegments]);
 
   // Synthesize fallback extracted data if prop is empty
   const effectiveExtractedData: Record<string, any> = { ...propExtractedData };
   for (const seg of segments) {
     if (!effectiveExtractedData[seg.id]) {
+      const isSf9 = seg.documentType === "sf9";
+      const sf9Source = isSf9 ? learnerDossiers.map((d) => d.matchedSources.sf9?.raw).find(Boolean) : null;
       effectiveExtractedData[seg.id] = {
         document_type: seg.documentType,
         form_title: seg.formTitle,
         school_year: report.schoolYear,
         grade_level: report.gradeLevel,
         section: report.section,
+        ...(sf9Source ? {
+          grades: sf9Source.grades || [],
+          attendance: sf9Source.attendance,
+          attendance_months: sf9Source.attendance_months,
+          attendance_totals: sf9Source.attendance_totals,
+          attendance_percentage: sf9Source.attendance_percentage,
+          absence_percentage: sf9Source.absence_percentage,
+          attendance_risk_status: sf9Source.attendance_risk_status,
+          attendance_discrepancy_details: sf9Source.attendance_discrepancy_details,
+          general_average: sf9Source.general_average,
+          identity: sf9Source.identity,
+          observed_values: sf9Source.observed_values,
+          name: sf9Source.name,
+          lrn: sf9Source.lrn,
+        } : {}),
         learners: learnerDossiers
           .map((d) => {
             const src =
@@ -133,11 +190,63 @@ export default function UnifiedBatchResultsView({
                 ? d.matchedSources.sf1
                 : seg.documentType === "sf2"
                 ? d.matchedSources.sf2
+                : seg.documentType === "sf9"
+                ? d.matchedSources.sf9
+                : seg.documentType === "sf10"
+                ? d.matchedSources.sf10
+                : seg.documentType === "birth_cert"
+                ? d.matchedSources.psa
                 : null;
             return src?.raw;
           })
           .filter(Boolean),
       };
+    } else if (seg.documentType === "sf9") {
+      // Ensure SF9 existing data has grades and attendance if missing
+      const cur = effectiveExtractedData[seg.id] || {};
+      const sf9Source = learnerDossiers.map((d) => d.matchedSources.sf9?.raw).find(Boolean);
+      if (sf9Source) {
+        if (!cur.grades || (Array.isArray(cur.grades) && cur.grades.length === 0)) {
+          cur.grades = sf9Source.grades || [];
+        }
+        if (!cur.general_average && sf9Source.general_average) {
+          cur.general_average = sf9Source.general_average;
+        }
+        if (!cur.observed_values && sf9Source.observed_values) {
+          cur.observed_values = sf9Source.observed_values;
+        }
+        if (!cur.attendance && sf9Source.attendance) {
+          cur.attendance = sf9Source.attendance;
+        }
+        if (!cur.attendance_totals && sf9Source.attendance_totals) {
+          cur.attendance_totals = sf9Source.attendance_totals;
+        }
+        if (!cur.attendance_months && sf9Source.attendance_months) {
+          cur.attendance_months = sf9Source.attendance_months;
+        }
+        if (cur.attendance_percentage === undefined && sf9Source.attendance_percentage !== undefined) {
+          cur.attendance_percentage = sf9Source.attendance_percentage;
+        }
+        if (cur.absence_percentage === undefined && sf9Source.absence_percentage !== undefined) {
+          cur.absence_percentage = sf9Source.absence_percentage;
+        }
+        if (!cur.attendance_risk_status && sf9Source.attendance_risk_status) {
+          cur.attendance_risk_status = sf9Source.attendance_risk_status;
+        }
+        if (!cur.attendance_discrepancy_details && sf9Source.attendance_discrepancy_details) {
+          cur.attendance_discrepancy_details = sf9Source.attendance_discrepancy_details;
+        }
+        if (!cur.identity && sf9Source.identity) {
+          cur.identity = sf9Source.identity;
+        }
+        if (!cur.name && sf9Source.name) {
+          cur.name = sf9Source.name;
+        }
+        if (!cur.lrn && sf9Source.lrn) {
+          cur.lrn = sf9Source.lrn;
+        }
+      }
+      effectiveExtractedData[seg.id] = cur;
     }
   }
 
@@ -429,13 +538,13 @@ export default function UnifiedBatchResultsView({
 
             {/* Uploaded Files Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-              {(uploadedFiles.length > 0 ? uploadedFiles : segments.map((s) => ({
+              {(uploadedFiles.length > 0 ? uploadedFiles : segments.map((s: any) => ({
                 name: s.sourceFileName || "Document.pdf",
                 size: `${s.pageCount} page(s)`,
                 type: s.documentType.toUpperCase(),
                 dataUrl: s.imageUrl || "",
                 pageCount: s.pageCount,
-              }))).map((file, fIdx) => (
+              }))).map((file: any, fIdx: number) => (
                 <div
                   key={fIdx}
                   className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30 flex items-center justify-between gap-3 text-xs"
@@ -474,6 +583,11 @@ export default function UnifiedBatchResultsView({
           onRetrySegment={onRetrySegment}
           onProceedToIdentityMatching={() => setCurrentStage("stage_c")}
           documentImageUrl={documentImageUrl}
+          batchContext={{
+            section: report?.section,
+            gradeLevel: report?.gradeLevel,
+            schoolYear: report?.schoolYear,
+          }}
         />
       )}
 
@@ -1112,6 +1226,27 @@ export default function UnifiedBatchResultsView({
                 </tbody>
               </table>
             </div>
+
+            {/* Non-blocking database persistence warnings notice */}
+            {persistenceWarnings && persistenceWarnings.length > 0 && (
+              <div
+                data-testid="persistence-warnings-banner"
+                className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-xs text-amber-900 dark:text-amber-200 space-y-2 shadow-xs"
+              >
+                <div className="flex items-center gap-2 font-bold text-amber-800 dark:text-amber-300">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span>Database Persistence Notice ({persistenceWarnings.length})</span>
+                </div>
+                <p className="text-[11px] text-amber-700 dark:text-amber-300/90 leading-relaxed">
+                  Validation report and cross-document comparison were generated successfully. However, one or more non-blocking database persistence warnings occurred on secondary tables:
+                </p>
+                <ul className="list-disc list-inside space-y-1 font-mono text-[11px] text-amber-800 dark:text-amber-300/80 bg-amber-100/50 dark:bg-amber-900/30 p-2.5 rounded-lg border border-amber-200/60 dark:border-amber-800/60">
+                  {persistenceWarnings.map((warn, wIdx) => (
+                    <li key={wIdx} className="break-all">{warn}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </div>
       )}

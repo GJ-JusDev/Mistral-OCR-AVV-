@@ -1,7 +1,7 @@
 import type { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
 import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
-import { evaluateAttendanceData } from "../attendance/attendanceEvaluator";
+import { evaluateAttendanceData, parseAttendanceNumber } from "../attendance/attendanceEvaluator";
 import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
 import { parseTextObservedValuesAndAchievement } from "./observedValuesParser";
 
@@ -126,29 +126,33 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       fields.learner_progress_achievement = tableResult.learner_progress_achievement;
       fields.grading_scale = tableResult.grading_scale || tableResult.learner_progress_achievement;
     }
+    if (tableResult.attendance && tableResult.attendance.length > 0) {
+      fields.attendance = tableResult.attendance;
+    }
+    if (tableResult.attendance_months && tableResult.attendance_months.length > 0) {
+      fields.attendance_months = tableResult.attendance_months;
+    }
+    if (tableResult.attendance_totals) {
+      fields.attendance_totals = tableResult.attendance_totals;
+    }
+    if (tableResult.attendance_percentage !== undefined) {
+      fields.attendance_percentage = tableResult.attendance_percentage;
+    }
+    if (tableResult.absence_percentage !== undefined) {
+      fields.absence_percentage = tableResult.absence_percentage;
+    }
+    if (tableResult.attendance_risk_status !== undefined) {
+      fields.attendance_risk_status = tableResult.attendance_risk_status;
+    }
+    if (tableResult.attendance_discrepancy_details) {
+      fields.attendance_discrepancy_details = tableResult.attendance_discrepancy_details;
+    }
+    if (tableResult.attendance_confidence !== undefined) {
+      fields.attendance_confidence = tableResult.attendance_confidence;
+    }
+
     if (tableResult.grades && tableResult.grades.length > 0) {
       fields.grades = tableResult.grades;
-      if (tableResult.attendance && tableResult.attendance.length > 0) {
-        fields.attendance = tableResult.attendance;
-      }
-      if (tableResult.attendance_months && tableResult.attendance_months.length > 0) {
-        fields.attendance_months = tableResult.attendance_months;
-      }
-      if (tableResult.attendance_totals) {
-        fields.attendance_totals = tableResult.attendance_totals;
-      }
-      if (tableResult.attendance_percentage !== undefined) {
-        fields.attendance_percentage = tableResult.attendance_percentage;
-      }
-      if (tableResult.absence_percentage !== undefined) {
-        fields.absence_percentage = tableResult.absence_percentage;
-      }
-      if (tableResult.attendance_risk_status !== undefined) {
-        fields.attendance_risk_status = tableResult.attendance_risk_status;
-      }
-      if (tableResult.attendance_discrepancy_details) {
-        fields.attendance_discrepancy_details = tableResult.attendance_discrepancy_details;
-      }
       if (tableResult.general_average !== undefined) {
         fields.general_average = tableResult.general_average;
       }
@@ -307,10 +311,42 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           values = cells.slice(1).map(c => c.trim());
         }
 
+        // Auto-sum if total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
+        let autoSum = 0;
+        let hasMonthlyNum = false;
+        for (const v of values) {
+          const num = parseAttendanceNumber(v);
+          if (num !== undefined) {
+            autoSum += num;
+            hasMonthlyNum = true;
+          }
+        }
+        if (hasMonthlyNum && (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—")) {
+          autoSum = Math.round(autoSum * 100) / 100;
+          totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+        }
+
+        // Normalize canonical DepEd label
+        let normLabel = subject.trim();
+        if (subjectLower.includes("school days") || subjectLower.includes("araw ng pasok")) {
+          normLabel = "No. of School Days";
+        } else if (subjectLower.includes("present") || subjectLower.includes("pumasok")) {
+          normLabel = "No. of Days Present";
+        } else if (subjectLower.includes("absent") || subjectLower.includes("lumiban")) {
+          normLabel = "No. of Days Absent";
+        }
+
+        const validNumCount = values.filter((v) => parseAttendanceNumber(v) !== undefined).length;
+        const expectedCount = (fields.attendance_months && fields.attendance_months.length > 0) ? fields.attendance_months.length : Math.max(values.length, 1);
+        const completeness = Math.min(validNumCount / expectedCount, 1.0);
+        const rowConf = Math.round((fields.ocr_confidence ?? 95) * (0.4 + 0.6 * completeness));
+
         attendance.push({
-          label: subject,
+          label: normLabel,
           values,
           total: totalVal,
+          confidence: rowConf,
+          source_side: "front",
         });
         continue;
       }
@@ -770,7 +806,37 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         }
 
         if (values.length > 0) {
-          attendance.push({ label, values, total: totalVal });
+          // Auto-sum if total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
+          let autoSum = 0;
+          let hasMonthlyNum = false;
+          for (const v of values) {
+            const num = parseAttendanceNumber(v);
+            if (num !== undefined) {
+              autoSum += num;
+              hasMonthlyNum = true;
+            }
+          }
+          if (hasMonthlyNum && (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—")) {
+            autoSum = Math.round(autoSum * 100) / 100;
+            totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+          }
+
+          let normLabel = label.trim();
+          const lower = normLabel.toLowerCase();
+          if (lower.includes("school days") || lower.includes("araw ng pasok")) {
+            normLabel = "No. of School Days";
+          } else if (lower.includes("present") || lower.includes("pumasok")) {
+            normLabel = "No. of Days Present";
+          } else if (lower.includes("absent") || lower.includes("lumiban")) {
+            normLabel = "No. of Days Absent";
+          }
+
+          const validNumCount = values.filter((v) => parseAttendanceNumber(v) !== undefined).length;
+          const expectedCount = detectedMonths.length > 0 ? detectedMonths.length : Math.max(values.length, 1);
+          const completeness = Math.min(validNumCount / expectedCount, 1.0);
+          const rowConf = Math.round((fields.ocr_confidence ?? 95) * (0.4 + 0.6 * completeness));
+
+          attendance.push({ label: normLabel, values, total: totalVal, confidence: rowConf, source_side: "front" });
           idx = j - 1;
         }
       }
@@ -787,6 +853,8 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   }
   if (attendance.length > 0) {
     fields.attendance = attendance;
+    const totalRowConf = attendance.reduce((acc, rec) => acc + (rec.confidence ?? 0), 0);
+    fields.attendance_confidence = Math.round(totalRowConf / attendance.length);
     if (fields.attendance_months && fields.attendance_months.length > 0) {
       const schoolDaysRec = attendance.find((a) =>
         a.label.toLowerCase().includes("school days") || a.label.toLowerCase().includes("bilang ng araw ng pasok")

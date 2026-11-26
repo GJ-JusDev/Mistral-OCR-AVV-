@@ -1,0 +1,26 @@
+-- 033_sf10_cross_document_validation_types.sql
+-- NOT EXECUTED AUTOMATICALLY. Review and apply manually.
+--
+-- Adds the SF10-SHS pairwise comparator types introduced in the
+-- batch cross-document validator:
+--   'SF1_SF10' : SF10 Learner's Information <-> SF1 School Register
+--                (LRN, Full Name, Sex, normalized Birth Date)
+--   'PSA_SF10' : SF10 Learner's Information <-> PSA Birth Certificate
+--                (civil identity only: Full Name, Sex, Birth Date; no LRN)
+--
+-- Before applying, confirm the actual CHECK constraint name with:
+--   SELECT conname, pg_get_constraintdef(oid)
+--   FROM pg_constraint
+--   WHERE conrelid = 'public.cross_document_validations'::regclass AND contype = 'c';
+
+-- ALTER TABLE public.cross_document_validations
+--   DROP CONSTRAINT IF EXISTS cross_document_validations_validation_type_check;
+--
+-- ALTER TABLE public.cross_document_validations
+--   ADD CONSTRAINT cross_document_validations_validation_type_check
+--   CHECK (validation_type IN (
+--     'PSA_SF1', 'SF1_SF2', 'SF1_SF5', 'SF1_SF9',
+--     'SF9_SF10', 'SF5_SF9', 'SF5_SF10',
+--     'SF1_SF10', 'PSA_SF10',
+--     'CONSOLIDATED_SHS'
+--   ));

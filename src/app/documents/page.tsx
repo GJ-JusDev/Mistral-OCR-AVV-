@@ -4,7 +4,8 @@ import React, { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
-import DocumentTable from "@/components/documents/DocumentTable";
+import DocumentTable, { resolveDisplayStudentName } from "@/components/documents/DocumentTable";
+import { isBlacklistedStudentName } from "@/lib/validation/nameComparison";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { DataTableContainer } from "@/components/ui/DataTableContainer";
 import { Button } from "@/components/ui/Button";
@@ -86,17 +87,28 @@ export default function DocumentsPage() {
         return true;
       }
 
-      // Check extracted fields (learner name, LRN, section, grade)
+      // Check reconstructed sanitized display name first (never matches blacklisted headers)
+      const displayName = resolveDisplayStudentName(doc).toLowerCase();
+      if (displayName.includes(q)) {
+        return true;
+      }
+
+      // Check extracted fields (learner name, LRN, section, grade) with blacklist filtering
+      const rawName = ef.name && !isBlacklistedStudentName(ef.name) ? String(ef.name).toLowerCase() : "";
+      const rawFirst = ef.first_name && !isBlacklistedStudentName(ef.first_name) ? String(ef.first_name).toLowerCase() : "";
+      const rawLast = ef.last_name && !isBlacklistedStudentName(ef.last_name) ? String(ef.last_name).toLowerCase() : "";
+      const rawChild = ef.child_name && !isBlacklistedStudentName(ef.child_name) ? String(ef.child_name).toLowerCase() : "";
+
       if (
-        (ef.name && String(ef.name).toLowerCase().includes(q)) ||
-        (ef.first_name && String(ef.first_name).toLowerCase().includes(q)) ||
-        (ef.last_name && String(ef.last_name).toLowerCase().includes(q)) ||
+        (rawName && rawName.includes(q)) ||
+        (rawFirst && rawFirst.includes(q)) ||
+        (rawLast && rawLast.includes(q)) ||
+        (rawChild && rawChild.includes(q)) ||
         (ef.lrn && String(ef.lrn).toLowerCase().includes(q)) ||
         (ef.learner_reference_number && String(ef.learner_reference_number).toLowerCase().includes(q)) ||
         (ef.section && String(ef.section).toLowerCase().includes(q)) ||
         (ef.grade_level && String(ef.grade_level).toLowerCase().includes(q)) ||
-        (ef.school_year && String(ef.school_year).toLowerCase().includes(q)) ||
-        (ef.child_name && String(ef.child_name).toLowerCase().includes(q))
+        (ef.school_year && String(ef.school_year).toLowerCase().includes(q))
       ) {
         return true;
       }

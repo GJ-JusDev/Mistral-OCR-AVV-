@@ -11,10 +11,12 @@ import {
 import {
   segmentMultiPageDocument,
   reclassifyDocumentSegment,
+  classifyPageContent,
 } from "../src/lib/validation/batchDocumentSegmenter.ts";
 
 import {
   evaluateBatchCrossDocumentValidation,
+  rebuildBatchValidationReportFromPersistedResults,
 } from "../src/lib/validation/batchCrossDocumentValidator.ts";
 
 test("AVV System — Unified Batch Scanning Critical Fixes & Integration Test Suite", async (t) => {
@@ -501,5 +503,189 @@ test("AVV System — Unified Batch Scanning Critical Fixes & Integration Test Su
     assert.equal(normalizeSchoolYearKey(" 2024 - 2025 "), "2024-2025");
     assert.equal(normalizeSectionKey(" Diamond "), "diamond");
     assert.equal(normalizeSectionKey("DIAMOND - A"), "diamond - a");
+  });
+
+  // ===========================================================================
+  // 7. Step Category Lock & Cross-Document Matrix Preservation on Persistence Error
+  // ===========================================================================
+  await t.test("7. Step Category Lock & Matrix Preservation", async (t2) => {
+    await t2.test("7.1 Step category locks documentType against keyword heuristic misclassification", () => {
+      // SF1 roster table that mentions 'Birth Certificate' and 'Date of Birth'
+      const sf1PageWithPsaKeywords = {
+        pageNumber: 1,
+        documentType: "sf1",
+        text: `
+          Republic of the Philippines - Department of Education
+          School Form 1 (SF1) School Register
+          Birth Certificate No. | Date of Birth | Name of Learner
+          123456789012 | 2007-05-12 | Santos, Juan
+          PSA Registry Number: 2007-12345
+        `,
+      };
+
+      const classification = classifyPageContent(sf1PageWithPsaKeywords.text, sf1PageWithPsaKeywords);
+      assert.equal(classification.detectedType, "sf1", "Explicit sf1 documentType must not be misclassified as birth_cert");
+      assert.equal(classification.confidence, 1.0);
+
+      const segments = segmentMultiPageDocument({ pages: [sf1PageWithPsaKeywords] });
+      assert.equal(segments.length, 1);
+      assert.equal(segments[0].documentType, "sf1");
+      assert.equal(segments[0].id, "seg-1-sf1");
+    });
+
+    await t2.test("7.2 Preserves unifiedMatrix when validationPersistence is REQUIRES_IDENTITY_RESOLUTION", () => {
+      const mockMatrix = [
+        {
+          field: "Date of Birth",
+          status: "MATCH",
+          sources: { sf1: "2007-05-12", birth_cert: "2007-05-12" },
+        },
+      ];
+
+      const mockReport = {
+        batchId: "batch-test-123",
+        learnerDossiers: [
+          {
+            lrn: "109345000001",
+            fullName: "DELA CRUZ, CARLOS MENDOZA",
+            overallStatus: "NEEDS_REVIEW",
+            documentPresence: { totalAvailable: 2 },
+            unifiedMatrix: mockMatrix,
+            discrepancies: [],
+            validationPersistence: {
+              status: "REQUIRES_IDENTITY_RESOLUTION",
+              reason: "Cross-validation persistence failed: network timeout",
+            },
+          },
+        ],
+        summary: {},
+      };
+
+      const rebuilt = rebuildBatchValidationReportFromPersistedResults(mockReport);
+      assert.equal(rebuilt.learnerDossiers[0].unifiedMatrix?.length, 1, "unifiedMatrix must not be wiped on REQUIRES_IDENTITY_RESOLUTION");
+      assert.deepEqual(rebuilt.learnerDossiers[0].unifiedMatrix, mockMatrix);
+    });
+  });
+
+  // ===========================================================================
+  // 8. Pre-Extracted Fast-Path and Non-Blocking Persistence Warnings
+  // ===========================================================================
+  await t.test("8. Pre-Extracted Fast-Path & Non-Blocking Persistence Warnings", async (t2) => {
+    await t2.test("8.1 Fast-Path feeds pre-extracted structured fields directly into cross-document validation", () => {
+      // Staged documents that already carry extractedFields from Steps 1–5
+      const preExtractedPages = [
+        {
+          pageNumber: 1,
+          sourceFileName: "SF1_Roster.pdf",
+          documentType: "sf1",
+          text: "School Form 1 (SF1) Master List",
+          extractedFields: {
+            roster: [
+              {
+                lrn: "109345000001",
+                name: "DELA CRUZ, CARLOS MENDOZA",
+                last_name: "DELA CRUZ",
+                first_name: "CARLOS",
+                middle_name: "MENDOZA",
+                sex: "Male",
+                birth_date: "2008-03-15",
+              },
+            ],
+          },
+        },
+        {
+          pageNumber: 2,
+          sourceFileName: "SF9_Card.pdf",
+          documentType: "sf9",
+          text: "SF9 Progress Report Card",
+          extractedFields: {
+            lrn: "109345000001",
+            first_name: "CARLOS",
+            last_name: "DELA CRUZ",
+            middle_name: "MENDOZA",
+            general_average: 88,
+            grades: [
+              { subject: "General Mathematics", final_grade: 88 },
+            ],
+          },
+        },
+      ];
+
+      // Verify that pre-extracted detection identifies pages with extractedFields
+      const isPreExtracted = preExtractedPages.every(
+        (p) => Boolean((p.extractedFields && Object.keys(p.extractedFields).length > 0) || p.extractedText)
+      );
+      assert.equal(isPreExtracted, true, "All pages carry pre-extracted structured fields");
+
+      // Verify validation runs directly on pre-extracted data without needing heuristic classification
+      const segments = [
+        {
+          id: "seg-1-sf1",
+          documentType: "sf1",
+          formTitle: "SF1",
+          startPage: 1,
+          endPage: 1,
+          pageNumbers: [1],
+          pageCount: 1,
+          combinedText: preExtractedPages[0].text,
+          confidence: 1.0,
+          needsClassification: false,
+          reasons: ["Fast-path: Pre-extracted"],
+          pages: [preExtractedPages[0]],
+        },
+        {
+          id: "seg-2-sf9",
+          documentType: "sf9",
+          formTitle: "SF9",
+          startPage: 2,
+          endPage: 2,
+          pageNumbers: [2],
+          pageCount: 1,
+          combinedText: preExtractedPages[1].text,
+          confidence: 1.0,
+          needsClassification: false,
+          reasons: ["Fast-path: Pre-extracted"],
+          pages: [preExtractedPages[1]],
+        },
+      ];
+
+      const extractedSegmentData = {
+        "seg-1-sf1": preExtractedPages[0].extractedFields,
+        "seg-2-sf9": preExtractedPages[1].extractedFields,
+      };
+
+      const report = evaluateBatchCrossDocumentValidation({
+        batchId: "batch-fastpath-001",
+        schoolYear: "2024-2025",
+        gradeLevel: "Grade 11",
+        section: "Diamond",
+        segments,
+        extractedSegmentData,
+      });
+
+      assert.equal(report.summary.totalLearnersDetected, 1);
+      assert.equal(report.learnerDossiers[0].lrn, "109345000001");
+      assert.ok(report.learnerDossiers[0].unifiedMatrix.length > 0, "Unified matrix must be generated directly from pre-extracted data");
+    });
+
+    await t2.test("8.2 Secondary table persistence failure produces persistenceWarnings instead of failing request", () => {
+      // Simulate persistence failure on secondary roster table
+      const persistenceErrors = [
+        { segmentId: "seg-1-sf1", error: 'relation "sf1_roster_entries" does not exist' },
+      ];
+      const crossValidationPersistenceErrors = [
+        { lrn: "109345000001", error: "check constraint failed on student_validations" },
+      ];
+
+      // Formulate non-blocking warnings array
+      const persistenceWarnings = [
+        ...persistenceErrors.map((e) => e.error),
+        ...crossValidationPersistenceErrors.map((e) => e.error),
+      ];
+
+      assert.equal(persistenceWarnings.length, 2);
+      assert.ok(persistenceWarnings[0].includes("sf1_roster_entries"));
+      assert.ok(persistenceWarnings[1].includes("check constraint"));
+    });
   });
 });

@@ -1,0 +1,553 @@
+/**
+ * SF10-SHS (Learner's Permanent Academic Record for Senior High School) Parser
+ *
+ * Extracts from raw OCR markdown/text:
+ *   - LEARNER'S INFORMATION: Last / First / Middle name, LRN, Date of Birth
+ *     (normalized via the universal birthdate normalizer), Sex.
+ *   - SCHOLASTIC RECORD headers per semester block: School, School ID,
+ *     Grade Level, SY, Semester, Track/Strand, Section.
+ *   - Subject rows per semester: subject type (CORE / APPLIED / SPECIALIZED),
+ *     subject title, quarter grades, SEM FINAL GRADE, ACTION TAKEN.
+ *   - "General Ave. for the Semester" printed value per block.
+ *
+ * Section headings (LEARNER'S INFORMATION, SCHOLASTIC RECORD,
+ * ELIGIBILITY FOR SHS ENROLMENT, ...) are strictly rejected as values.
+ */
+
+import { normalizeBirthDate, type NormalizedBirthDate } from "../validation/birthDateNormalizer";
+import { normalizeLrn, isValidLrn } from "../validation/patterns";
+import { isBlacklistedStudentName } from "../validation/nameComparison";
+
+export { normalizeBirthDate, toIsoBirthDate, formatBirthDateDisplay, compareBirthDates } from "../validation/birthDateNormalizer";
+
+export type Sf10SubjectType = "CORE" | "APPLIED" | "SPECIALIZED";
+
+export interface Sf10SubjectRow {
+  subject_type?: Sf10SubjectType;
+  subject: string;
+  /** Quarter grades as printed for the semester (Q1/Q2 for Sem 1, Q3/Q4 for Sem 2). */
+  q1?: number;
+  q2?: number;
+  q3?: number;
+  q4?: number;
+  sem_final_grade?: number;
+  action_taken?: string;
+}
+
+export interface Sf10ScholasticRecord {
+  school_name?: string;
+  school_id?: string;
+  grade_level?: "Grade 11" | "Grade 12";
+  school_year?: string;
+  semester?: "1st Semester" | "2nd Semester";
+  track_strand?: string;
+  section?: string;
+  subjects: Sf10SubjectRow[];
+  general_average?: number;
+}
+
+export interface Sf10LearnerInformation {
+  last_name: string;
+  first_name: string;
+  middle_name: string;
+  suffix?: string;
+  full_name: string;
+  lrn: string;
+  birth_date: string; // ISO YYYY-MM-DD
+  birth_date_display: string; // "06/23/2004 (June 23, 2004)"
+  birth_date_raw: string;
+  birth_date_normalized: NormalizedBirthDate | null;
+  sex: "Male" | "Female" | "";
+}
+
+export interface Sf10ShsParseResult {
+  learner: Sf10LearnerInformation;
+  scholastic_records: Sf10ScholasticRecord[];
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Section header rejection
+// ---------------------------------------------------------------------------
+
+const SF10_SECTION_HEADER_RE =
+  /^(?:learner'?s?\s*information|scholastic\s*record|eligibility\s*for\s*shs\s*enrol+ment|senior\s*high\s*school\s*student\s*permanent\s*record|learner'?s?\s*permanent\s*academic\s*record|certification|remedial\s*class(?:es)?|subjects?|indicate\s*if\s*(?:the\s*)?subject.*|quarter(?:s)?|sem(?:ester)?\s*final\s*grade|action\s*taken|first\s*semester|second\s*semester|1st\s*semester|2nd\s*semester|core|applied|specialized|republic\s*of\s*the\s*philippines|department\s*of\s*education)$/i;
+
+export function isSf10SectionHeader(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const cleaned = value
+    .replace(/[|*_`#]+/g, " ")
+    .replace(/[’`]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[:.]+$/, "")
+    .trim();
+  if (!cleaned) return false;
+  return SF10_SECTION_HEADER_RE.test(cleaned) || isBlacklistedStudentName(cleaned);
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const NEXT_LABEL_LOOKAHEAD =
+  "(?=\\s{2,}|\\s*\\||\\b(?:LAST\\s*NAME|FIRST\\s*NAME|MIDDLE\\s*NAME|NAME\\s*EXTN|LRN|DATE\\s*OF\\s*BIRTH|BIRTH\\s*DATE|SEX|DATE\\s*OF\\s*SHS\\s*ADMISSION|SCHOOL\\s*ID|SCHOOL|GRADE\\s*LEVEL|S\\.?\\s*Y\\.?|SEM(?:ESTER)?|TRACK\\s*/\\s*STRAND|SECTION)\\b\\s*[:\\-]|$)";
+
+function cleanLine(line: string): string {
+  return line.replace(/[*_`#]+/g, " ").replace(/[’]/g, "'").replace(/\t/g, "  ");
+}
+
+function cleanValue(v: string | undefined | null): string {
+  return (v || "")
+    .replace(/[|*_`]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .replace(/^[:\-]+\s*/, "")
+    .replace(/[,;:\-]+$/, "")
+    .trim();
+}
+
+function labeled(line: string, labelPattern: string): string {
+  const re = new RegExp(`\\b(?:${labelPattern})\\s*[:\\-]?\\s*(.+?)${NEXT_LABEL_LOOKAHEAD}`, "i");
+  const m = line.replace(/\|/g, "  |  ").match(re);
+  return m ? cleanValue(m[1]) : "";
+}
+
+function toGradeNumber(token: string): number | undefined {
+  const t = token.trim();
+  if (!/^\d{2,3}(?:\.\d{1,3})?$/.test(t)) return undefined;
+  const n = parseFloat(t);
+  return n >= 60 && n <= 100 ? n : undefined;
+}
+
+function normalizeGradeLevel(raw: string): "Grade 11" | "Grade 12" | undefined {
+  const t = raw.toUpperCase().replace(/GRADE/g, "").trim();
+  if (/^(?:11|XI)\b/.test(t)) return "Grade 11";
+  if (/^(?:12|XII)\b/.test(t)) return "Grade 12";
+  return undefined;
+}
+
+function normalizeSemester(raw: string): "1st Semester" | "2nd Semester" | undefined {
+  const t = raw.toLowerCase().trim();
+  if (/^(?:1st|first|1|i)\b/.test(t)) return "1st Semester";
+  if (/^(?:2nd|second|2|ii)\b/.test(t)) return "2nd Semester";
+  return undefined;
+}
+
+function normalizeSubjectType(raw: string): Sf10SubjectType | undefined {
+  const t = raw.trim().toUpperCase().replace(/[^A-Z]/g, "");
+  if (t === "CORE") return "CORE";
+  if (t === "APPLIED" || t === "APPLIEDSUBJECT") return "APPLIED";
+  if (t === "SPECIALIZED" || t === "SPECIALIZEDSUBJECT" || t === "SPECIALISED") return "SPECIALIZED";
+  return undefined;
+}
+
+const ACTION_RE = /^(?:PASSED|PASS|FAILED|FAIL|INC|INCOMPLETE|DRP|DROPPED|CONDITIONAL|PROMOTED|RETAINED)$/i;
+
+function normalizeAction(raw: string): string {
+  const t = raw.trim().toUpperCase();
+  if (t === "PASS") return "PASSED";
+  if (t === "FAIL") return "FAILED";
+  if (t === "INCOMPLETE") return "INC";
+  if (t === "DROPPED") return "DRP";
+  return t;
+}
+
+function splitRow(line: string): string[] {
+  if (line.includes("|")) {
+    return line
+      .split("|")
+      .map((c) => cleanValue(c))
+      .filter((c) => c.length > 0 && !/^:?-{2,}:?$/.test(c));
+  }
+  return line
+    .split(/\s{2,}|\t/)
+    .map((c) => cleanValue(c))
+    .filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Learner's Information
+// ---------------------------------------------------------------------------
+
+function splitCommaName(full: string): { last: string; first: string; middle: string } {
+  const [lastPart, ...rest] = full.split(",").map((s) => s.trim());
+  const tokens = rest.join(" ").trim().split(/\s+/).filter(Boolean);
+  if (tokens.length <= 1) return { last: lastPart, first: tokens[0] || "", middle: "" };
+  return { last: lastPart, first: tokens.slice(0, -1).join(" "), middle: tokens[tokens.length - 1] };
+}
+
+function extractLearnerInformation(lines: string[], warnings: string[]): Sf10LearnerInformation {
+  // Scope to the region before ELIGIBILITY / SCHOLASTIC RECORD when possible.
+  const stopIdx = lines.findIndex((l) => /\b(?:ELIGIBILITY\s*FOR\s*SHS|SCHOLASTIC\s*RECORD)\b/i.test(l));
+  const scope = stopIdx > 0 ? lines.slice(0, stopIdx) : lines;
+  const scopeText = scope.join("\n");
+
+  let last = "";
+  let first = "";
+  let middle = "";
+
+  for (const line of scope) {
+    if (!last) last = labeled(line, "LAST\\s*NAME|SURNAME");
+    if (!first) first = labeled(line, "FIRST\\s*NAME|GIVEN\\s*NAME");
+    if (!middle) middle = labeled(line, "MIDDLE\\s*NAME");
+  }
+  [last, first, middle] = [last, first, middle].map((v) => (isSf10SectionHeader(v) ? "" : v));
+
+  if (!last || !first) {
+    // "NAME: GOMEZ, JUSTIN LOQUILLANO" or a bare "GOMEZ, JUSTIN LOQUILLANO" line.
+    for (const line of scope) {
+      const labeledName = labeled(line, "(?:LEARNER'?S?\\s*)?NAME");
+      const candidate = labeledName || cleanValue(line);
+      if (!candidate.includes(",")) continue;
+      if (/\d/.test(candidate) || isSf10SectionHeader(candidate)) continue;
+      if (!/^[A-ZÑ][A-ZÑ\s.'\-]+,\s*[A-ZÑ][A-ZÑ\s.'\-]+$/i.test(candidate)) continue;
+      const parts = splitCommaName(candidate);
+      if (isSf10SectionHeader(parts.last) || isSf10SectionHeader(parts.first)) continue;
+      last = last || parts.last;
+      first = first || parts.first;
+      middle = middle || parts.middle;
+      break;
+    }
+  }
+
+  // LRN
+  let lrn = "";
+  const lrnMatch = scopeText.match(/\bLRN\b[\s:|\-]*([\d][\d\s\-]{10,16}\d)/i) || scopeText.match(/\b(\d{12})\b/);
+  if (lrnMatch) {
+    const candidate = normalizeLrn(lrnMatch[1]);
+    if (isValidLrn(candidate)) lrn = candidate;
+    else warnings.push(`SF10 LRN "${lrnMatch[1].trim()}" is not a valid 12-digit LRN.`);
+  }
+
+  // Birth date
+  let birthRaw = "";
+  for (const line of scope) {
+    birthRaw = labeled(line, "DATE\\s*OF\\s*BIRTH(?:\\s*\\(\\s*MM\\s*/\\s*DD\\s*/\\s*YYYY\\s*\\))?|BIRTH\\s*DATE|BIRTHDATE");
+    if (birthRaw) break;
+  }
+  let birthNorm = normalizeBirthDate(birthRaw);
+  if (!birthNorm) {
+    const fallback = scopeText.match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/);
+    if (fallback) {
+      birthRaw = fallback[0];
+      birthNorm = normalizeBirthDate(birthRaw);
+    }
+  }
+  if (birthRaw && !birthNorm) {
+    warnings.push(`SF10 birth date "${birthRaw}" could not be normalized; manual verification required.`);
+  }
+
+  // Sex
+  let sex: "Male" | "Female" | "" = "";
+  const sexMatch = scopeText.match(/\bSEX\b\s*[:|\-]?\s*\|?\s*(MALE|FEMALE|M|F)\b/i);
+  if (sexMatch) {
+    sex = /^M/i.test(sexMatch[1]) ? "Male" : "Female";
+  }
+
+  const full_name = last && first ? `${last}, ${first}${middle ? " " + middle : ""}` : "";
+
+  return {
+    last_name: last,
+    first_name: first,
+    middle_name: middle,
+    full_name,
+    lrn,
+    birth_date: birthNorm?.iso ?? "",
+    birth_date_display: birthNorm?.display ?? birthRaw,
+    birth_date_raw: birthRaw,
+    birth_date_normalized: birthNorm,
+    sex,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Scholastic Record blocks
+// ---------------------------------------------------------------------------
+
+interface HeaderHit {
+  school_name?: string;
+  school_id?: string;
+  grade_level?: "Grade 11" | "Grade 12";
+  school_year?: string;
+  semester?: "1st Semester" | "2nd Semester";
+  track_strand?: string;
+  section?: string;
+}
+
+function extractHeaderHits(line: string): HeaderHit {
+  const hit: HeaderHit = {};
+  const flat = line.replace(/\|/g, "  |  ");
+
+  const id = flat.match(/\bSCHOOL\s*ID\b\s*[:\-]?\s*\|?\s*(\d{6})\b/i);
+  if (id) hit.school_id = id[1];
+
+  const gl = flat.match(/\bGRADE\s*LEVEL\b\s*[:\-]?\s*\|?\s*((?:GRADE\s*)?(?:11|12|XII|XI))\b/i);
+  if (gl) hit.grade_level = normalizeGradeLevel(gl[1]);
+
+  const sy = flat.match(/\b(?:S\.?\s*Y\.?|SCHOOL\s*YEAR)\s*[:\-]?\s*\|?\s*(20\d{2})\s*[-–/]\s*(20\d{2})\b/i);
+  if (sy) hit.school_year = `${sy[1]}-${sy[2]}`;
+
+  const sem =
+    flat.match(/\bSEM(?:ESTER)?\b\s*[:\-]\s*\|?\s*(1st|2nd|first|second|1|2|II|I)\b/i) ||
+    flat.match(/\bSEM\b\s+(1st|2nd|first|second|1|2|II|I)\b/i) ||
+    flat.match(/\b(1st|2nd|first|second)\s+sem(?:ester)?\b/i);
+  if (sem) hit.semester = normalizeSemester(sem[1]);
+
+  const ts = labeled(line, "TRACK\\s*/\\s*STRAND");
+  if (ts && !isSf10SectionHeader(ts)) hit.track_strand = ts;
+
+  const sec = labeled(line, "SECTION");
+  if (sec && !isSf10SectionHeader(sec) && !/^\d+$/.test(sec)) hit.section = sec;
+
+  const school = labeled(line, "SCHOOL(?!\\s*(?:ID|YEAR))");
+  if (school && !isSf10SectionHeader(school) && !/^\d+$/.test(school)) hit.school_name = school;
+
+  return hit;
+}
+
+function isGeneralAverageRow(line: string): boolean {
+  return /\bGeneral\s*Ave(?:rage)?\.?/i.test(line);
+}
+
+function parseSubjectRow(line: string, secondHalf: boolean): Sf10SubjectRow | null {
+  const cells = splitRow(line);
+  if (cells.length < 2) return null;
+
+  let subjectType: Sf10SubjectType | undefined;
+  const textCells: string[] = [];
+  const numbers: number[] = [];
+  let action = "";
+
+  for (const cell of cells) {
+    const type = normalizeSubjectType(cell);
+    if (type && !subjectType && textCells.length === 0) {
+      subjectType = type;
+      continue;
+    }
+    if (ACTION_RE.test(cell)) {
+      action = normalizeAction(cell);
+      continue;
+    }
+    // Cell containing multiple grades separated by single spaces ("85 87 86")
+    const nums = cell.split(/\s+/).map(toGradeNumber);
+    if (nums.length > 0 && nums.every((n) => n !== undefined)) {
+      numbers.push(...(nums as number[]));
+      continue;
+    }
+    // Subject text with trailing grades on the same cell (plain-text OCR)
+    const trailing = cell.match(/^(.*?[A-Za-z].*?)\s+((?:\d{2,3}(?:\.\d+)?\s*){1,4})(?:\s+(PASSED|FAILED|INC|DRP))?$/i);
+    if (trailing) {
+      textCells.push(trailing[1].trim());
+      trailing[2].trim().split(/\s+/).forEach((t) => {
+        const n = toGradeNumber(t);
+        if (n !== undefined) numbers.push(n);
+      });
+      if (trailing[3]) action = normalizeAction(trailing[3]);
+      continue;
+    }
+    textCells.push(cell);
+  }
+
+  // Leading type word attached to subject text: "CORE Oral Communication"
+  if (!subjectType && textCells.length > 0) {
+    const lead = textCells[0].match(/^(CORE|APPLIED|SPECIALIZED)\s+(.+)$/i);
+    if (lead) {
+      subjectType = normalizeSubjectType(lead[1]);
+      textCells[0] = lead[2];
+    }
+  }
+
+  const subject = cleanValue(textCells.join(" "));
+  if (!subject || subject.length < 3) return null;
+  if (!/[A-Za-z]{3,}/.test(subject)) return null;
+  if (isSf10SectionHeader(subject)) return null;
+  if (/\b(?:quarter|sem(?:ester)?\s*final|action\s*taken|indicate\s*if|subjects?\s*$|general\s*ave)/i.test(subject)) return null;
+  if (/\b(?:school\s*id|grade\s*level|track\s*\/\s*strand|s\.?y\.?\s*[:\-]|section\s*[:\-]|lrn|date\s*of\s*birth|prepared\s*by|certified|signature|remedial|class\s*adviser)\b/i.test(subject)) return null;
+  if (numbers.length === 0 && !subjectType) return null;
+
+  const row: Sf10SubjectRow = { subject };
+  if (subjectType) row.subject_type = subjectType;
+  if (numbers.length >= 3) {
+    if (secondHalf) {
+      row.q3 = numbers[0];
+      row.q4 = numbers[1];
+    } else {
+      row.q1 = numbers[0];
+      row.q2 = numbers[1];
+    }
+    row.sem_final_grade = numbers[numbers.length - 1];
+  } else if (numbers.length === 2) {
+    if (secondHalf) {
+      row.q3 = numbers[0];
+      row.q4 = numbers[1];
+    } else {
+      row.q1 = numbers[0];
+      row.q2 = numbers[1];
+    }
+  } else if (numbers.length === 1) {
+    row.sem_final_grade = numbers[0];
+  }
+  if (action) row.action_taken = action;
+  return row;
+}
+
+function extractScholasticRecords(lines: string[]): Sf10ScholasticRecord[] {
+  const records: Sf10ScholasticRecord[] = [];
+  let current: Sf10ScholasticRecord = { subjects: [] };
+  let inScholastic = false;
+  let inEligibility = false;
+  let secondHalfQuarters = false;
+
+  const flush = () => {
+    if (current.subjects.length > 0 || current.general_average !== undefined) {
+      records.push(current);
+    }
+  };
+
+  for (const rawLine of lines) {
+    const line = cleanLine(rawLine);
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (/\bSCHOLASTIC\s*RECORD\b/i.test(trimmed)) {
+      inScholastic = true;
+      inEligibility = false;
+      // Start a fresh block; discard any header-only context gathered before it.
+      if (current.subjects.length > 0 || current.general_average !== undefined) flush();
+      current = { subjects: [] };
+      secondHalfQuarters = false;
+      continue;
+    }
+    if (/\bELIGIBILITY\s*FOR\s*SHS\s*ENROL+MENT\b/i.test(trimmed)) {
+      inEligibility = true;
+      continue;
+    }
+    if (/\bLEARNER'?S?\s*INFORMATION\b/i.test(trimmed)) {
+      continue;
+    }
+
+    const hits = extractHeaderHits(line);
+    // Inside ELIGIBILITY (JHS completer school ID/name), ignore unless a clearly
+    // scholastic-only field (grade level 11/12, semester, track/strand) appears.
+    if (inEligibility) {
+      if (hits.grade_level || hits.semester || hits.track_strand) {
+        inEligibility = false;
+      } else {
+        continue;
+      }
+    }
+    const hitKeys = Object.keys(hits) as Array<keyof HeaderHit>;
+    if (hitKeys.length > 0 && (hits.school_id || hits.grade_level || hits.school_year || hits.semester || hits.track_strand || hits.section)) {
+      inScholastic = true;
+      const conflicts = hitKeys.some((k) => current[k] !== undefined && current[k] !== hits[k]);
+      if (current.subjects.length > 0 || current.general_average !== undefined || conflicts) {
+        flush();
+        current = { subjects: [] };
+        secondHalfQuarters = false;
+      }
+      for (const k of hitKeys) {
+        if (hits[k] !== undefined && current[k] === undefined) (current as any)[k] = hits[k];
+      }
+      continue;
+    }
+
+    if (!inScholastic) continue;
+
+    // Quarter column header: "Quarter 3 | Quarter 4" / "3rd | 4th" marks the 2nd semester layout.
+    if (/\b(?:quarter|sem(?:ester)?\s*final|subjects?)\b/i.test(trimmed) && !isGeneralAverageRow(trimmed)) {
+      if (/\b(?:3rd|4th|quarter\s*3|quarter\s*4|q3|q4)\b/i.test(trimmed)) {
+        secondHalfQuarters = true;
+        if (!current.semester) current.semester = "2nd Semester";
+      }
+      continue;
+    }
+
+    if (isGeneralAverageRow(trimmed)) {
+      const nums = (trimmed.match(/\b\d{2,3}(?:\.\d{1,3})?\b/g) || [])
+        .map(toGradeNumber)
+        .filter((n): n is number => n !== undefined);
+      if (nums.length > 0) current.general_average = nums[nums.length - 1];
+      continue;
+    }
+
+    const row = parseSubjectRow(trimmed, secondHalfQuarters || current.semester === "2nd Semester");
+    if (row) current.subjects.push(row);
+  }
+  flush();
+
+  // Infer missing semesters by order within each grade level / school year.
+  const seen = new Map<string, number>();
+  for (const rec of records) {
+    const key = `${rec.grade_level || ""}|${rec.school_year || ""}`;
+    const idx = seen.get(key) ?? 0;
+    seen.set(key, idx + 1);
+    if (!rec.semester) rec.semester = idx % 2 === 0 ? "1st Semester" : "2nd Semester";
+    // Inherit header context from the sibling semester of the same school year.
+  }
+  for (let i = 1; i < records.length; i++) {
+    const prev = records[i - 1];
+    const rec = records[i];
+    if (rec.semester === "2nd Semester" && prev.semester === "1st Semester") {
+      rec.school_id ??= prev.school_id;
+      rec.school_name ??= prev.school_name;
+      rec.grade_level ??= prev.grade_level;
+      rec.school_year ??= prev.school_year;
+      rec.track_strand ??= prev.track_strand;
+      rec.section ??= prev.section;
+    }
+  }
+  // Second-semester rows parsed before the semester was known keep q3/q4 alignment.
+  for (const rec of records) {
+    if (rec.semester !== "2nd Semester") continue;
+    for (const s of rec.subjects) {
+      if (s.q1 !== undefined && s.q3 === undefined) {
+        s.q3 = s.q1;
+        s.q4 = s.q2;
+        delete s.q1;
+        delete s.q2;
+      }
+    }
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+export function parseSf10ShsText(text: string): Sf10ShsParseResult {
+  const warnings: string[] = [];
+  const lines = (text || "").split(/\r?\n/).map(cleanLine);
+  const learner = extractLearnerInformation(lines, warnings);
+  const scholastic_records = extractScholasticRecords(lines);
+
+  if (!learner.full_name) warnings.push("SF10 learner name could not be extracted from LEARNER'S INFORMATION.");
+  if (!learner.lrn) warnings.push("SF10 LRN not found.");
+  if (scholastic_records.length === 0) warnings.push("No SF10 scholastic record semester blocks were detected.");
+
+  return { learner, scholastic_records, warnings };
+}
+
+/** Convert scholastic record subjects into flat GradeRecord-compatible rows. */
+export function sf10RecordsToGradeRows(records: Sf10ScholasticRecord[]) {
+  return records.flatMap((rec) =>
+    rec.subjects.map((s) => ({
+      subject: s.subject,
+      subject_category: s.subject_type,
+      category: s.subject_type,
+      grade_level: rec.grade_level,
+      semester: rec.semester,
+      school_year: rec.school_year,
+      q1: rec.semester === "2nd Semester" ? undefined : s.q1,
+      q2: rec.semester === "2nd Semester" ? undefined : s.q2,
+      q3: s.q3,
+      q4: s.q4,
+      final: s.sem_final_grade,
+      printed_final_grade: s.sem_final_grade,
+      action_taken: s.action_taken,
+      status: s.action_taken === "PASSED" ? "Passed" : s.action_taken === "FAILED" ? "Failed" : s.action_taken,
+      source_section: "SF10 Scholastic Record",
+    }))
+  );
+}

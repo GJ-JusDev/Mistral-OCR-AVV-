@@ -355,4 +355,91 @@ test("AVV — Step-by-Step Document Upload Wizard Workflow & Integration Suite",
       "Manually corrected cards and fields must display a Corrected indicator"
     );
   });
+
+  // ── 19. Step 3 (SF9) Real-Time Front + Back Merge & Inline Preview ────────
+  await t.test("19. Step 3 (SF9) renders inline extraction preview for Attendance, Grades, and Observed Values, preserving Step 1 & 2 previews", () => {
+    // 1. Step 3 SF9 Preview Card Presence
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-extracted-preview-card"'),
+      "Step 3 must render sf9-extracted-preview-card when SF9 is extracted"
+    );
+    assert.ok(
+      uploadPageSrc.includes("mergeSf9FrontAndBack"),
+      "Step 3 must use mergeSf9FrontAndBack to merge Front and Back SF9 data"
+    );
+
+    // 2. Learner Identity Summary
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-identity-summary"'),
+      "Step 3 must render Learner Identity Summary section"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Learner Identity Summary") &&
+      uploadPageSrc.includes("Track / Strand"),
+      "Step 3 identity summary must include LRN, Name, Sex, Grade Level, Section, School Year, and Track/Strand"
+    );
+
+    // 3. Report on Attendance (from Front)
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-attendance-preview-table"'),
+      "Step 3 must render Report on Attendance preview table"
+    );
+    assert.ok(
+      uploadPageSrc.includes("No. of School Days") &&
+      uploadPageSrc.includes("No. of Days Present") &&
+      uploadPageSrc.includes("No. of Days Absent"),
+      "Step 3 attendance grid must display No. of School Days, No. of Days Present, and No. of Days Absent"
+    );
+
+    // 4. Per-Semester Academic Grades (from Back)
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-grades-preview"'),
+      "Step 3 must render Per-Semester Academic Grades section"
+    );
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-sem1-grades-table"') &&
+      uploadPageSrc.includes('data-testid="sf9-sem2-grades-table"'),
+      "Step 3 must separate First Semester and Second Semester grades tables"
+    );
+    assert.ok(
+      uploadPageSrc.includes("General Average:") ||
+      uploadPageSrc.includes("Semester General Average"),
+      "Step 3 grades preview must display Semester General Average"
+    );
+
+    // 5. Observed Values / Learner Behavior (from Back)
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf9-observed-values-preview"') ||
+      uploadPageSrc.includes('data-testid="sf9-observed-values-table"'),
+      "Step 3 must render Observed Values / Core Values behavior table"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Maka-Diyos") &&
+      uploadPageSrc.includes("Makatao") &&
+      uploadPageSrc.includes("Makakalikasan") &&
+      uploadPageSrc.includes("Makabansa"),
+      "Step 3 observed values must include the four DepEd Core Values"
+    );
+    assert.ok(
+      uploadPageSrc.includes("AO") &&
+      uploadPageSrc.includes("SO") &&
+      uploadPageSrc.includes("RO") &&
+      uploadPageSrc.includes("NO"),
+      "Step 3 observed values must render DepEd non-numerical ratings (AO, SO, RO, NO)"
+    );
+
+    // 6. Step 1 (SF1) and Step 2 (SF2) Inline Previews Preserved
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf1-extracted-learners-table"'),
+      "Step 1 SF1 extracted learners table must remain intact"
+    );
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf1-empty-alert"'),
+      "Step 1 SF1 'No student found' alert must remain intact"
+    );
+    assert.ok(
+      uploadPageSrc.includes('data-testid="sf2-attendance-preview-table"'),
+      "Step 2 SF2 attendance preview table must remain intact"
+    );
+  });
 });

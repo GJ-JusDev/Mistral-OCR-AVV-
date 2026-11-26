@@ -152,17 +152,21 @@ export function mergeSf9FrontAndBack(
     mergedGrades.push(entry.grade);
   }
 
-  // 4. Attendance Merging
+  // 4. Attendance Merging (Prioritizing Front where DepEd SF9 Report on Attendance is printed)
   const attendance =
-    back.attendance && back.attendance.length > 0
-      ? back.attendance
-      : front.attendance || [];
-  const attendanceMonths = back.attendance_months || front.attendance_months;
-  const attendanceTotals = back.attendance_totals || front.attendance_totals;
-  const attendancePercentage = back.attendance_percentage ?? front.attendance_percentage;
-  const absencePercentage = back.absence_percentage ?? front.absence_percentage;
-  const attendanceRiskStatus = back.attendance_risk_status || front.attendance_risk_status;
-  const attendanceDiscrepancyDetails = back.attendance_discrepancy_details || front.attendance_discrepancy_details;
+    front.attendance && front.attendance.length > 0
+      ? front.attendance
+      : back.attendance || [];
+  const attendanceMonths =
+    front.attendance_months && front.attendance_months.length > 0
+      ? front.attendance_months
+      : back.attendance_months;
+  const attendanceTotals = front.attendance_totals || back.attendance_totals;
+  const attendancePercentage = front.attendance_percentage ?? back.attendance_percentage;
+  const absencePercentage = front.absence_percentage ?? back.absence_percentage;
+  const attendanceRiskStatus = front.attendance_risk_status || back.attendance_risk_status;
+  const attendanceDiscrepancyDetails = front.attendance_discrepancy_details || back.attendance_discrepancy_details;
+  const attendanceConfidence = front.attendance_confidence ?? back.attendance_confidence;
 
   // 5. General Average
   const generalAverage = back.general_average ?? front.general_average;
@@ -200,6 +204,7 @@ export function mergeSf9FrontAndBack(
     grades: mergedGrades,
     attendance,
     attendance_months: attendanceMonths,
+    attendance_confidence: attendanceConfidence,
     attendance_totals: attendanceTotals,
     attendance_percentage: attendancePercentage,
     absence_percentage: absencePercentage,
@@ -263,6 +268,7 @@ export function mergeSf10Pages(
   const allGrades: GradeRecord[] = [];
   let attendance = primary.attendance || [];
   let attendanceMonths = primary.attendance_months;
+  let attendanceConfidence = primary.attendance_confidence;
   let attendanceTotals = primary.attendance_totals;
   let attendancePercentage = primary.attendance_percentage;
   let absencePercentage = primary.absence_percentage;
@@ -293,6 +299,9 @@ export function mergeSf10Pages(
     }
     if (f.attendance_months && (!attendanceMonths || attendanceMonths.length === 0)) {
       attendanceMonths = f.attendance_months;
+    }
+    if (f.attendance_confidence !== undefined && attendanceConfidence === undefined) {
+      attendanceConfidence = f.attendance_confidence;
     }
     if (f.attendance_totals && !attendanceTotals) {
       attendanceTotals = f.attendance_totals;
@@ -328,6 +337,7 @@ export function mergeSf10Pages(
     grades: allGrades,
     attendance,
     attendance_months: attendanceMonths,
+    attendance_confidence: attendanceConfidence,
     attendance_totals: attendanceTotals,
     attendance_percentage: attendancePercentage,
     absence_percentage: absencePercentage,

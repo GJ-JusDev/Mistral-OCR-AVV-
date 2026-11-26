@@ -273,6 +273,11 @@ export function classifyAttendanceCell(context: AttendanceCellContext): CellShad
   if (
     clean === "full" ||
     clean === "shaded" ||
+    clean === "[shaded]" ||
+    clean.replace(/[\[\]]/g, "") === "shaded" ||
+    clean === "full_shade" ||
+    clean === "full-shade" ||
+    clean === "fullshade" ||
     clean === "x" ||
     clean === "×" ||
     clean === "✕" ||
@@ -302,6 +307,12 @@ export function classifyAttendanceCell(context: AttendanceCellContext): CellShad
   if (
     clean === "half" ||
     clean === "half-shade" ||
+    clean === "half_shade" ||
+    clean === "upper_triangle" ||
+    clean === "lower_triangle" ||
+    clean === "triangle" ||
+    clean === "late" ||
+    clean === "cutting" ||
     clean === "/" ||
     clean === "\\" ||
     clean === "◢" ||
@@ -330,7 +341,16 @@ export function classifyAttendanceCell(context: AttendanceCellContext): CellShad
   }
 
   // Pattern C: Unmarked (blank, clean cell, or explicit 'P' mark)
-  if (clean === "" || clean === "p" || clean === "present" || clean === "-") {
+  if (
+    clean === "" ||
+    clean === "blank" ||
+    clean === "unmarked" ||
+    clean === "clean" ||
+    clean === "white" ||
+    clean === "p" ||
+    clean === "present" ||
+    clean === "-"
+  ) {
     return {
       day,
       classification: "UNMARKED",

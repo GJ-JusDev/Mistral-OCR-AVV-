@@ -7,7 +7,7 @@ import {
 
 export async function GET(
   request: NextRequest,
-  props: { params: Promise<{ id: string }> }
+  props: any
 ) {
   try {
     const supabase = await createClient();
