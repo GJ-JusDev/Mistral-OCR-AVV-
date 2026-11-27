@@ -2,7 +2,7 @@ import {
   normalizeSubjectName, 
   normalizeSemester 
 } from "./gradeComparator";
-import { computeSemesterFinalGrade, getAuthoritativeSemesterFinalGrade } from "./gradeUtils";
+import { computeSemesterFinalGrade, getAuthoritativeSemesterFinalGrade, evaluateDynamicGradeStatus } from "./gradeUtils";
 import type { GradeRecord } from "@/types/documents";
 
 export interface GradeConflict {
@@ -136,11 +136,16 @@ export function mergeIncrementalGrades(params: {
       merged.final = effectiveFinal !== null ? effectiveFinal : null;
       merged.final_grade = effectiveFinal !== null ? effectiveFinal : null;
 
-      if (effectiveFinal !== null && effectiveFinal !== undefined) {
-        merged.status = effectiveFinal >= 75 ? "Passed" : "Failed";
+      const evalMerged = evaluateDynamicGradeStatus({ grade: effectiveFinal, confidencePercent: sc.confidence });
+      if (evalMerged.status === "passed") {
+        merged.status = "Passed";
+      } else if (evalMerged.status === "failed") {
+        merged.status = "Failed";
       } else {
         merged.status = ex.status || sc.status || "Needs Verification";
       }
+      merged.remarks = evalMerged.remarkDisplay;
+      merged.remark = evalMerged.remarkDisplay;
 
       mergedList.push(merged);
     } else {
@@ -160,7 +165,8 @@ export function mergeIncrementalGrades(params: {
         : computeSemesterFinalGrade(scValQ3, scValQ4);
 
       const effectiveFinal = computedFinal ?? parseGrade(getAuthoritativeSemesterFinalGrade(sc));
-      const status = effectiveFinal !== null ? (effectiveFinal >= 75 ? "Passed" : "Failed") : (sc.status || "Needs Verification");
+      const evalNew = evaluateDynamicGradeStatus({ grade: effectiveFinal, confidencePercent: sc.confidence });
+      const status = evalNew.status === "passed" ? "Passed" : evalNew.status === "failed" ? "Failed" : (sc.status || "Needs Verification");
 
       mergedList.push({
         ...sc,

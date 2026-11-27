@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { validateFields } from '@/lib/validation/engine';
 import { 
   evaluateStudentIdentity, 
   verifyStudentCollision, 
   matchStudentIdentityMatrix 
 } from '@/lib/validation/studentMatcher';
-import { normalizeGradeRecords, updateExtractedFieldsAverages } from '@/lib/validation/gradeUtils';
+import { normalizeGradeRecords, updateExtractedFieldsAverages, normalizeObservedValueMarking, sanitizeLearnersObservedValues } from '@/lib/validation/gradeUtils';
 import { mergeAcademicGrades } from '@/lib/validation/gradeMerger';
 import { normalizeLrn } from '@/lib/validation/patterns';
 import { matchSchool } from '@/lib/validation/schoolMatcher';
@@ -23,6 +23,11 @@ import {
 } from '@/lib/teacher/assignments';
 import { compareDocumentContextWithAssignment } from '@/lib/teacher/sectionScanner';
 import { ingestRosterDocument } from '@/lib/upload/rosterIngestion';
+import {
+  formatBatchNumber,
+  getDocumentCompositeKey,
+  resolveDocumentStudentNameDisplay as resolveDisplayStudentName,
+} from '@/lib/validation/nameComparison';
 
 export async function GET(request: NextRequest) {
   try {
@@ -67,7 +72,7 @@ export async function GET(request: NextRequest) {
     if (status) {
       query = query.eq('status', status);
     } else {
-      query = query.neq('status', 'archived');
+      query = query.neq('status', 'archived').neq('status', 'deleted');
     }
 
     const { data, error } = await query;
@@ -111,7 +116,42 @@ export async function GET(request: NextRequest) {
       })
     );
 
-    return NextResponse.json({ documents: docs });
+    // Zero-redundancy deduplication by student composite key:
+    // (normalizedLrn + "::" + normalizedStudentName + "::" + canonicalDocumentType)
+    // Keep only the most recently updated record and filter out empty "-" ghost rows.
+    const dedupMap = new Map<string, any>();
+    for (const doc of docs) {
+      if (doc?.status === 'archived' || doc?.status === 'deleted' || doc?.deleted_at) continue;
+      const studentName = resolveDisplayStudentName(doc);
+      // Filter out legacy unverified/orphan rows and pre-confirmation drafts
+      if (!studentName || studentName === "-" || studentName === "No student found" || studentName.startsWith("Incomplete Name")) continue;
+      const ef = (doc.extracted_fields || {}) as Record<string, any>;
+      if (ef.commit_to_registry === false || doc.status === "pre_confirmation") continue;
+
+      const compKey = getDocumentCompositeKey(doc);
+      const existing = dedupMap.get(compKey);
+      if (!existing) {
+        dedupMap.set(compKey, doc);
+      } else {
+        const existingTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
+        const docTime = new Date(doc.updated_at || doc.created_at || 0).getTime();
+        if (docTime >= existingTime) {
+          dedupMap.set(compKey, doc);
+        }
+      }
+    }
+
+    const deduplicatedDocs = Array.from(dedupMap.values()).map((doc: any) => {
+      const ef = (doc.extracted_fields || {}) as Record<string, any>;
+      const rawBatch = ef.batch_number || ef.batch_id || doc.batch_id || doc.batch_number;
+      const formattedBatch = formatBatchNumber(rawBatch, doc.created_at || doc.submission_date || doc.updated_at);
+      return {
+        ...doc,
+        batch_number: formattedBatch,
+      };
+    });
+
+    return NextResponse.json({ documents: deduplicatedDocs });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
   }
@@ -589,6 +629,10 @@ export async function POST(request: NextRequest) {
     if (Array.isArray(extractedFields.grades) && extractedFields.grades.length > 0) {
       extractedFields.grades = normalizeGradeRecords(extractedFields.grades);
       Object.assign(extractedFields, updateExtractedFieldsAverages(extractedFields));
+    }
+
+    if (extractedFields.observed_values) {
+      extractedFields.observed_values = sanitizeLearnersObservedValues(extractedFields.observed_values);
     }
 
     const rawSy = String(
@@ -1134,6 +1178,10 @@ export async function POST(request: NextRequest) {
         },
       };
 
+      if (mergedExtractedFields.observed_values) {
+        mergedExtractedFields.observed_values = sanitizeLearnersObservedValues(mergedExtractedFields.observed_values);
+      }
+
       if (mergeResult.conflicts.length > 0) {
         mergedExtractedFields.grade_conflicts = [
           ...(canonicalDoc.extracted_fields?.grade_conflicts || []),
@@ -1535,5 +1583,288 @@ export async function POST(request: NextRequest) {
     }, { status: 201 });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+  }
+}
+
+/**
+ * Helper to identify safely ignorable table/column errors when cleaning child tables
+ * (e.g. 42P01 table does not exist, PGRST205 schema cache missing table, 42703 column does not exist)
+ */
+function isIgnorableChildTableError(err: any): boolean {
+  if (!err) return true;
+  const code = String(err.code || "").toUpperCase();
+  const msg = String(err.message || "").toLowerCase();
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    code === "42703" ||
+    code === "PGRST204" ||
+    msg.includes("does not exist") ||
+    msg.includes("could not find the table") ||
+    msg.includes("schema cache") ||
+    msg.includes("column")
+  );
+}
+
+/**
+ * Known foreign-key child tables in the AVV schema that reference documents.id
+ */
+const CHILD_TABLES_BY_DOC_ID = [
+  "validation_results",
+  "review_logs",
+  "subject_grades",
+  "academic_standing_history",
+  "attendance_records",
+  "attendance_summaries",
+  "remedial_records",
+  "grade_change_history",
+  "document_scans",
+  "student_identity_conflicts",
+  "sf1_roster_entries",
+  "sf2_attendance_entries",
+  "sf5_promotion_entries",
+  "psa_identity_records",
+  "field_extraction_traces",
+  "academic_award_evaluations",
+  "learner_observed_values",
+  "sf9_grading_scale_legends",
+  "document_segments",
+  "validation_findings",
+  "validation_reports",
+  "discrepancies",
+  "review_queue",
+  "grades",
+];
+
+/**
+ * DELETE /api/documents
+ * Clears / resets all stored document records and batches for the current school
+ * so the registry can be wiped and subsequent uploads restart cleanly at BATCH-001.
+ *
+ * Implements strict RLS bypass using admin/service-role client when available,
+ * explicit .in('id', documentIds) filter to prevent PostgREST WHERE clause requirements,
+ * pre-deletion of foreign-key child records, best-effort storage cleanup, and clean
+ * soft-archive fallback when database constraints block hard deletion.
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const userClient = await createClient();
+    const { data: { user } } = await userClient.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized: Please log in." }, { status: 401 });
+    }
+
+    const { data: roleRow, error: roleErr } = await userClient
+      .from("user_roles")
+      .select("role, account_status, school_id")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (roleErr) {
+      return NextResponse.json({
+        error: `Database authorization check failed: ${roleErr.message}`,
+        details: { code: roleErr.code, message: roleErr.message },
+      }, { status: 500 });
+    }
+
+    if (!roleRow || roleRow.account_status !== "Approved") {
+      return NextResponse.json({ error: "Forbidden: Account is pending administrator approval." }, { status: 403 });
+    }
+
+    // Resolve privileged server/admin client (service-role Supabase client if configured, falling back cleanly to authenticated client)
+    let db: any = userClient;
+    try {
+      const adminClient = createAdminClient();
+      if (adminClient) {
+        db = adminClient;
+      }
+    } catch {
+      db = userClient;
+    }
+
+    const schoolId = roleRow.school_id;
+
+    // 1. Fetch matching target documentIds and storage file paths scoped to user's school / uploaded_by
+    // Use .select('*') to avoid PostgREST column missing errors on optional fields
+    let fetchQuery = db
+      .from("documents")
+      .select("*");
+
+    if (schoolId) {
+      fetchQuery = fetchQuery.eq("school_id", schoolId);
+    } else {
+      fetchQuery = fetchQuery.eq("uploaded_by", user.id);
+    }
+
+    const { data: targetDocs, error: fetchErr } = await fetchQuery;
+
+    if (fetchErr) {
+      console.error("[DELETE /api/documents] Failed to query documents:", fetchErr);
+      return NextResponse.json({
+        error: `Failed to fetch target documents: ${fetchErr.message}`,
+        details: { code: fetchErr.code, message: fetchErr.message },
+      }, { status: 500 });
+    }
+
+    if (!targetDocs || targetDocs.length === 0) {
+      return NextResponse.json({
+        success: true,
+        clearedCount: 0,
+        message: "No document records found to clear.",
+      });
+    }
+
+    const documentIds: string[] = targetDocs.map((d: any) => d.id).filter(Boolean);
+    if (documentIds.length === 0) {
+      return NextResponse.json({
+        success: true,
+        clearedCount: 0,
+        message: "No valid document IDs found to clear.",
+      });
+    }
+
+    // 2. Pre-delete dependent child records referencing documents.id
+    for (const table of CHILD_TABLES_BY_DOC_ID) {
+      try {
+        const { error: childErr } = await db
+          .from(table)
+          .delete()
+          .in("document_id", documentIds);
+
+        if (childErr && !isIgnorableChildTableError(childErr)) {
+          console.warn(`[DELETE /api/documents] Note deleting child records from ${table}:`, childErr.message);
+        }
+      } catch {
+        // safely ignore non-existent child tables
+      }
+    }
+
+    // Dependent tables with alternate foreign-key column names
+    try {
+      await db.from("cross_document_validations").delete().in("source_doc1_id", documentIds);
+    } catch {}
+    try {
+      await db.from("cross_document_validations").delete().in("source_doc2_id", documentIds);
+    } catch {}
+    try {
+      await db.from("student_enrollments").delete().in("source_document_id", documentIds);
+    } catch {}
+
+    // 3. Best-effort remove stored files from Supabase Storage
+    // Resolve storage file paths defensively from whichever column exists (storage_path, file_url, image_url, original_file_url)
+    const storagePathsToDelete: string[] = [];
+    for (const doc of targetDocs) {
+      const rawPath = doc.storage_path || doc.file_url || doc.image_url || doc.original_file_url;
+      if (rawPath && typeof rawPath === "string") {
+        if (rawPath.startsWith("data:") || rawPath.startsWith("blob:")) continue;
+        if (rawPath.includes("/documents/")) {
+          const parts = rawPath.split("/documents/")[1];
+          if (parts) {
+            const clean = decodeURIComponent(parts.split("?")[0]);
+            if (clean && !storagePathsToDelete.includes(clean)) storagePathsToDelete.push(clean);
+          }
+        } else if (!rawPath.startsWith("http://") && !rawPath.startsWith("https://")) {
+          const clean = decodeURIComponent(rawPath.split("?")[0]);
+          if (clean && !storagePathsToDelete.includes(clean)) storagePathsToDelete.push(clean);
+        }
+      }
+    }
+
+    if (storagePathsToDelete.length > 0) {
+      try {
+        await db.storage.from("documents").remove(storagePathsToDelete);
+      } catch (storageErr) {
+        console.warn("[DELETE /api/documents] Storage cleanup notice:", storageErr);
+      }
+    }
+
+    // 4. Delete the target rows from documents using an explicit .in('id', documentIds) filter
+    let hardDeleteSuccess = false;
+    const { error: hardDeleteErr } = await db
+      .from("documents")
+      .delete()
+      .in("id", documentIds);
+
+    if (!hardDeleteErr) {
+      hardDeleteSuccess = true;
+    } else {
+      console.warn(
+        "[DELETE /api/documents] Hard delete prevented by database policy or trigger. Performing clean soft-archive fallback:",
+        hardDeleteErr.message
+      );
+
+      // 4a. Attempt RPC archive_review_document per document ID if available
+      let rpcSuccessCount = 0;
+      for (const docId of documentIds) {
+        try {
+          const { error: rpcErr } = await (userClient as any).rpc("archive_review_document", {
+            p_document_id: docId,
+            p_confirmation_phrase: "ARCHIVE",
+          });
+          if (!rpcErr) {
+            rpcSuccessCount++;
+          }
+        } catch {
+          // RPC might not exist, proceed to direct update fallback
+        }
+      }
+
+      // 4b. Clean soft-archive update fallback using verified existing columns (status, archived_at)
+      // so GET /api/documents excludes them and resets registry to BATCH-001
+      const now = new Date().toISOString();
+      const { error: archiveErr } = await db
+        .from("documents")
+        .update({
+          status: "archived",
+          archived_at: now,
+        })
+        .in("id", documentIds);
+
+      if (archiveErr && rpcSuccessCount === 0) {
+        console.error("[DELETE /api/documents] Failed to archive documents fallback:", archiveErr);
+        return NextResponse.json({
+          error: `Failed to delete or archive documents: ${archiveErr.message}`,
+          details: {
+            hardDeleteError: { code: hardDeleteErr.code, message: hardDeleteErr.message },
+            archiveError: { code: archiveErr.code, message: archiveErr.message },
+          },
+        }, { status: 500 });
+      }
+    }
+
+    // 5. Log audit event
+    await logAuditEvent({
+      category: "DOCUMENT",
+      action: hardDeleteSuccess ? "DOCUMENT_DELETED" : "DOCUMENT_ARCHIVED",
+      outcome: "SUCCESS",
+      actorUserId: user.id,
+      actorEmail: user.email,
+      actorRole: roleRow?.role || "teacher",
+      actorSchoolId: schoolId,
+      targetType: "documents_batch",
+      targetId: schoolId || user.id,
+      targetLabel: `Purged ${documentIds.length} document records`,
+      reason: "User requested registry reset and file cleanup",
+      details: {
+        clearedCount: documentIds.length,
+        hardDeleteSuccess,
+      },
+    });
+
+    return NextResponse.json({
+      success: true,
+      clearedCount: documentIds.length,
+      hardDelete: hardDeleteSuccess,
+      message: `All ${documentIds.length} document records and batches cleared successfully. Next batch starts at BATCH-001.`,
+    });
+  } catch (error: any) {
+    console.error("[DELETE /api/documents] Failed:", error);
+    return NextResponse.json({
+      error: error.message || "Internal Server Error",
+      details: {
+        code: error.code || "UNKNOWN_ERROR",
+        message: error.message || String(error),
+      },
+    }, { status: 500 });
   }
 }

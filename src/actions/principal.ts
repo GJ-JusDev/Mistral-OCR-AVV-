@@ -8,6 +8,7 @@ import { rankAwardees, StudentAwardCandidate, EvaluatedAwardee } from "@/lib/awa
 import type { RemedialStatus } from "@/lib/remedial/remedialEvaluator";
 import { revalidatePath } from "next/cache";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
+import { evaluateDynamicGradeStatus } from "@/lib/validation/gradeUtils";
 
 // Default single institution scope (TRIS)
 const TRIS_UUID = "a0000000-0000-0000-0000-000000000001";
@@ -878,7 +879,10 @@ export async function getPrincipalStudentDetails(identifier: string) {
         q4: g.q4,
         final_grade: g.final_grade,
         finalGrade: g.final_grade,
-        status: g.status || (g.final_grade >= 75 ? "Passed" : g.final_grade ? "Failed" : "Missing"),
+        status: g.status || (() => {
+          const evalRes = evaluateDynamicGradeStatus({ grade: g.final_grade, rawRemark: g.status });
+          return evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Missing";
+        })(),
         needsVerification: g.needs_verification,
         remedialClassMark: g.remedial_class_mark,
         recomputedFinalGrade: g.recomputed_final_grade,
@@ -974,7 +978,10 @@ export async function getPrincipalStudentDetails(identifier: string) {
         q4: g.q4,
         final_grade: g.final || g.semesterFinal || g.final_grade,
         finalGrade: g.final || g.semesterFinal || g.final_grade,
-        status: g.status || (g.final >= 75 ? "Passed" : g.final ? "Failed" : "Missing"),
+        status: g.status || (() => {
+          const evalRes = evaluateDynamicGradeStatus({ grade: g.final || g.semesterFinal || g.final_grade, rawRemark: g.status });
+          return evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Missing";
+        })(),
       }));
 
       const lrn = fields.lrn || fields.candidate_student?.lrn || "Pending LRN";
@@ -1454,7 +1461,10 @@ export async function getPrincipalAcademicOverview(filters?: {
           q3: g.q3,
           q4: g.q4,
           final_grade: g.final || g.semesterFinal || g.final_grade,
-          status: g.status || (g.final >= 75 ? "Passed" : g.final ? "Failed" : "Missing"),
+          status: g.status || (() => {
+            const evalRes = evaluateDynamicGradeStatus({ grade: g.final || g.semesterFinal || g.final_grade, rawRemark: g.status });
+            return evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Missing";
+          })(),
         }));
       }
 
@@ -1522,7 +1532,10 @@ export async function getPrincipalAcademicOverview(filters?: {
           q3: g.q3,
           q4: g.q4,
           final_grade: g.final || g.semesterFinal || g.final_grade,
-          status: g.status || (g.final >= 75 ? "Passed" : g.final ? "Failed" : "Missing"),
+          status: g.status || (() => {
+            const evalRes = evaluateDynamicGradeStatus({ grade: g.final || g.semesterFinal || g.final_grade, rawRemark: g.status });
+            return evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Missing";
+          })(),
         }));
 
         const sectionKey = `${grade} - ${section}`;

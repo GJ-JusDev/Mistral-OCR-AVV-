@@ -17,17 +17,19 @@ export type GradeRecord = {
   t1?: number | string;
   t2?: number | string;
   t3?: number | string;
-  sem1_final_grade?: number | string;
-  sem2_final_grade?: number | string;
+  sem1_final_grade?: number | string | null;
+  sem2_final_grade?: number | string | null;
   units?: number;
   failed_final_grade?: number | string;
   remedial_class_mark?: number | string;
   recomputed_final_grade?: number | string;
   remedial_sem1_recomputed?: number | string;
   remedial_sem2_recomputed?: number | string;
-  final?: number | string;
+  final?: number | string | null;
+  final_grade?: number | string | null;
   action_taken?: string;
   remark?: string;
+  remarks?: string;
   printed_final_grade?: number | string;
   ocr_final_grade?: number | string;
   precise_computed_grade?: number;
@@ -38,7 +40,7 @@ export type GradeRecord = {
   raw_calculated_final?: number;
   official_computed_final?: number;
   is_auto_computed?: boolean;
-  grade_source?: "ocr" | "auto_computed" | "manual_edit" | "verified";
+  grade_source?: "ocr" | "auto_computed" | "manual_edit" | "verified" | "blank";
   has_calculation_discrepancy?: boolean;
   calculation_notes?: string;
   status: "Passed" | "Failed" | "Missing";
@@ -53,6 +55,18 @@ export type GradeRecord = {
   is_handwritten?: boolean;
   icr_confidence?: number;
   confidence?: number;
+  q1Confidence?: number;
+  q2Confidence?: number;
+  q3Confidence?: number;
+  q4Confidence?: number;
+  finalGradeConfidence?: number;
+  generalAverageConfidence?: number;
+  q1_confidence?: number;
+  q2_confidence?: number;
+  q3_confidence?: number;
+  q4_confidence?: number;
+  final_confidence?: number;
+  general_average_confidence?: number;
   bounding_box?: number[];
 };
 
@@ -93,6 +107,10 @@ export interface BehaviorStatementRecord {
   q2?: ObservedValueQuarterRecord;
   q3?: ObservedValueQuarterRecord;
   q4?: ObservedValueQuarterRecord;
+  q1Confidence?: number;
+  q2Confidence?: number;
+  q3Confidence?: number;
+  q4Confidence?: number;
 }
 
 export interface CoreValueGroup {
@@ -246,20 +264,22 @@ export type ExtractedFields = {
   grading_policy_version?: string
   grading_period_scheme?: GradingPeriodScheme
   grades?: GradeRecord[]
-  general_average?: number
+  general_average?: number | null
+  annual_general_average?: number | null
+  has_blank_grade_error?: boolean
   precise_general_average?: number
   displayed_general_average?: number
   general_average_action_taken?: string
   shs_general_average_printed?: number
   sem1_raw_general_average?: number
-  sem1_general_average?: number
+  sem1_general_average?: number | null
   sem1_precise_general_average?: number
   sem1_displayed_general_average?: number
   sem1_subject_count?: number
   sem1_completeness?: "COMPLETE" | "INCOMPLETE" | "EMPTY"
   sem1_confidence?: number
   sem2_raw_general_average?: number
-  sem2_general_average?: number
+  sem2_general_average?: number | null
   sem2_precise_general_average?: number
   sem2_displayed_general_average?: number
   sem2_subject_count?: number

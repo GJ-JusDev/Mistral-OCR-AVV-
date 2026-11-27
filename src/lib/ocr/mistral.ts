@@ -2,6 +2,10 @@
  * Mistral OCR client — wraps the Mistral OCR API for server-side use.
  */
 
+import { normalizeObservedValueMarking, sanitizeLearnersObservedValues } from "../validation/gradeUtils";
+
+export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
+
 export type MistralOcrErrorCode =
   | "RATE_LIMIT_EXCEEDED"
   | "QUOTA_EXHAUSTED"
@@ -77,6 +81,57 @@ export type MistralOcrResult = {
   /** Number of pages in the response. */
   pageCount: number;
 };
+
+/**
+ * Calculates OCR readability confidence percentage (0-100%) and
+ * extracted field completeness percentage (0-100%).
+ */
+export function calculateOcrMetrics(
+  confidence: number | undefined,
+  fields: any,
+  docType?: string
+): { ocrConfidencePercent: number; extractedFieldCompletenessPercent: number } {
+  let ocrConfidencePercent: number;
+  if (typeof confidence === "number" && !isNaN(confidence)) {
+    ocrConfidencePercent = confidence <= 1 ? Math.round(confidence * 100) : Math.min(100, Math.round(confidence));
+  } else if (fields?.ocr_confidence !== undefined && typeof fields.ocr_confidence === "number") {
+    ocrConfidencePercent = fields.ocr_confidence <= 1 ? Math.round(fields.ocr_confidence * 100) : Math.min(100, Math.round(fields.ocr_confidence));
+  } else if (fields?.ocr_provider === "excel" || fields?.model === "sheetjs-xlsx") {
+    ocrConfidencePercent = 100;
+  } else {
+    ocrConfidencePercent = 95;
+  }
+
+  let extractedFieldCompletenessPercent = 100;
+  if (fields && typeof fields === "object") {
+    const dt = (docType || fields.document_type || "").toLowerCase();
+    let expectedFields: string[] = [];
+    if (dt === "sf10") {
+      expectedFields = ["lrn", "last_name", "first_name", "birth_date", "school_name", "grade_level", "track_strand", "grades"];
+    } else if (dt === "sf9") {
+      expectedFields = ["lrn", "last_name", "grade_level", "school_year", "grades", "attendance"];
+    } else if (dt === "sf1") {
+      expectedFields = ["school_id", "school_name", "school_year", "grade_level", "section", "learners"];
+    } else if (dt === "sf2") {
+      expectedFields = ["school_id", "school_name", "school_year", "attendance"];
+    } else if (dt === "birth_cert" || dt === "psa") {
+      expectedFields = ["registry_number", "last_name", "first_name", "birth_date", "sex", "birth_place"];
+    } else {
+      expectedFields = ["lrn", "last_name", "first_name", "grade_level", "school_year"];
+    }
+
+    let populatedCount = 0;
+    for (const f of expectedFields) {
+      const val = fields[f];
+      if (Array.isArray(val) ? val.length > 0 : (val !== undefined && val !== null && String(val).trim() !== "" && val !== "—")) {
+        populatedCount++;
+      }
+    }
+    extractedFieldCompletenessPercent = Math.min(100, Math.max(10, Math.round((populatedCount / expectedFields.length) * 100)));
+  }
+
+  return { ocrConfidencePercent, extractedFieldCompletenessPercent };
+}
 
 /**
  * Call the Mistral OCR API with a base64-encoded image.
@@ -266,7 +321,7 @@ export async function callMistralOcrWithRetry(
 export async function handleOcrRoute(
   request: Request,
   apiKey: string | undefined,
-  fieldParser?: (text: string, gradeLevel?: string, rawLayout?: any, docType?: string) => any,
+  fieldParser?: (text: string, gradeLevel?: string, rawLayout?: any, docType?: string, options?: { targetStudentName?: string; targetLrn?: string }) => any,
   ocrCaller: typeof callMistralOcrWithRetry = callMistralOcrWithRetry
 ): Promise<Response> {
   const providerEnv = process.env.OCR_PRIMARY_PROVIDER?.toLowerCase().trim();
@@ -305,8 +360,12 @@ export async function handleOcrRoute(
   }
 
   try {
-    const { image, frontImage, backImage, images, extractFields, gradeLevel, documentSide, documentType, docType } = body || {};
+    const { image, frontImage, backImage, images, extractFields, gradeLevel, documentSide, documentType, docType, targetStudentName, targetLrn } = body || {};
     const effectiveDocType = (documentType || docType || "").toLowerCase().trim();
+    const targetOptions = {
+      targetStudentName: typeof targetStudentName === "string" ? targetStudentName : undefined,
+      targetLrn: typeof targetLrn === "string" ? targetLrn : undefined,
+    };
 
     const validOcrDocTypes = ["sf1", "sf2", "sf9", "sf10", "birth_cert", "psa"];
     if (effectiveDocType && !validOcrDocTypes.includes(effectiveDocType)) {
@@ -325,6 +384,9 @@ export async function handleOcrRoute(
       "image/png",
       "image/webp",
       "application/pdf",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel",
+      "text/csv",
     ]);
 
     const effectiveFrontImage = frontImage || images?.front || (image && documentSide !== "back" ? image : undefined);
@@ -342,7 +404,7 @@ export async function handleOcrRoute(
       const mimeType = match[1].toLowerCase();
       const base64Content = match[2];
       if (!ALLOWED_OCR_MIME_TYPES.has(mimeType)) {
-        return { error: `Unsupported document format (${mimeType}). Allowed formats are JPEG, PNG, WebP, and PDF.`, status: 400 };
+        return { error: `Unsupported document format (${mimeType}). Allowed formats are JPEG, PNG, WebP, PDF, XLSX, XLS, and CSV.`, status: 400 };
       }
       if (!base64Content || base64Content.trim().length === 0) {
         return { error: "Document payload cannot be empty.", status: 400 };
@@ -377,6 +439,60 @@ export async function handleOcrRoute(
       base64Content = singleVal.base64Content!;
     }
 
+    // Built-in Spreadsheet Reader (.xlsx, .xls, .csv) for SF1, SF2, SF9, and SF10
+    const { isExcelOrCsvMimeOrExt, extractExcelDocument } = await import("./excelDocumentExtractor");
+    if (isExcelOrCsvMimeOrExt(mimeType) || isExcelOrCsvMimeOrExt(body?.fileName || body?.name)) {
+      try {
+        const excelBuffer = Buffer.from(base64Content, "base64");
+        const excelDoc = extractExcelDocument(excelBuffer);
+        const rawLayout: any = {
+          tables: excelDoc.tables,
+          reconstructedRows: excelDoc.allReconstructedRows,
+          sheets: excelDoc.sheets,
+          isExcel: true,
+        };
+
+        let fields: any = undefined;
+        if (extractFields && fieldParser) {
+          fields = fieldParser(excelDoc.fullRawText, gradeLevel, rawLayout, effectiveDocType, targetOptions);
+        }
+
+        const { ocrConfidencePercent, extractedFieldCompletenessPercent } = calculateOcrMetrics(1.0, fields, effectiveDocType);
+        const responseData: any = {
+          text: excelDoc.fullRawText,
+          model: "sheetjs-xlsx",
+          provider: "excel",
+          confidence: 1.0,
+          ocrConfidencePercent,
+          extractedFieldCompletenessPercent,
+          rawLayout,
+        };
+
+        if (fields) {
+          fields.ocr_provider = "excel";
+          fields.ocr_model = "sheetjs-xlsx";
+          fields.ocr_confidence = 1.0;
+          fields.ocr_confidence_percent = ocrConfidencePercent;
+          fields.field_completeness_percent = extractedFieldCompletenessPercent;
+          if (fields.observed_values) {
+            fields.observed_values = sanitizeLearnersObservedValues(fields.observed_values);
+          }
+          responseData.fields = fields;
+        }
+
+        return Response.json(responseData);
+      } catch (excelErr: any) {
+        console.error("[ocr] Excel document extraction error:", excelErr);
+        return Response.json(
+          {
+            error: `Failed to parse spreadsheet document: ${excelErr?.message || String(excelErr)}`,
+            code: "SPREADSHEET_PARSE_ERROR",
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     // If Azure Document Intelligence is configured as primary, route through OcrOrchestrator
     if (isAzurePrimary) {
       try {
@@ -402,8 +518,8 @@ export async function handleOcrRoute(
           let frontFields: any = {};
           let backFields: any = {};
           if (extractFields && fieldParser) {
-            frontFields = fieldParser(frontResult.text, gradeLevel, frontResult.rawLayout, effectiveDocType);
-            backFields = fieldParser(backResult.text, gradeLevel, backResult.rawLayout, effectiveDocType);
+            frontFields = fieldParser(frontResult.text, gradeLevel, frontResult.rawLayout, effectiveDocType, targetOptions);
+            backFields = fieldParser(backResult.text, gradeLevel, backResult.rawLayout, effectiveDocType, targetOptions);
           }
 
           const combinedText = `=== FRONT (IDENTITY) ===\n${frontResult.text}\n\n=== BACK (GRADES) ===\n${backResult.text}`;
@@ -443,7 +559,9 @@ export async function handleOcrRoute(
             attendance_risk_status: backFields?.attendance_risk_status || frontFields?.attendance_risk_status,
             attendance_discrepancy_details: backFields?.attendance_discrepancy_details || frontFields?.attendance_discrepancy_details,
             general_average: backFields?.general_average ?? frontFields?.general_average,
-            observed_values: backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values,
+            observed_values: sanitizeLearnersObservedValues(
+              backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values
+            ),
             learner_progress_achievement: backFields?.learner_progress_achievement || frontFields?.learner_progress_achievement || crossSideCheck.mergedFields.learner_progress_achievement,
             grading_scale: backFields?.grading_scale || frontFields?.grading_scale || crossSideCheck.mergedFields.grading_scale,
             ocr_provider: frontResult.provider || "azure",
@@ -458,11 +576,17 @@ export async function handleOcrRoute(
             unifiedFields.ocr_confidence = avgConfidence;
           }
 
+          const { ocrConfidencePercent, extractedFieldCompletenessPercent } = calculateOcrMetrics(avgConfidence, unifiedFields, effectiveDocType);
+          unifiedFields.ocr_confidence_percent = ocrConfidencePercent;
+          unifiedFields.field_completeness_percent = extractedFieldCompletenessPercent;
+
           const responseData: any = {
             text: combinedText,
             model: unifiedFields.ocr_model,
             provider: frontResult.provider || "azure",
             fields: unifiedFields,
+            ocrConfidencePercent,
+            extractedFieldCompletenessPercent,
           };
           if (typeof avgConfidence === "number") {
             responseData.confidence = avgConfidence;
@@ -478,7 +602,7 @@ export async function handleOcrRoute(
           gradeLevel,
           documentSide,
           documentType: effectiveDocType,
-          ...((effectiveDocType === "sf10" || effectiveDocType === "sf9") &&
+          ...((effectiveDocType === "sf10" || effectiveDocType === "sf9" || effectiveDocType === "sf2" || effectiveDocType === "sf1" || effectiveDocType === "psa" || effectiveDocType === "birth_cert") &&
           extractFields &&
           !process.env.AZURE_DOCUMENT_INTELLIGENCE_MODEL
             ? { modelId: "prebuilt-layout" }
@@ -487,13 +611,17 @@ export async function handleOcrRoute(
 
         let fields: any = undefined;
         if (extractFields && fieldParser) {
-          fields = fieldParser(ocrResult.text, gradeLevel, ocrResult.rawLayout, effectiveDocType);
+          fields = fieldParser(ocrResult.text, gradeLevel, ocrResult.rawLayout, effectiveDocType, targetOptions);
         }
+
+        const { ocrConfidencePercent, extractedFieldCompletenessPercent } = calculateOcrMetrics(ocrResult.confidence, fields, effectiveDocType);
 
         const responseData: any = {
           text: ocrResult.text,
           model: ocrResult.model,
           provider: ocrResult.provider || "azure",
+          ocrConfidencePercent,
+          extractedFieldCompletenessPercent,
         };
         if (typeof ocrResult.confidence === "number") {
           responseData.confidence = ocrResult.confidence;
@@ -501,8 +629,13 @@ export async function handleOcrRoute(
         if (fields) {
           fields.ocr_provider = ocrResult.provider || "azure";
           fields.ocr_model = ocrResult.model;
+          fields.ocr_confidence_percent = ocrConfidencePercent;
+          fields.field_completeness_percent = extractedFieldCompletenessPercent;
           if (typeof ocrResult.confidence === "number") {
             fields.ocr_confidence = ocrResult.confidence;
+          }
+          if (fields.observed_values) {
+            fields.observed_values = sanitizeLearnersObservedValues(fields.observed_values);
           }
           responseData.fields = fields;
         }
@@ -545,8 +678,8 @@ export async function handleOcrRoute(
         let frontFields: any = undefined;
         let backFields: any = undefined;
         if (extractFields && fieldParser) {
-          frontFields = fieldParser(mFront.text, gradeLevel, undefined, effectiveDocType);
-          backFields = fieldParser(mBack.text, gradeLevel, undefined, effectiveDocType);
+          frontFields = fieldParser(mFront.text, gradeLevel, undefined, effectiveDocType, targetOptions);
+          backFields = fieldParser(mBack.text, gradeLevel, undefined, effectiveDocType, targetOptions);
         }
         const combinedText = `=== FRONT (IDENTITY) ===\n${mFront.text}\n\n=== BACK (GRADES) ===\n${mBack.text}`;
         const { evaluateTwoSidedSf9Identity } = await import("../teacher/sectionScanner");
@@ -569,7 +702,9 @@ export async function handleOcrRoute(
           attendance_risk_status: backFields?.attendance_risk_status || frontFields?.attendance_risk_status,
           attendance_discrepancy_details: backFields?.attendance_discrepancy_details || frontFields?.attendance_discrepancy_details,
           general_average: backFields?.general_average ?? frontFields?.general_average,
-          observed_values: backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values,
+          observed_values: sanitizeLearnersObservedValues(
+            backFields?.observed_values || frontFields?.observed_values || crossSideCheck.mergedFields.observed_values
+          ),
           learner_progress_achievement: backFields?.learner_progress_achievement || frontFields?.learner_progress_achievement || crossSideCheck.mergedFields.learner_progress_achievement,
           grading_scale: backFields?.grading_scale || frontFields?.grading_scale || crossSideCheck.mergedFields.grading_scale,
           ocr_provider: "mistral",
@@ -580,11 +715,17 @@ export async function handleOcrRoute(
           unifiedFields.grades = normalizeGradeRecords(unifiedFields.grades, unifiedFields.semester);
           Object.assign(unifiedFields, updateExtractedFieldsAverages(unifiedFields));
         }
+        const { ocrConfidencePercent: mTwoConf, extractedFieldCompletenessPercent: mTwoComp } = calculateOcrMetrics(undefined, unifiedFields, effectiveDocType);
+        unifiedFields.ocr_confidence_percent = mTwoConf;
+        unifiedFields.field_completeness_percent = mTwoComp;
+
         return Response.json({
           text: combinedText,
           model: "mistral-ocr-latest",
           provider: "mistral",
           fields: unifiedFields,
+          ocrConfidencePercent: mTwoConf,
+          extractedFieldCompletenessPercent: mTwoComp,
         });
       }
 
@@ -611,7 +752,7 @@ export async function handleOcrRoute(
                 extractFields,
                 gradeLevel,
                 documentType: effectiveDocType,
-                ...((effectiveDocType === "sf10" || effectiveDocType === "sf9") &&
+                ...((effectiveDocType === "sf10" || effectiveDocType === "sf9" || effectiveDocType === "sf2" || effectiveDocType === "sf1" || effectiveDocType === "psa" || effectiveDocType === "birth_cert") &&
                 extractFields &&
                 !process.env.AZURE_DOCUMENT_INTELLIGENCE_MODEL
                   ? { modelId: "prebuilt-layout" }
@@ -619,12 +760,15 @@ export async function handleOcrRoute(
               });
               let fallbackFields: any = undefined;
               if (extractFields && fieldParser) {
-                fallbackFields = fieldParser(fallbackRes.text, gradeLevel, fallbackRes.rawLayout, effectiveDocType);
+                fallbackFields = fieldParser(fallbackRes.text, gradeLevel, fallbackRes.rawLayout, effectiveDocType, targetOptions);
               }
+              const { ocrConfidencePercent: fbConf, extractedFieldCompletenessPercent: fbComp } = calculateOcrMetrics(fallbackRes.confidence, fallbackFields, effectiveDocType);
               const fallbackResponse: any = {
                 text: fallbackRes.text,
                 model: fallbackRes.model || "azure/prebuilt-read",
                 provider: "azure",
+                ocrConfidencePercent: fbConf,
+                extractedFieldCompletenessPercent: fbComp,
               };
               if (typeof fallbackRes.confidence === "number") {
                 fallbackResponse.confidence = fallbackRes.confidence;
@@ -632,6 +776,8 @@ export async function handleOcrRoute(
               if (fallbackFields) {
                 fallbackFields.ocr_provider = "azure";
                 fallbackFields.ocr_model = fallbackRes.model || "azure/prebuilt-read";
+                fallbackFields.ocr_confidence_percent = fbConf;
+                fallbackFields.field_completeness_percent = fbComp;
                 if (typeof fallbackRes.confidence === "number") {
                   fallbackFields.ocr_confidence = fallbackRes.confidence;
                 }
@@ -721,13 +867,17 @@ export async function handleOcrRoute(
 
     let fields: any = undefined;
     if (extractFields && fieldParser) {
-      fields = fieldParser(text, gradeLevel, undefined, effectiveDocType);
+      fields = fieldParser(text, gradeLevel, undefined, effectiveDocType, targetOptions);
     }
+
+    const { ocrConfidencePercent: mSingleConf, extractedFieldCompletenessPercent: mSingleComp } = calculateOcrMetrics(ocrResult?.confidence, fields, effectiveDocType);
 
     const responseData: any = {
       text,
       model: ocrResult?.model || "mistral-ocr-latest",
       provider: "mistral",
+      ocrConfidencePercent: mSingleConf,
+      extractedFieldCompletenessPercent: mSingleComp,
     };
 
     if (typeof ocrResult?.confidence === "number") {
@@ -737,6 +887,8 @@ export async function handleOcrRoute(
     if (fields) {
       fields.ocr_provider = "mistral";
       fields.ocr_model = ocrResult?.model || "mistral-ocr-latest";
+      fields.ocr_confidence_percent = mSingleConf;
+      fields.field_completeness_percent = mSingleComp;
       responseData.fields = fields;
     }
 

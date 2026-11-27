@@ -10,10 +10,12 @@
  */
 
 import type { GradeRecord, AttendanceRecord, ExtractedFields, LearnersObservedValues, LearnerProgressAndAchievement, GradingScaleItem } from "@/types/documents";
-import { evaluateAttendanceData, parseAttendanceNumber } from "../attendance/attendanceEvaluator";
-import { normalizeGradeRecords } from "../validation/gradeUtils";
+import { evaluateAttendanceData, parseAttendanceNumber, isConcatenatedZeros, parseAttendanceTotalNumber } from "../attendance/attendanceEvaluator";
+import { normalizeGradeRecords, evaluateDynamicGradeStatus, normalizeObservedValueMarking, sanitizeLearnersObservedValues, sanitizeAndRecoverDepEdGrade } from "../validation/gradeUtils";
 import { classifyFieldRecognition } from "./handwritingExtractor";
 import { parseAzureObservedValuesTable, parseAzureGradingScaleTable } from "./observedValuesParser";
+
+export { normalizeObservedValueMarking, sanitizeLearnersObservedValues, sanitizeAndRecoverDepEdGrade };
 
 export interface ParsedTableGradesResult {
   grades: GradeRecord[];
@@ -36,6 +38,11 @@ export interface ParsedTableGradesResult {
   attendance_risk_status?: "NORMAL" | "ATTENDANCE_WARNING" | "ATTENDANCE_REVIEW_REQUIRED" | "INCOMPLETE_ATTENDANCE_DATA";
   attendance_discrepancy_details?: string[];
   general_average?: number;
+  general_average_confidence?: number;
+  sem1_general_average?: number;
+  sem1_confidence?: number;
+  sem2_general_average?: number;
+  sem2_confidence?: number;
   observed_values?: LearnersObservedValues;
   learner_progress_achievement?: LearnerProgressAndAchievement;
   grading_scale?: LearnerProgressAndAchievement | GradingScaleItem[];
@@ -126,7 +133,12 @@ const GENERAL_AVERAGE_KEYWORDS = [
   "general average",
   "general average for the semester",
   "general weighted average",
+  "general ave",
+  "general ave.",
+  "general ave for the semester",
+  "general ave. for the semester",
   "gen. ave",
+  "gen ave",
   "gwa",
 ];
 
@@ -170,6 +182,16 @@ function parseGradeCell(content: string | undefined): number | string | undefine
   }
 
   return undefined;
+}
+
+/**
+ * Detect and split merged quarter cell strings containing two DepEd grades (60–100)
+ * separated by space or newline (e.g. "88\n88", "75\n95", "70 98").
+ */
+export function extractTwoQuarterGrades(cellText?: string | null): [number, number] | null {
+  if (!cellText) return null;
+  const matches = (String(cellText).match(/\b(6\d|7\d|8\d|9\d|100)\b/g) || []).map(Number);
+  return matches.length >= 2 ? [matches[0], matches[1]] : null;
 }
 
 /**
@@ -227,6 +249,31 @@ function buildCellMatrix(table: any): string[][] {
   return matrix;
 }
 
+function buildCellConfidenceMatrix(table: any): (number | undefined)[][] {
+  const rowCount = table.rowCount || 0;
+  const colCount = table.columnCount || 0;
+  const matrix: (number | undefined)[][] = Array.from({ length: rowCount }, () =>
+    Array.from({ length: colCount }, () => undefined)
+  );
+
+  for (const cell of table.cells || []) {
+    const r = cell.rowIndex ?? 0;
+    const c = cell.columnIndex ?? 0;
+    if (r < rowCount && c < colCount) {
+      const conf = typeof cell.confidence === "number" ? cell.confidence : undefined;
+      matrix[r][c] = conf;
+    }
+  }
+
+  return matrix;
+}
+
+function normalizeCellConfidencePct(conf?: number | null, fallback: number = 95): number {
+  if (conf === undefined || conf === null || isNaN(conf)) return fallback;
+  if (conf > 0 && conf <= 1) return Math.min(100, Math.max(0, Math.round(conf * 100)));
+  return Math.min(100, Math.max(0, Math.round(conf)));
+}
+
 // ---------------------------------------------------------------------------
 // Main Azure Layout Table Parser
 // ---------------------------------------------------------------------------
@@ -243,6 +290,9 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
     return result;
   }
 
+  let docGradeLevel: "Grade 11" | "Grade 12" | undefined = undefined;
+  let academicTableCount = 0;
+
   for (let tableIdx = 0; tableIdx < rawTables.length; tableIdx++) {
     const table = rawTables[tableIdx];
     if (!table || !Array.isArray(table.cells) || table.cells.length === 0) {
@@ -254,7 +304,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       try {
         const ov = parseAzureObservedValuesTable(table);
         if (ov) {
-          result.observed_values = ov;
+          result.observed_values = sanitizeLearnersObservedValues(ov);
         }
       } catch (err) {
         console.warn("[tableGradesParser] Error parsing Observed Values table:", err);
@@ -303,6 +353,10 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
               return MONTH_KEYWORDS.some((kw) => l === kw || l.includes(kw));
             });
           }
+          // Ensure Apr (11th month) is never dropped when DepEd calendar starts in Jun
+          if (months.length === 10 && months[0].toLowerCase().startsWith("jun") && months[9].toLowerCase().startsWith("mar")) {
+            months.push("Apr");
+          }
           continue;
         }
 
@@ -319,19 +373,79 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
             values = row.slice(1).map((c) => c.trim());
           }
 
-          // Auto-sum if printed total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
-          let autoSum = 0;
-          let hasMonthlyNum = false;
-          for (const v of values) {
-            const num = parseAttendanceNumber(v);
-            if (num !== undefined) {
-              autoSum += num;
-              hasMonthlyNum = true;
+          // FIX: 100000000000 Concatenated Zero / Vertical Grid-Line Bug in No. of Days Absent
+          const isAbsentRow = lowerLabel.includes("absent") || lowerLabel.includes("lumiban");
+          const rowHasConcatZeros =
+            isConcatenatedZeros(printedTotal) ||
+            values.some((v) => isConcatenatedZeros(v)) ||
+            (isAbsentRow && (
+              values.length <= 1 ||
+              /^1?0{6,14}$/.test(row.slice(1).join("").replace(/[\s\t|]+/g, ""))
+            ));
+
+          const targetMonthCount = months.length > 0 ? months.length : 11;
+
+          if (rowHasConcatZeros && isAbsentRow) {
+            values = Array.from({ length: targetMonthCount }, () => "0");
+            printedTotal = "0";
+          } else {
+            // Process month cells and separate joined tokens like "17.5/201.5"
+            for (let vIdx = 0; vIdx < values.length; vIdx++) {
+              let v = values[vIdx];
+              if (v.includes("/")) {
+                const parts = v.split("/");
+                values[vIdx] = parts[0].trim();
+                if (!printedTotal && parts[1]) {
+                  printedTotal = parts[1].trim();
+                }
+                v = values[vIdx];
+              }
+
+              if (isConcatenatedZeros(v)) {
+                values[vIdx] = "0";
+              } else {
+                // Bounds enforcement: 0 <= month <= 31
+                const num = parseFloat(v);
+                if (!isNaN(num) && num > 31) {
+                  // Grid line '1' prefix artifact e.g. 117.5 -> 17.5
+                  if (/^1\d{2}(?:\.\d+)?$/.test(v)) {
+                    const rem = parseFloat(v.slice(1));
+                    if (!isNaN(rem) && rem <= 31) {
+                      values[vIdx] = String(rem);
+                    }
+                  }
+                }
+              }
+            }
+
+            // Sanitize printedTotal (prefer printed bottom 201.5 over scribbles like 162)
+            if (printedTotal !== undefined) {
+              if (isConcatenatedZeros(printedTotal)) {
+                printedTotal = "0";
+              } else {
+                const totalNum = parseAttendanceTotalNumber(printedTotal);
+                if (totalNum !== undefined) {
+                  printedTotal = String(totalNum);
+                }
+              }
             }
           }
-          if (hasMonthlyNum && (printedTotal === undefined || printedTotal === "" || printedTotal === "-" || printedTotal === "—")) {
-            autoSum = Math.round(autoSum * 100) / 100;
-            printedTotal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+
+          // Auto-sum ONLY if printed total is blank while monthly numbers exist
+          if (printedTotal === undefined || printedTotal === "" || printedTotal === "-" || printedTotal === "—") {
+            let autoSum = 0;
+            let hasMonthlyNum = false;
+            for (const v of values) {
+              const num = parseAttendanceNumber(v);
+              if (num !== undefined) {
+                autoSum += num;
+                hasMonthlyNum = true;
+              }
+            }
+            if (hasMonthlyNum) {
+              autoSum = Math.round(autoSum * 100) / 100;
+              printedTotal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+            }
           }
 
           // Canonical DepEd metric label normalization
@@ -415,6 +529,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
 
     // 3. Academic Subject Grades Table Detection & Classification (Phases 9 & 10)
     const matrix = buildCellMatrix(table);
+    const confMatrix = buildCellConfidenceMatrix(table);
     if (matrix.length < 3) continue;
 
     // Determine semester and column mapping
@@ -435,6 +550,17 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       continue;
     }
 
+    // Ignore Remedial Classes tables so they never shift column mapping or overwrite regular semesters
+    if (
+      fullTableText.includes("remedial class") ||
+      fullTableText.includes("remedial classes") ||
+      fullTableText.includes("recomputed final grade")
+    ) {
+      continue;
+    }
+
+    const currentAcademicIdx = academicTableCount++;
+
     let isSemester1 = false;
     let isSemester2 = false;
     let isFullYearQuarterly = false;
@@ -442,29 +568,37 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
 
     if (/\bgrade\s*(?:level)?[:\s]*(?:12|xii)\b/i.test(fullTableText)) {
       tableGradeLevel = "Grade 12";
+      docGradeLevel = "Grade 12";
     } else if (/\bgrade\s*(?:level)?[:\s]*(?:11|xi)\b/i.test(fullTableText)) {
       tableGradeLevel = "Grade 11";
+      docGradeLevel = "Grade 11";
+    } else {
+      tableGradeLevel = docGradeLevel;
     }
 
     const firstRowsText = matrix.slice(0, 3).map((r) => r.join(" ")).join(" ").toLowerCase();
-    if (firstRowsText.includes("second semester") || firstRowsText.includes("2nd semester")) {
+    const isSem1Header =
+      /\b(?:first\s*semester|1st\s*sem(?:ester)?|sem(?:ester)?[:\s]*1\b|sem[:\s]*i\b)\b/i.test(firstRowsText) ||
+      /\b(?:first\s*semester|1st\s*sem(?:ester)?|sem(?:ester)?[:\s]*1\b)\b/i.test(fullTableText);
+    const isSem2Header =
+      /\b(?:second\s*semester|2nd\s*sem(?:ester)?|sem(?:ester)?[:\s]*2\b|sem[:\s]*ii\b)\b/i.test(firstRowsText) ||
+      /\b(?:second\s*semester|2nd\s*sem(?:ester)?|sem(?:ester)?[:\s]*2\b)\b/i.test(fullTableText);
+
+    if (isSem2Header && !isSem1Header) {
       isSemester2 = true;
       isSemester1 = false;
-    } else if (firstRowsText.includes("first semester") || firstRowsText.includes("1st semester")) {
+    } else if (isSem1Header && !isSem2Header) {
       isSemester1 = true;
       isSemester2 = false;
-    } else {
-      if (fullTableText.includes("second semester") || fullTableText.includes("2nd semester")) {
-        isSemester2 = true;
-      }
-      if (fullTableText.includes("first semester") || fullTableText.includes("1st semester")) {
-        isSemester1 = true;
-      }
     }
 
     // Inspect header rows (Row 0 and Row 1) for column positioning
     const headerRow0 = matrix[0] || [];
     const headerRow1 = matrix[1] || [];
+
+    const combinedHeadersText = (headerRow0.join(" ") + " " + headerRow1.join(" ") + " " + firstRowsText).toLowerCase();
+    const isQ4BeforeQ3 = /\b(?:4th|4|quarter\s*4|q4)\b[^\n\r|]{0,30}\b(?:3rd|3|quarter\s*3|q3)\b/i.test(combinedHeadersText);
+    const isQ2BeforeQ1 = /\b(?:2nd|2|quarter\s*2|q2)\b[^\n\r|]{0,30}\b(?:1st|1|quarter\s*1|q1)\b/i.test(combinedHeadersText);
 
     let subjectCol = 0;
     let q1Col = -1;
@@ -472,6 +606,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
     let q3Col = -1;
     let q4Col = -1;
     let finalGradeCol = -1;
+    let remarksCol = -1;
 
     // Search header rows for column numbers
     for (let c = 0; c < table.columnCount; c++) {
@@ -552,6 +687,14 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       ) {
         finalGradeCol = c;
       }
+
+      if (
+        combined.includes("action") ||
+        combined.includes("remark") ||
+        combined.includes("pasya")
+      ) {
+        remarksCol = c;
+      }
     }
 
     // Determine calendar structure:
@@ -560,37 +703,45 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       isFullYearQuarterly = true;
       isSemester1 = false;
       isSemester2 = false;
-    } else if (q3Col >= 0 || q4Col >= 0) {
+    } else if (q3Col >= 0 || q4Col >= 0 || isSemester2) {
       // Explicit Q3 or Q4 columns present -> strictly Second Semester
       isSemester2 = true;
       isSemester1 = false;
       if (q3Col === -1 && table.columnCount >= 3) q3Col = 1;
-      if (q4Col === -1 && table.columnCount >= 3) q4Col = 2;
-    } else if (isSemester2 && !isSemester1) {
-      // Explicit Second Semester heading without Q1/Q2 headers
-      isSemester2 = true;
-      isSemester1 = false;
-      if (q3Col === -1 && q1Col >= 0) q3Col = q1Col;
-      if (q4Col === -1 && q2Col >= 0) q4Col = q2Col;
-      if (q3Col === -1 && table.columnCount >= 3) q3Col = 1;
-      if (q4Col === -1 && table.columnCount >= 3) q4Col = 2;
+      if (q4Col === -1 && table.columnCount >= 4) q4Col = 2;
     } else {
       // Default to First Semester (Q1, Q2)
       isSemester1 = true;
       isSemester2 = false;
       if (q1Col === -1 && table.columnCount >= 3) q1Col = 1;
-      if (q2Col === -1 && table.columnCount >= 3) q2Col = 2;
+      if (q2Col === -1 && table.columnCount >= 4) q2Col = 2;
     }
 
-    // Default column fallbacks for final grade column
-    if (finalGradeCol === -1 && table.columnCount >= 4) {
-      finalGradeCol = isFullYearQuarterly ? 5 : 3;
+    // Default column fallbacks for final grade column and remarks
+    if (finalGradeCol === -1) {
+      if (isFullYearQuarterly && table.columnCount >= 6) {
+        finalGradeCol = 5;
+      } else if (table.columnCount === 4) {
+        finalGradeCol = 2;
+      } else if (table.columnCount >= 5) {
+        finalGradeCol = 3;
+      }
     }
 
-    // If still undetermined semester, infer from table index if table 1 vs 2
+    if (remarksCol === -1 && table.columnCount >= 4) {
+      remarksCol = table.columnCount - 1;
+    }
+
+    // Prevent quarter column from stealing SEM FINAL GRADE column
+    if (finalGradeCol >= 0) {
+      if (q4Col === finalGradeCol) q4Col = -1;
+      if (q2Col === finalGradeCol) q2Col = -1;
+    }
+
+    // If still undetermined semester, infer from academic table index (table 0 vs 1)
     if (!isFullYearQuarterly && !isSemester1 && !isSemester2) {
-      isSemester1 = tableIdx === 0;
-      isSemester2 = tableIdx === 1;
+      isSemester1 = currentAcademicIdx === 0;
+      isSemester2 = currentAcademicIdx === 1;
     }
 
     const semesterLabel = isFullYearQuarterly
@@ -653,18 +804,57 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
 
       // Check General Average row
       if (GENERAL_AVERAGE_KEYWORDS.some((kw) => lowerSubject === kw || lowerSubject.includes(kw))) {
-        // Look for explicit numeric grade in the row
+        const tableOrDocConf =
+          typeof (table as any)?.confidence === "number"
+            ? Math.round((table as any).confidence <= 1 ? (table as any).confidence * 100 : (table as any).confidence)
+            : typeof rawLayout?.confidence === "number"
+            ? Math.round(rawLayout.confidence <= 1 ? rawLayout.confidence * 100 : rawLayout.confidence)
+            : 95;
+
+        let foundAvg: number | undefined = undefined;
+        let foundConf: number | undefined = undefined;
+
+        // Look for explicit numeric grade in row cells
         for (let c = 1; c < row.length; c++) {
           const parsedAvg = parseGradeCell(row[c]);
-          if (typeof parsedAvg === "number") {
-            result.general_average = parsedAvg;
+          if (typeof parsedAvg === "number" && parsedAvg >= 60 && parsedAvg <= 100) {
+            foundAvg = parsedAvg;
+            foundConf = confMatrix[r]?.[c] !== undefined
+              ? normalizeCellConfidencePct(confMatrix[r]?.[c], tableOrDocConf)
+              : tableOrDocConf;
             break;
+          }
+        }
+
+        // If not found in other cells, check if embedded in row[0] (e.g. "General Ave. for the Semester: 86.5")
+        if (foundAvg === undefined) {
+          const embeddedInSubject = (row[0] || "").match(/\b(6\d|7\d|8\d|9\d|100)(?:\.\d+)?\b/);
+          if (embeddedInSubject) {
+            const val = parseFloat(embeddedInSubject[0]);
+            if (val >= 60 && val <= 100) {
+              foundAvg = val;
+              foundConf = confMatrix[r]?.[0] !== undefined
+                ? normalizeCellConfidencePct(confMatrix[r]?.[0], tableOrDocConf)
+                : tableOrDocConf;
+            }
+          }
+        }
+
+        if (foundAvg !== undefined) {
+          result.general_average = foundAvg;
+          result.general_average_confidence = foundConf ?? tableOrDocConf;
+          if (isSemester1) {
+            result.sem1_general_average = foundAvg;
+            result.sem1_confidence = foundConf ?? tableOrDocConf;
+          } else if (isSemester2) {
+            result.sem2_general_average = foundAvg;
+            result.sem2_confidence = foundConf ?? tableOrDocConf;
           }
         }
         continue;
       }
 
-      // Extract quarterly marks
+      // Extract quarterly marks (with merged quarter cell splitting)
       let q1: number | string | undefined;
       let q2: number | string | undefined;
       let q3: number | string | undefined;
@@ -676,38 +866,182 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : undefined;
         q4 = q4Col >= 0 ? parseGradeCell(row[q4Col]) : undefined;
       } else if (isSemester2) {
-        q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : undefined;
-        q4 = q4Col >= 0 ? parseGradeCell(row[q4Col]) : undefined;
-      } else {
-        q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : undefined;
-        q2 = q2Col >= 0 ? parseGradeCell(row[q2Col]) : undefined;
-      }
-
-      const finalGradeVal = finalGradeCol >= 0 ? parseGradeCell(row[finalGradeCol]) : undefined;
-
-      // Final grade candidates (Do NOT calculate or infer!)
-      const semFinal = finalGradeVal;
-
-      // Status and verification flag evaluation
-      let status: "Passed" | "Failed" | "Missing" = "Missing";
-      let needsVerification = false;
-
-      const candidateFinal = semFinal;
-      if (candidateFinal !== undefined) {
-        if (typeof candidateFinal === "number") {
-          status = candidateFinal < 75 ? "Failed" : "Passed";
-          if (candidateFinal >= 72 && candidateFinal <= 77) {
-            needsVerification = true;
+        const quarterCellVal = q3Col >= 0 ? row[q3Col] : (q4Col >= 0 ? row[q4Col] : row[1]);
+        const mergedQ2 = extractTwoQuarterGrades(quarterCellVal);
+        if (mergedQ2) {
+          if (isQ4BeforeQ3) {
+            q4 = mergedQ2[0];
+            q3 = mergedQ2[1];
+          } else {
+            q3 = mergedQ2[0];
+            q4 = mergedQ2[1];
           }
         } else {
-          // Non-numeric mark (e.g. INC, DRP)
-          status = "Missing";
-          needsVerification = true;
+          q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : undefined;
+          q4 = q4Col >= 0 && q4Col !== finalGradeCol ? parseGradeCell(row[q4Col]) : undefined;
         }
       } else {
-        status = "Missing";
-        needsVerification = true;
+        const quarterCellVal1 = q1Col >= 0 ? row[q1Col] : (q2Col >= 0 ? row[q2Col] : row[1]);
+        const mergedQ1 = extractTwoQuarterGrades(quarterCellVal1);
+        if (mergedQ1) {
+          if (isQ2BeforeQ1) {
+            q2 = mergedQ1[0];
+            q1 = mergedQ1[1];
+          } else {
+            q1 = mergedQ1[0];
+            q2 = mergedQ1[1];
+          }
+        } else {
+          q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : undefined;
+          q2 = q2Col >= 0 && q2Col !== finalGradeCol ? parseGradeCell(row[q2Col]) : undefined;
+        }
       }
+
+      // Determine default cell confidence from row cells, table confidence, or document readability confidence (90–96%)
+      const rowCellConfs: number[] = [];
+      for (let c = 0; c < (confMatrix[r]?.length || 0); c++) {
+        const val = confMatrix[r]?.[c];
+        if (typeof val === "number" && !isNaN(val)) {
+          rowCellConfs.push(val <= 1 ? Math.round(val * 100) : Math.round(val));
+        }
+      }
+      const rowAvgConf = rowCellConfs.length > 0
+        ? Math.round(rowCellConfs.reduce((a, b) => a + b, 0) / rowCellConfs.length)
+        : undefined;
+
+      const docOrTableConf =
+        typeof (table as any)?.confidence === "number"
+          ? Math.round((table as any).confidence <= 1 ? (table as any).confidence * 100 : (table as any).confidence)
+          : typeof rawLayout?.confidence === "number"
+          ? Math.round(rawLayout.confidence <= 1 ? rawLayout.confidence * 100 : rawLayout.confidence)
+          : 95;
+
+      const defaultCellConf = rowAvgConf ?? docOrTableConf;
+
+      let q1Conf = q1Col >= 0
+        ? (confMatrix[r]?.[q1Col] !== undefined
+            ? normalizeCellConfidencePct(confMatrix[r]?.[q1Col])
+            : (q1 !== undefined && q1 !== null ? defaultCellConf : undefined))
+        : (q1 !== undefined && q1 !== null ? defaultCellConf : undefined);
+      let q2Conf = q2Col >= 0
+        ? (confMatrix[r]?.[q2Col] !== undefined
+            ? normalizeCellConfidencePct(confMatrix[r]?.[q2Col])
+            : (q2 !== undefined && q2 !== null ? defaultCellConf : undefined))
+        : (q2 !== undefined && q2 !== null ? defaultCellConf : undefined);
+      let q3Conf = q3Col >= 0
+        ? (confMatrix[r]?.[q3Col] !== undefined
+            ? normalizeCellConfidencePct(confMatrix[r]?.[q3Col])
+            : (q3 !== undefined && q3 !== null ? defaultCellConf : undefined))
+        : (q3 !== undefined && q3 !== null ? defaultCellConf : undefined);
+      let q4Conf = q4Col >= 0
+        ? (confMatrix[r]?.[q4Col] !== undefined
+            ? normalizeCellConfidencePct(confMatrix[r]?.[q4Col])
+            : (q4 !== undefined && q4 !== null ? defaultCellConf : undefined))
+        : (q4 !== undefined && q4 !== null ? defaultCellConf : undefined);
+
+      if (q1 !== undefined && q1 !== null && (q1Conf === undefined || isNaN(q1Conf))) q1Conf = defaultCellConf;
+      if (q2 !== undefined && q2 !== null && (q2Conf === undefined || isNaN(q2Conf))) q2Conf = q1Conf ?? defaultCellConf;
+      if (q3 !== undefined && q3 !== null && (q3Conf === undefined || isNaN(q3Conf))) q3Conf = defaultCellConf;
+      if (q4 !== undefined && q4 !== null && (q4Conf === undefined || isNaN(q4Conf))) q4Conf = q3Conf ?? defaultCellConf;
+      let finalGradeVal = finalGradeCol >= 0 ? parseGradeCell(row[finalGradeCol]) : undefined;
+      let finalConf = finalGradeCol >= 0
+        ? (confMatrix[r]?.[finalGradeCol] !== undefined
+            ? normalizeCellConfidencePct(confMatrix[r]?.[finalGradeCol])
+            : (finalGradeVal !== undefined && finalGradeVal !== null ? defaultCellConf : undefined))
+        : undefined;
+
+      // Homoglyph recovery for quarterly marks (e.g. 16 -> 86, 19 -> 79, 8 -> 88)
+      if (q1 !== undefined && q1 !== null) {
+        const recQ1 = sanitizeAndRecoverDepEdGrade({
+          rawGrade: q1,
+          siblingQuarter: typeof q2 === "number" ? q2 : undefined,
+          confidencePercent: q1Conf,
+        });
+        if (recQ1.wasRecovered && recQ1.grade !== null) {
+          q1 = recQ1.grade;
+          q1Conf = Math.min(q1Conf ?? 95, 85);
+        }
+      }
+      if (q2 !== undefined && q2 !== null) {
+        const recQ2 = sanitizeAndRecoverDepEdGrade({
+          rawGrade: q2,
+          siblingQuarter: typeof q1 === "number" ? q1 : undefined,
+          confidencePercent: q2Conf,
+        });
+        if (recQ2.wasRecovered && recQ2.grade !== null) {
+          q2 = recQ2.grade;
+          q2Conf = Math.min(q2Conf ?? 95, 85);
+        }
+      }
+      if (q3 !== undefined && q3 !== null) {
+        const recQ3 = sanitizeAndRecoverDepEdGrade({
+          rawGrade: q3,
+          siblingQuarter: typeof q4 === "number" ? q4 : undefined,
+          confidencePercent: q3Conf,
+        });
+        if (recQ3.wasRecovered && recQ3.grade !== null) {
+          q3 = recQ3.grade;
+          q3Conf = Math.min(q3Conf ?? 95, 85);
+        }
+      }
+      if (q4 !== undefined && q4 !== null) {
+        const recQ4 = sanitizeAndRecoverDepEdGrade({
+          rawGrade: q4,
+          siblingQuarter: typeof q3 === "number" ? q3 : undefined,
+          confidencePercent: q4Conf,
+        });
+        if (recQ4.wasRecovered && recQ4.grade !== null) {
+          q4 = recQ4.grade;
+          q4Conf = Math.min(q4Conf ?? 95, 85);
+        }
+      }
+
+      const qAVal = typeof q1 === "number" ? q1 : typeof q3 === "number" ? q3 : undefined;
+      const qBVal = typeof q2 === "number" ? q2 : typeof q4 === "number" ? q4 : undefined;
+
+      let semFinal = finalGradeVal;
+      let candidateFinal = semFinal;
+      if (candidateFinal !== undefined && candidateFinal !== null) {
+        const recFin = sanitizeAndRecoverDepEdGrade({
+          rawGrade: candidateFinal,
+          q1: qAVal,
+          q2: qBVal,
+          confidencePercent: finalConf,
+        });
+        if (recFin.wasRecovered && recFin.grade !== null) {
+          candidateFinal = recFin.grade;
+          semFinal = recFin.grade;
+          finalConf = Math.min(finalConf ?? 95, 85);
+        }
+      }
+
+      // Extract field OCR confidence
+      const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
+      const fieldConf =
+        finalConf ??
+        gradeRec?.confidence ??
+        gradeRec?.icr_confidence ??
+        (typeof (table as any)?.confidence === "number" ? (table as any).confidence : undefined) ??
+        (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
+        0.95;
+
+      const rawRemark = remarksCol >= 0 ? row[remarksCol] : undefined;
+      const gradeEval = evaluateDynamicGradeStatus({
+        grade: candidateFinal,
+        rawRemark: rawRemark ? String(rawRemark).trim() : undefined,
+        confidencePercent: fieldConf,
+        q1: qAVal,
+        q2: qBVal,
+      });
+
+      // Status and verification flag evaluation
+      let status: "Passed" | "Failed" | "Missing" =
+        gradeEval.status === "passed" ? "Passed" : gradeEval.status === "failed" ? "Failed" : "Missing";
+      let needsVerification =
+        candidateFinal === undefined ||
+        gradeEval.isLowConfidence ||
+        gradeEval.status === "not_recognized" ||
+        (typeof candidateFinal === "number" && candidateFinal >= 72 && candidateFinal <= 77);
 
       // Borderline quarterly check
       const quarterNumericValues = [q1, q2, q3, q4].filter((v) => typeof v === "number") as number[];
@@ -721,7 +1055,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         ? result.grades.findIndex((g) => g.subject.toLowerCase() === rawSubject.toLowerCase())
         : result.grades.findIndex(
             (g) =>
-              g.grade_level === tableGradeLevel &&
+              (!tableGradeLevel || !g.grade_level || g.grade_level === tableGradeLevel) &&
               g.semester === semesterLabel &&
               g.subject.toLowerCase() === rawSubject.toLowerCase()
           );
@@ -733,6 +1067,10 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         if (q2 !== undefined) existing.q2 = q2;
         if (q3 !== undefined) existing.q3 = q3;
         if (q4 !== undefined) existing.q4 = q4;
+        if (q1Conf !== undefined) { existing.q1Confidence = q1Conf; existing.q1_confidence = q1Conf; }
+        if (q2Conf !== undefined) { existing.q2Confidence = q2Conf; existing.q2_confidence = q2Conf; }
+        if (q3Conf !== undefined) { existing.q3Confidence = q3Conf; existing.q3_confidence = q3Conf; }
+        if (q4Conf !== undefined) { existing.q4Confidence = q4Conf; existing.q4_confidence = q4Conf; }
         if (semFinal !== undefined) {
           if (isSemester2) {
             existing.sem2_final_grade = semFinal;
@@ -741,26 +1079,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           }
           existing.final = semFinal;
           existing.status = status;
+          existing.remarks = gradeEval.remarkDisplay;
+          existing.remark = gradeEval.remarkDisplay;
+          existing.finalGradeConfidence = finalConf;
+          existing.final_confidence = finalConf;
         }
         if (needsVerification) existing.needsVerification = true;
         if (existing.confidence === undefined) {
-          const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
-          existing.confidence =
-            gradeRec?.confidence ??
-            gradeRec?.icr_confidence ??
-            (typeof (table as any)?.confidence === "number" ? (table as any).confidence : undefined) ??
-            (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
-            0.95;
+          existing.confidence = fieldConf;
         }
       } else {
-        const gradeRec = rawLayout ? classifyFieldRecognition(rawSubject, rawLayout) : undefined;
-        const fieldConf =
-          gradeRec?.confidence ??
-          gradeRec?.icr_confidence ??
-          (typeof (table as any)?.confidence === "number" ? (table as any).confidence : undefined) ??
-          (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
-          0.95;
-
         const record: GradeRecord = {
           category: currentCategory || undefined,
           subject: rawSubject,
@@ -773,8 +1101,20 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           q4,
           final: candidateFinal,
           status,
+          remarks: gradeEval.remarkDisplay,
+          remark: gradeEval.remarkDisplay,
           needsVerification,
           confidence: fieldConf,
+          q1Confidence: q1Conf,
+          q2Confidence: q2Conf,
+          q3Confidence: q3Conf,
+          q4Confidence: q4Conf,
+          finalGradeConfidence: finalConf,
+          q1_confidence: q1Conf,
+          q2_confidence: q2Conf,
+          q3_confidence: q3Conf,
+          q4_confidence: q4Conf,
+          final_confidence: finalConf,
           recognition_type: gradeRec?.recognition_type || "printed_ocr",
           is_handwritten: gradeRec?.is_handwritten || false,
           icr_confidence: gradeRec?.icr_confidence,

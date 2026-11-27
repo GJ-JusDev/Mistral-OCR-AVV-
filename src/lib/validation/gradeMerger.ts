@@ -9,7 +9,8 @@ import {
   computeSemesterGeneralAverage, 
   normalizeSemesterContext, 
   parseQuarterNumeric,
-  updateExtractedFieldsAverages 
+  updateExtractedFieldsAverages,
+  evaluateDynamicGradeStatus
 } from "./gradeUtils";
 
 export interface GradeQuarterConflict {
@@ -55,34 +56,44 @@ export function recomputeSubjectFinalAndStatus(rec: GradeRecord, semesterContext
     if (q1 !== undefined && q2 !== undefined) {
       const raw = computeRawSemesterFinalGrade(q1, q2);
       const final = computeOfficialSemesterFinalGrade(q1, q2);
+      const eval1 = evaluateDynamicGradeStatus({ grade: final });
       updated.q1 = q1;
       updated.q2 = q2;
       updated.sem1_final_grade = final;
       updated.final = final;
-      updated.status = final !== undefined && final >= 75 ? "Passed" : "Failed";
-      updated.needsVerification = false;
+      updated.status = eval1.status === "passed" ? "Passed" : eval1.status === "failed" ? "Failed" : "Missing";
+      updated.remarks = eval1.remarkDisplay;
+      updated.remark = eval1.remarkDisplay;
+      updated.needsVerification = eval1.isLowConfidence || eval1.status === "blank";
       (updated as any).raw_calculated_final = raw;
     } else {
       updated.sem1_final_grade = undefined;
       updated.final = undefined;
       updated.status = "Missing";
+      updated.remarks = "Blank / Incomplete";
+      updated.remark = "Blank / Incomplete";
       updated.needsVerification = true;
     }
   } else if (sem === "2nd Semester") {
     if (q3 !== undefined && q4 !== undefined) {
       const raw = computeRawSemesterFinalGrade(q3, q4);
       const final = computeOfficialSemesterFinalGrade(q3, q4);
+      const eval2 = evaluateDynamicGradeStatus({ grade: final });
       updated.q3 = q3;
       updated.q4 = q4;
       updated.sem2_final_grade = final;
       updated.final = final;
-      updated.status = final !== undefined && final >= 75 ? "Passed" : "Failed";
-      updated.needsVerification = false;
+      updated.status = eval2.status === "passed" ? "Passed" : eval2.status === "failed" ? "Failed" : "Missing";
+      updated.remarks = eval2.remarkDisplay;
+      updated.remark = eval2.remarkDisplay;
+      updated.needsVerification = eval2.isLowConfidence || eval2.status === "blank";
       (updated as any).raw_calculated_final = raw;
     } else {
       updated.sem2_final_grade = undefined;
       updated.final = undefined;
       updated.status = "Missing";
+      updated.remarks = "Blank / Incomplete";
+      updated.remark = "Blank / Incomplete";
       updated.needsVerification = true;
     }
   }

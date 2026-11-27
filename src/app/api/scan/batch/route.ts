@@ -14,6 +14,7 @@ import {
   evaluateBatchCrossDocumentValidation,
   rebuildBatchValidationReportFromPersistedResults,
 } from "@/lib/validation/batchCrossDocumentValidator";
+import { normalizeObservedValueMarking, sanitizeLearnersObservedValues } from "@/lib/validation/gradeUtils";
 import { parseGradesText } from "@/lib/ocr/gradesParser";
 import { mergeSf9FrontAndBack } from "@/lib/validation/sf9Merger";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
@@ -28,7 +29,14 @@ import {
   type TeacherAssignmentRecord,
 } from "@/lib/teacher/assignments";
 import { isValidLrn, normalizeLrn, normalizeSex } from "@/lib/validation/patterns";
-import { normalizeDate } from "@/lib/validation/nameComparison";
+import {
+  normalizeDate,
+  formatBatchNumber,
+  computeNextBatchNumber,
+  resolveDocumentStudentNameDisplay,
+  getDocumentCompositeKey,
+  verifyAllDocumentsMatchSf1,
+} from "@/lib/validation/nameComparison";
 import {
   buildPersistedValidationResponse,
   evaluateStudentValidation,
@@ -69,6 +77,9 @@ const ALLOWED_MIME_TYPES = new Set([
   "image/jpg",
   "image/png",
   "image/webp",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "text/csv",
 ]);
 
 const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB limit
@@ -461,9 +472,17 @@ export async function POST(request: NextRequest) {
       retrySegmentId,
       assignmentId,
       assignmentConfirmed = false,
-      batchId = `batch-${Date.now()}`,
+      batchId: rawBatchId = `batch-${Date.now()}`,
       files = [],
+      commitToRegistry = false,
+      previewOnly = false,
+      matchedFields: inputMatchedFields,
+      mismatchedFields: inputMismatchedFields,
+      blankFields: inputBlankFields,
     } = body;
+
+    const isCommit = Boolean(commitToRegistry && !previewOnly);
+    let batchId = formatBatchNumber(rawBatchId);
 
     // 3. Strict Mandatory Teacher Advisory Assignment Verification
     if (!assignmentId || typeof assignmentId !== "string" || !assignmentId.trim()) {
@@ -514,6 +533,23 @@ export async function POST(request: NextRequest) {
     const verifiedSchoolYear = assignment.school_year || "";
     const verifiedGradeLevel = normalizeGradeLevelKey(assignment.grade_level) || assignment.grade_level || "";
     const verifiedSection = assignment.section || "";
+
+    // Resolve sequential Batch Number (starting at BATCH-001) upon commit
+    if (isCommit && (!rawBatchId || !/^BATCH-\d{3,}$/i.test(rawBatchId))) {
+      try {
+        const { data: existingDocs } = await (supabase as any)
+          .from("documents")
+          .select("extracted_fields")
+          .eq("school_id", assignment.school_id)
+          .not("status", "in", "('archived','rejected')")
+          .limit(500);
+
+        const existingBatchNums = (existingDocs || []).map((d: any) => (d.extracted_fields as any)?.batch_number);
+        batchId = computeNextBatchNumber(existingBatchNums);
+      } catch {
+        batchId = "BATCH-001";
+      }
+    }
 
     // -------------------------------------------------------------------------
     // Phase 1: Boundary Segmentation & Classification
@@ -610,7 +646,7 @@ export async function POST(request: NextRequest) {
       if (!ALLOWED_MIME_TYPES.has(fItem.mimeType.toLowerCase())) {
         return NextResponse.json(
           {
-            error: `Unsupported file type: '${fItem.mimeType}'. Allowed formats are PDF, JPEG, PNG, and WebP.`,
+            error: `Unsupported file type: '${fItem.mimeType}'. Allowed formats are PDF, JPEG, PNG, WebP, XLSX, XLS, and CSV.`,
             code: "INVALID_FILE_TYPE",
           },
           { status: 400 }
@@ -627,7 +663,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Upload each unique source file to the private 'documents' bucket
+    // Upload each unique source file to the private 'documents' bucket only when committing
     interface UploadResult {
       storagePath: string;
       signedUrl: string;
@@ -637,41 +673,43 @@ export async function POST(request: NextRequest) {
     const fileStorageMap = new Map<string, UploadResult>();
     const fileUploadErrors: Array<{ fileName: string; error: string }> = [];
 
-    for (const [filename, fileObj] of uniqueFilesToUpload.entries()) {
-      const safeFilename = sanitizeFilename(fileObj.name);
-      // Format: <userId>/<assignmentId>/<timestamp>_<uuid>_<safeFilename>
-      // Satisfies Migration 026 RLS policy: folder 1 = auth.uid(), folder 2 = active assignment UUID
-      const storagePath = `${user.id}/${assignment.id}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeFilename}`;
+    if (isCommit) {
+      for (const [filename, fileObj] of uniqueFilesToUpload.entries()) {
+        const safeFilename = sanitizeFilename(fileObj.name);
+        // Format: <userId>/<assignmentId>/<timestamp>_<uuid>_<safeFilename>
+        // Satisfies Migration 026 RLS policy: folder 1 = auth.uid(), folder 2 = active assignment UUID
+        const storagePath = `${user.id}/${assignment.id}/${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeFilename}`;
 
-      const { error: uploadErr } = await supabase.storage
-        .from("documents")
-        .upload(storagePath, fileObj.buffer, {
-          contentType: fileObj.mimeType,
-          upsert: true,
-        });
-
-      if (uploadErr) {
-        console.error(`[scan/batch] Storage upload failed for "${filename}":`, uploadErr);
-        fileUploadErrors.push({ fileName: filename, error: uploadErr.message });
-        continue;
-      }
-
-      let signedUrl = "";
-      try {
-        const { data: signedData } = await supabase.storage
+        const { error: uploadErr } = await supabase.storage
           .from("documents")
-          .createSignedUrl(storagePath, 86400); // 24-hour initial signed URL
-        signedUrl = signedData?.signedUrl || "";
-      } catch (signErr) {
-        console.warn(`[scan/batch] Signed URL creation warning for ${storagePath}:`, signErr);
-      }
+          .upload(storagePath, fileObj.buffer, {
+            contentType: fileObj.mimeType,
+            upsert: true,
+          });
 
-      fileStorageMap.set(filename, {
-        storagePath,
-        signedUrl,
-        mimeType: fileObj.mimeType,
-        fileSize: fileObj.buffer.length,
-      });
+        if (uploadErr) {
+          console.error(`[scan/batch] Storage upload failed for "${filename}":`, uploadErr);
+          fileUploadErrors.push({ fileName: filename, error: uploadErr.message });
+          continue;
+        }
+
+        let signedUrl = "";
+        try {
+          const { data: signedData } = await supabase.storage
+            .from("documents")
+            .createSignedUrl(storagePath, 86400); // 24-hour initial signed URL
+          signedUrl = signedData?.signedUrl || "";
+        } catch (signErr) {
+          console.warn(`[scan/batch] Signed URL creation warning for ${storagePath}:`, signErr);
+        }
+
+        fileStorageMap.set(filename, {
+          storagePath,
+          signedUrl,
+          mimeType: fileObj.mimeType,
+          fileSize: fileObj.buffer.length,
+        });
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -803,11 +841,20 @@ export async function POST(request: NextRequest) {
 
         extractedSegmentData[seg.id] = parsed;
 
-        // Persist Parent Document into public.documents first
-        const docTypeForDb = seg.documentType;
-
         const primaryPage = seg.pages?.[0];
         const sourceFileName = primaryPage?.sourceFileName || (Array.isArray(files) && files[0]?.name) || "batch_upload.pdf";
+
+        // In preview mode (commitToRegistry: false), NEVER persist into database
+        if (!isCommit) {
+          seg.documentId = seg.id;
+          seg.persistenceStatus = "persisted";
+          seg.sourceFileName = sourceFileName;
+          seg.imageUrl = (primaryPage as any)?.sourceFileDataUrl || "";
+          continue;
+        }
+
+        // Persist Parent Document into public.documents first
+        const docTypeForDb = seg.documentType;
         const fileInfo = fileStorageMap.get(sourceFileName);
 
         const uploadErrMatch = fileUploadErrors.find((e) => e.fileName === sourceFileName);
@@ -836,41 +883,56 @@ export async function POST(request: NextRequest) {
 
           if (existingDoc) {
             existingDocId = existingDoc.id;
-            if (!realStoragePath && existingDoc.storage_path) {
-              realStoragePath = existingDoc.storage_path;
-              try {
-                const { data: sData, error: sErr } = await supabase.storage
-                  .from("documents")
-                  .createSignedUrl(realStoragePath, 3600);
-                if (!sErr && sData?.signedUrl) {
-                  realSignedUrl = sData.signedUrl;
-                } else if (sErr) {
-                  console.warn(`[scan/batch] createSignedUrl notice for ${realStoragePath}:`, sErr.message);
-                }
-              } catch (signErr) {
-                console.warn(`[scan/batch] createSignedUrl exception for ${realStoragePath}:`, signErr);
-              }
+          }
+        }
 
-              // Only fall back to existingDoc.image_url if it is a verified permanent public URL
-              if (!realSignedUrl && existingDoc.image_url && typeof existingDoc.image_url === "string") {
-                const isSignedWithToken =
-                  existingDoc.image_url.includes("/object/sign/") || existingDoc.image_url.includes("token=");
-                const isBase64 = existingDoc.image_url.startsWith("data:");
-                const isPrivateStorage =
-                  existingDoc.image_url.includes("/storage/v1/object/documents/") ||
-                  existingDoc.image_url.includes("/storage/v1/object/authenticated/documents/");
-                if (
-                  !isSignedWithToken &&
-                  !isBase64 &&
-                  !isPrivateStorage &&
-                  (existingDoc.image_url.startsWith("http://") || existingDoc.image_url.startsWith("https://"))
-                ) {
-                  realSignedUrl = existingDoc.image_url;
-                } else {
-                  realSignedUrl = "";
+        // Upsert on re-scan (Zero Redundancy): Check if an existing document record already exists
+        // for this student and document type in this school.
+        // Composite Key: LRN + Normalized Student Name + Canonical Document Type
+        if (!existingDocId) {
+          try {
+            const targetLrn = parsed?.lrn
+              ? String(parsed.lrn).replace(/[^0-9]/g, "")
+              : (parsed?.identity?.lrn ? String(parsed.identity.lrn).replace(/[^0-9]/g, "") : null);
+
+            const studentNameCand = resolveDocumentStudentNameDisplay({
+              document_type: seg.documentType,
+              extracted_fields: parsed,
+            });
+
+            let docQuery = (supabase as any)
+              .from("documents")
+              .select("id, storage_path, image_url, extracted_fields")
+              .eq("school_id", assignment.school_id)
+              .eq("document_type", docTypeForDb)
+              .not("status", "in", "('archived','rejected')");
+
+            if (targetLrn && targetLrn.length === 12) {
+              docQuery = docQuery.or(`canonical_lrn.eq.${targetLrn},extracted_fields->>lrn.eq.${targetLrn}`);
+              const { data: matchedByLrn } = await docQuery;
+              if (matchedByLrn && matchedByLrn.length > 0) {
+                existingDocId = matchedByLrn[0].id;
+              }
+            } else if (
+              studentNameCand &&
+              studentNameCand !== "-" &&
+              studentNameCand !== "No student found" &&
+              !studentNameCand.startsWith("Section Roster:")
+            ) {
+              const normTargetName = studentNameCand.toLowerCase().trim();
+              const { data: candidates } = await docQuery.limit(25);
+              if (candidates && candidates.length > 0) {
+                for (const c of candidates) {
+                  const cName = resolveDocumentStudentNameDisplay(c).toLowerCase().trim();
+                  if (cName && cName !== "-" && cName === normTargetName) {
+                    existingDocId = c.id;
+                    break;
+                  }
                 }
               }
             }
+          } catch (lookupErr) {
+            console.warn("[scan/batch] Upsert lookup warning:", lookupErr);
           }
         }
 
@@ -1101,12 +1163,24 @@ export async function POST(request: NextRequest) {
               status: g.status || null,
             })) : null;
 
+            if (parsed.observed_values) {
+              parsed.observed_values = sanitizeLearnersObservedValues(parsed.observed_values);
+            }
+
             const rawObs = Array.isArray(parsed.observed_values)
               ? parsed.observed_values
               : Array.isArray(parsed.observed_values?.observations)
                 ? parsed.observed_values.observations
                 : [];
-            const observedValuesRows = rawObs.length > 0 ? rawObs : null;
+            const observedValuesRows = rawObs.length > 0 ? rawObs.map((obs: any) => {
+              const normalized = normalizeObservedValueMarking(obs.normalized_rating ?? obs.original_mark);
+              const isBlank = !obs.original_mark || /^[-—_–\s]+$/.test(String(obs.original_mark));
+              return {
+                ...obs,
+                normalized_rating: normalized,
+                needs_verification: normalized === null && !isBlank,
+              };
+            }) : null;
 
             const rawLegends = Array.isArray(parsed.grading_scale_legends)
               ? parsed.grading_scale_legends
@@ -1556,40 +1630,183 @@ export async function POST(request: NextRequest) {
     rebuildBatchValidationReportFromPersistedResults(validationReport);
 
     // -------------------------------------------------------------------------
-    // Phase 4: Audit Logging
+    // Phase 3.5: Persist Structured Validation Findings (MATCH, MISMATCH, BLANK)
+    // and Propagate Canonical LRN to All Documents in Batch
     // -------------------------------------------------------------------------
+    const formattedBatchNumber = formatBatchNumber(validationReport.batchId || batchId);
     try {
-      await logAuditEvent({
-        category: "BATCH_SCAN" as any,
-        action: "BATCH_EXTRACTION_AND_VALIDATION_COMPLETED" as any,
-        outcome: persistenceErrors.length > 0 || crossValidationPersistenceErrors.length > 0
-          ? "FAILURE"
-          : validationReport.summary.mismatchedInformationCount === 0
-          ? "SUCCESS"
-          : "WARNING",
-        actorUserId: user.id,
-        actorEmail: user.email,
-        actorRole: "teacher",
-        actorSchoolId: roleRow.school_id,
-        actorSchoolName: "Taysan Resettlement Integrated School (500169)",
-        targetType: "batch",
-        targetId: validationReport.batchId,
-        targetLabel: `Batch Scan: ${verifiedSection} (${verifiedGradeLevel}, S.Y. ${verifiedSchoolYear})`,
-        details: {
-          total_segments: segments.length,
-          total_learners_detected: validationReport.summary.totalLearnersDetected,
-          successfully_matched: validationReport.summary.successfullyMatchedCount,
-          consistent_records: validationReport.summary.consistentRecordsCount,
-          mismatched_information: validationReport.summary.mismatchedInformationCount,
-          missing_documents: validationReport.summary.missingDocumentsCount,
-          incomplete_data: validationReport.summary.incompleteDataCount,
-          needs_manual_verification: validationReport.summary.needsManualVerificationCount,
-          persistence_errors_count: persistenceErrors.length,
-          cross_validation_persistence_errors_count: crossValidationPersistenceErrors.length,
-        },
-      });
-    } catch (auditErr) {
-      console.warn("[scan/batch] Audit log deferred:", auditErr);
+      for (const dossier of validationReport.learnerDossiers) {
+        const matchedFields: string[] = [];
+        const mismatchedFields: string[] = [];
+        const blankFields: string[] = [];
+
+        if (Array.isArray(dossier.unifiedMatrix)) {
+          for (const row of dossier.unifiedMatrix) {
+            const status = row.status || "MATCH";
+            const label = row.label || row.field || "Field";
+            if (status === "MATCH") {
+              matchedFields.push(label);
+            } else if (status === "MISMATCH") {
+              mismatchedFields.push(`${label} Mismatch`);
+            } else if (
+              status === "INCOMPLETE" ||
+              status === "NO DATA" ||
+              status === "NO_DATA" ||
+              (status as string) === "MISSING" ||
+              (status as string) === "BLANK_MISSING" ||
+              (status as string) === "BLANK" ||
+              (status as string) === "NOT_RECOGNIZED"
+            ) {
+              blankFields.push(`Blank/Missing ${label}`);
+            }
+          }
+        }
+
+        if (Array.isArray(dossier.discrepancies)) {
+          for (const disc of dossier.discrepancies) {
+            const desc = disc.reason || `${disc.field}: ${disc.source1Doc} vs ${disc.source2Doc}`;
+            if (!mismatchedFields.includes(desc)) {
+              mismatchedFields.push(desc);
+            }
+          }
+        }
+
+        if (Array.isArray(dossier.allSf9Records)) {
+          for (const rec of dossier.allSf9Records) {
+            if (rec.raw?.blank_grades_count || rec.raw?.is_back_only || rec.raw?.missing_grades_warning) {
+              blankFields.push("SF9 Back: Blank Final Grades / General Average");
+            }
+          }
+        }
+
+        // Merge client-provided findings from Step 6 matrix if available
+        if (Array.isArray(inputMatchedFields)) {
+          for (const m of inputMatchedFields) {
+            if (!matchedFields.includes(m)) matchedFields.push(m);
+          }
+        }
+        if (Array.isArray(inputMismatchedFields)) {
+          for (const m of inputMismatchedFields) {
+            if (!mismatchedFields.includes(m)) mismatchedFields.push(m);
+          }
+        }
+        if (Array.isArray(inputBlankFields)) {
+          for (const b of inputBlankFields) {
+            if (!blankFields.includes(b)) blankFields.push(b);
+          }
+        }
+
+        const findingsStatus = mismatchedFields.length > 0
+          ? "MISMATCH"
+          : blankFields.length > 0
+          ? "BLANK / INCOMPLETE"
+          : matchedFields.length > 0 || dossier.overallStatus === "MATCH"
+          ? "MATCHED"
+          : "NEEDS_REVIEW";
+
+        const validationFindingsPayload = {
+          batch_number: formattedBatchNumber,
+          lrn: dossier.lrn || null,
+          student_name: dossier.fullName || null,
+          status: findingsStatus,
+          matched_fields: Array.from(new Set(matchedFields)),
+          mismatched_fields: Array.from(new Set(mismatchedFields)),
+          blank_fields: Array.from(new Set(blankFields)),
+          summary: `${mismatchedFields.length} Mismatch${mismatchedFields.length === 1 ? "" : "es"} • ${blankFields.length} Blank/Incomplete`,
+        };
+
+        // In decoupled preview mode (commitToRegistry: false), attach findings in-memory only; DO NOT write to DB
+        if (!isCommit) {
+          for (const seg of segments) {
+            const segParsed = extractedSegmentData[seg.id] || {};
+            segParsed.batch_number = formattedBatchNumber;
+            segParsed.validation_findings = validationFindingsPayload;
+            if (dossier.lrn && dossier.lrn.length === 12) {
+              segParsed.inherited_lrn = dossier.lrn;
+            }
+          }
+          continue;
+        }
+
+        // Attach findings to all segment documents in this batch matching this student
+        for (const seg of segments) {
+          if (!seg.documentId) continue;
+          const segParsed = extractedSegmentData[seg.id] || {};
+          const segLrn = segParsed.lrn || segParsed.identity?.lrn;
+          const segName = resolveDocumentStudentNameDisplay({
+            document_type: seg.documentType,
+            extracted_fields: segParsed,
+          });
+
+          const isMatchingStudent =
+            (dossier.lrn && segLrn && normalizeLrn(segLrn) === normalizeLrn(dossier.lrn)) ||
+            (dossier.fullName && segName && segName.toLowerCase() === dossier.fullName.toLowerCase());
+
+          if (isMatchingStudent || segments.length === 1 || validationReport.learnerDossiers.length === 1) {
+            const updateFields = {
+              ...segParsed,
+              batch_number: formattedBatchNumber,
+              validation_findings: validationFindingsPayload,
+              inherited_lrn: dossier.lrn && dossier.lrn.length === 12 ? dossier.lrn : undefined,
+            };
+
+            const docUpdatePayload: Record<string, any> = {
+              extracted_fields: updateFields,
+              updated_at: new Date().toISOString(),
+            };
+
+            if (dossier.lrn && dossier.lrn.length === 12) {
+              docUpdatePayload.canonical_lrn = dossier.lrn;
+            }
+
+            await (verifiedCrossValDb as any)
+              .from("documents")
+              .update(docUpdatePayload)
+              .eq("id", seg.documentId);
+          }
+        }
+      }
+    } catch (findingsErr) {
+      console.warn("[scan/batch] Persisting validation findings notice:", findingsErr);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4: Audit Logging (Only when committing to registry)
+    // -------------------------------------------------------------------------
+    if (isCommit) {
+      try {
+        await logAuditEvent({
+          category: "BATCH_SCAN" as any,
+          action: "BATCH_EXTRACTION_AND_VALIDATION_COMPLETED" as any,
+          outcome: persistenceErrors.length > 0 || crossValidationPersistenceErrors.length > 0
+            ? "FAILURE"
+            : validationReport.summary.mismatchedInformationCount === 0
+            ? "SUCCESS"
+            : "WARNING",
+          actorUserId: user.id,
+          actorEmail: user.email,
+          actorRole: "teacher",
+          actorSchoolId: roleRow.school_id,
+          actorSchoolName: "Taysan Resettlement Integrated School (500169)",
+          targetType: "batch",
+          targetId: validationReport.batchId,
+          targetLabel: `Batch Scan: ${verifiedSection} (${verifiedGradeLevel}, S.Y. ${verifiedSchoolYear})`,
+          details: {
+            total_segments: segments.length,
+            total_learners_detected: validationReport.summary.totalLearnersDetected,
+            successfully_matched: validationReport.summary.successfullyMatchedCount,
+            consistent_records: validationReport.summary.consistentRecordsCount,
+            mismatched_information: validationReport.summary.mismatchedInformationCount,
+            missing_documents: validationReport.summary.missingDocumentsCount,
+            incomplete_data: validationReport.summary.incompleteDataCount,
+            needs_manual_verification: validationReport.summary.needsManualVerificationCount,
+            persistence_errors_count: persistenceErrors.length,
+            cross_validation_persistence_errors_count: crossValidationPersistenceErrors.length,
+          },
+        });
+      } catch (auditErr) {
+        console.warn("[scan/batch] Audit log deferred:", auditErr);
+      }
     }
 
     const persistenceWarnings: string[] = [
@@ -1601,6 +1818,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      previewOnly: !isCommit,
+      committedToRegistry: isCommit,
       batchId: validationReport.batchId || batchId,
       report: validationReport,
       segments: sortedSegments,

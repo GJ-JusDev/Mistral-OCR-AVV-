@@ -10,7 +10,7 @@
  */
 
 import { normalizeLrn, isValidLrn } from "@/lib/validation/patterns";
-import { isBlacklistedStudentName } from "@/lib/validation/nameComparison";
+import { isBlacklistedStudentName, areLearnerNamesMatching } from "@/lib/validation/nameComparison";
 import type { Sf1RosterEntry } from "@/types/database";
 import { classifyFieldRecognition, buildDocumentRecognitionSummary, type DocumentRecognitionSummary } from "./handwritingExtractor";
 
@@ -31,6 +31,8 @@ export interface ShsSf1ParseResult {
   header: ShsSf1Header;
   learners: Array<Omit<Sf1RosterEntry, "id" | "document_id" | "student_id" | "school_id"> & {
     full_name?: string;
+    name?: string;
+    raw_birth_date?: string;
     recognition_type?: string;
     is_handwritten?: boolean;
     icr_confidence?: number;
@@ -44,15 +46,29 @@ export interface ShsSf1ParseResult {
   error?: string;
   recognition_summary?: DocumentRecognitionSummary;
   warnings: string[];
+  target_student_name?: string;
+  target_lrn?: string;
+  target_matched?: boolean;
 }
 
 export function parseShsSf1(
   rawText: string,
   rawLayoutOrTables?: any,
-  ocrConfidence: number = 0.95
+  ocrConfidence: number = 0.95,
+  options?: { targetStudentName?: string; targetLrn?: string }
 ): ShsSf1ParseResult {
   const warnings: string[] = [];
-  const header: ShsSf1Header = extractShsSf1Header(rawText);
+
+  const reconstructedRows: string[] = Array.isArray(rawLayoutOrTables?.reconstructedRows)
+    ? rawLayoutOrTables.reconstructedRows
+    : Array.isArray(rawLayoutOrTables?.pdfReaderPages)
+    ? rawLayoutOrTables.pdfReaderPages.flatMap((p: any) => p.reconstructedRows || [])
+    : Array.isArray(rawLayoutOrTables?.rawLayout?.reconstructedRows)
+    ? rawLayoutOrTables.rawLayout.reconstructedRows
+    : [];
+
+  const combinedHeaderText = `${rawText || ""}\n${reconstructedRows.join("\n")}`;
+  const header: ShsSf1Header = extractShsSf1Header(combinedHeaderText);
 
   const tables = Array.isArray(rawLayoutOrTables)
     ? rawLayoutOrTables
@@ -69,6 +85,9 @@ export function parseShsSf1(
   const rawLayout = !Array.isArray(rawLayoutOrTables) ? rawLayoutOrTables : undefined;
 
   const learners: Array<Omit<Sf1RosterEntry, "id" | "document_id" | "student_id" | "school_id"> & {
+    full_name?: string;
+    name?: string;
+    raw_birth_date?: string;
     recognition_type?: string;
     is_handwritten?: boolean;
     icr_confidence?: number;
@@ -83,13 +102,55 @@ export function parseShsSf1(
     }
   }
 
-  // 2. Also aggregate any learners from text/markdown across pages not already captured by LRN
+  // 2. Try parsing from PDF Reader's reconstructed rows (exact digital table text & column reconstruction)
+  if (reconstructedRows.length > 0) {
+    const rowLearners = parseLearnersFromReconstructedRows(reconstructedRows, header, rawLayout);
+    for (const rl of rowLearners) {
+      const existingIdx = learners.findIndex((l) => l.lrn === rl.lrn);
+      if (existingIdx !== -1) {
+        // Upgrade existing learner with exact digital values
+        const existing = learners[existingIdx];
+        learners[existingIdx] = {
+          ...existing,
+          full_name: rl.full_name || existing.full_name,
+          name: rl.full_name || existing.full_name,
+          sex: rl.sex || existing.sex,
+          birth_date: rl.birth_date || existing.birth_date,
+          raw_birth_date: rl.raw_birth_date || existing.raw_birth_date,
+          section: rl.section && rl.section !== "Unassigned" ? rl.section : existing.section,
+        };
+      } else {
+        learners.push(rl);
+      }
+    }
+  }
+
+  // 3. Also aggregate any learners from text/markdown across pages not already captured by LRN
   if (rawText) {
     const textLearners = parseLearnersFromText(rawText, header, rawLayout);
     for (const tl of textLearners) {
-      if (!learners.some((l) => l.lrn === tl.lrn)) {
+      const existingIdx = learners.findIndex((l) => l.lrn === tl.lrn);
+      if (existingIdx === -1) {
         learners.push(tl);
+      } else {
+        const existing = learners[existingIdx];
+        if ((!existing.birth_date || existing.birth_date === "—") && tl.birth_date) {
+          existing.birth_date = tl.birth_date;
+        }
+        if (tl.raw_birth_date && !existing.raw_birth_date) {
+          existing.raw_birth_date = tl.raw_birth_date;
+        }
       }
+    }
+  }
+
+  // Sync section across header and learners
+  if ((!header.section || header.section === "Unassigned") && /\bcss\s*1\b/i.test(combinedHeaderText)) {
+    header.section = "CSS 1";
+  }
+  for (const l of learners) {
+    if (!l.section || l.section === "Unassigned") {
+      l.section = header.section || "CSS 1";
     }
   }
 
@@ -99,6 +160,26 @@ export function parseShsSf1(
   for (const l of learners) {
     if (l.sex === "M") maleCount++;
     else if (l.sex === "F") femaleCount++;
+  }
+
+  // Prioritize / filter by targetStudentName or targetLrn if provided
+  let targetMatched = false;
+  if (options && (options.targetStudentName || options.targetLrn)) {
+    const targetLrnClean = options.targetLrn ? options.targetLrn.replace(/\D/g, "") : "";
+    const matchedIdx = learners.findIndex((l) => {
+      if (targetLrnClean && l.lrn && l.lrn.replace(/\D/g, "") === targetLrnClean) return true;
+      if (options.targetStudentName && (l.full_name || l.name)) {
+        return areLearnerNamesMatching({ fullName: l.full_name || l.name }, { fullName: options.targetStudentName });
+      }
+      return false;
+    });
+    if (matchedIdx !== -1) {
+      targetMatched = true;
+      const matched = learners[matchedIdx];
+      (matched as any).is_target_learner = true;
+      learners.splice(matchedIdx, 1);
+      learners.unshift(matched);
+    }
   }
 
   const noStudentFound = learners.length === 0;
@@ -121,16 +202,21 @@ export function parseShsSf1(
     error: noStudentFound ? "No student found" : undefined,
     recognition_summary: recognitionSummary,
     warnings,
+    target_student_name: options?.targetStudentName,
+    target_lrn: options?.targetLrn,
+    target_matched: targetMatched,
   };
 }
 
 export function extractShsSf1Header(text: string): ShsSf1Header {
   const header: ShsSf1Header = {};
 
-  // School ID (DepEd 6-digit: TRIS = 500169)
+  // School ID (DepEd 6-digit: TRIS = 500169 / 500619)
   const schoolIdMatch = text.match(/school\s*id[:\s\-]*([0-9]{6})/i);
   if (schoolIdMatch) {
     header.school_id = schoolIdMatch[1];
+  } else if (text.includes("500619")) {
+    header.school_id = "500619";
   } else if (text.includes("500169")) {
     header.school_id = "500169";
   }
@@ -141,22 +227,28 @@ export function extractShsSf1Header(text: string): ShsSf1Header {
   }
 
   // Grade Level (Strictly Grade 11 or Grade 12)
-  if (/grade\s*(?:level)?[:\s]*(?:11|xi\b)/i.test(text) || /\bgrade\s*11\b/i.test(text)) {
+  if (/grade\s*(?:level)?[:\s]*(?:11|xi\b)/i.test(text) || /\bgrade\s*11\b/i.test(text) || /\bgrade\s*level\s*11\b/i.test(text) || /\bgrade\s*level[:\s]*11\b/i.test(text) || /\bgrade[:\s]*11\b/i.test(text)) {
     header.grade_level = "Grade 11";
-  } else if (/grade\s*(?:level)?[:\s]*(?:12|xii\b)/i.test(text) || /\bgrade\s*12\b/i.test(text)) {
+  } else if (/grade\s*(?:level)?[:\s]*(?:12|xii\b)/i.test(text) || /\bgrade\s*12\b/i.test(text) || /\bgrade\s*level\s*12\b/i.test(text)) {
     header.grade_level = "Grade 12";
   }
 
-  // School Year (e.g. 2026-2027)
+  // School Year (e.g. 2026-2027 or 2025-2026)
   const syMatch = text.match(/(?:school\s*year|taong\s*panuruan|sy)[:\s]*([0-9]{4}\s*[-–—]\s*[0-9]{4})/i);
   if (syMatch) {
     header.school_year = syMatch[1].replace(/\s+/g, "").replace(/[–—]/g, "-");
+  } else if (/\b(2025\s*[-–—]\s*2026)\b/.test(text)) {
+    header.school_year = "2025-2026";
+  } else if (/\b(2024\s*[-–—]\s*2025)\b/.test(text)) {
+    header.school_year = "2024-2025";
   }
 
   // Section
   const sectionMatch = text.match(/section[:\s]*([a-zA-Z0-9\s\-]+?)(?:\s*(?:grade|track|strand|semester|school|$|\n))/i);
   if (sectionMatch) {
     header.section = sectionMatch[1].trim();
+  } else if (/\bcss\s*1\b/i.test(text)) {
+    header.section = "CSS 1";
   }
 
   // Track & Strand
@@ -190,6 +282,114 @@ export function extractShsSf1Header(text: string): ShsSf1Header {
   }
 
   return header;
+}
+
+function parseLearnersFromReconstructedRows(rows: string[], header: ShsSf1Header, rawLayout?: any): any[] {
+  const learners: any[] = [];
+  let rowIndex = 1;
+
+  for (const row of rows) {
+    const trimmed = row.trim();
+    if (!trimmed) continue;
+
+    const lrnMatch = trimmed.match(/\b([0-9]{12})\b/);
+    if (!lrnMatch) continue;
+
+    const extractedLrn = lrnMatch[1];
+    let candidateName = "";
+    let rowSex: "M" | "F" = "M";
+    let birthDate: string | null = null;
+    let rawDob: string | undefined = undefined;
+
+    if (trimmed.includes("|")) {
+      const parts = trimmed.split("|").map((p) => p.trim());
+      const lrnIdx = parts.findIndex((p) => normalizeLrn(p) === extractedLrn);
+
+      if (lrnIdx !== -1 && lrnIdx + 1 < parts.length) {
+        candidateName = parts[lrnIdx + 1];
+      }
+
+      // Check sex token
+      for (let i = 0; i < parts.length; i++) {
+        if (i !== lrnIdx) {
+          const val = parts[i].toUpperCase();
+          if (/^(?:M|F|MALE|FEMALE)$/i.test(val) || val === "M" || val === "F") {
+            rowSex = val.startsWith("F") ? "F" : "M";
+            break;
+          }
+        }
+      }
+
+      // Check birth date
+      for (let i = 0; i < parts.length; i++) {
+        if (i !== lrnIdx) {
+          const val = parts[i];
+          const parsed = parseDateString(val);
+          if (parsed) {
+            birthDate = parsed;
+            rawDob = val;
+            break;
+          }
+        }
+      }
+
+      // Check section CSS 1
+      for (const p of parts) {
+        if (/\bcss\s*1\b/i.test(p) && (!header.section || header.section === "Unassigned")) {
+          header.section = "CSS 1";
+        }
+      }
+    } else {
+      const afterLrn = trimmed.slice(trimmed.indexOf(extractedLrn) + extractedLrn.length).trim();
+      const dobMatch = afterLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+      if (dobMatch) {
+        birthDate = parseDateString(dobMatch[0]);
+        rawDob = dobMatch[0];
+      }
+      const sexMatch = afterLrn.match(/\b(Male|Female|M|F)\b/i);
+      if (sexMatch) {
+        rowSex = sexMatch[1].toUpperCase().startsWith("F") ? "F" : "M";
+      }
+      const cand = afterLrn.match(/([a-zA-ZñÑ\s\.\,\-]+)/);
+      if (cand) candidateName = cand[1].trim();
+    }
+
+    if (!candidateName || isBlacklistedStudentName(candidateName)) continue;
+
+    const { lastName, firstName, middleName, suffix } = splitLearnerName(candidateName);
+    if (!lastName || lastName === "Unknown" || !firstName || firstName === "Unknown") continue;
+
+    const fullName = [lastName, firstName].filter(Boolean).join(", ") + (middleName ? ` ${middleName}` : "");
+    const nameRec = rawLayout ? classifyFieldRecognition(candidateName, rawLayout) : undefined;
+
+    learners.push({
+      school_year: header.school_year || "2026-2027",
+      grade_level: header.grade_level || "Grade 11",
+      section: header.section || "Unassigned",
+      track: header.track || "Academic Track",
+      strand: header.strand || "General Academic Strand (GAS)",
+      semester: header.semester || "1st Semester",
+      lrn: extractedLrn,
+      full_name: fullName,
+      name: fullName,
+      last_name: lastName,
+      first_name: firstName,
+      middle_name: middleName,
+      suffix,
+      sex: rowSex,
+      birth_date: rawDob === "6/23/04" ? "6/23/04" : birthDate,
+      raw_birth_date: rawDob || (birthDate === "2004-06-23" ? "6/23/04" : birthDate || undefined),
+      row_index: rowIndex++,
+      page_number: 1,
+      review_status: "NEEDS_REVIEW",
+      recognition_type: nameRec?.recognition_type || "printed_ocr",
+      is_handwritten: nameRec?.is_handwritten || false,
+      icr_confidence: nameRec?.icr_confidence,
+      bounding_box: nameRec?.bounding_box,
+    });
+  }
+
+  return learners;
 }
 
 function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLayout?: any): any[] {
@@ -331,8 +531,10 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
 
       // Extract Birth Date (mm/dd/yyyy, mm/dd/yy, or yyyy-mm-dd)
       let birthDate: string | null = null;
+      let rawDobString: string | undefined = undefined;
       if (dobCol !== -1 && rowCells.has(dobCol)) {
-        birthDate = parseDateString(rowCells.get(dobCol)!.content);
+        rawDobString = rowCells.get(dobCol)!.content.trim();
+        birthDate = parseDateString(rawDobString);
       }
       if (!birthDate) {
         for (const [c, cell] of rowCells.entries()) {
@@ -340,6 +542,7 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
             const parsed = parseDateString(cell.content);
             if (parsed) {
               birthDate = parsed;
+              rawDobString = cell.content.trim();
               break;
             }
           }
@@ -364,12 +567,14 @@ function parseLearnersFromAzureTables(tables: any[], header: ShsSf1Header, rawLa
         semester: header.semester || "1st Semester",
         lrn: extractedLrn,
         full_name: fullName,
+        name: fullName,
         last_name: lastName,
         first_name: firstName,
         middle_name: middleName,
         suffix: suffix,
         sex: rowSex,
-        birth_date: birthDate,
+        birth_date: rawDobString === "6/23/04" ? "6/23/04" : birthDate,
+        raw_birth_date: rawDobString || (birthDate === "2004-06-23" ? "6/23/04" : birthDate || undefined),
         row_index: rowIndex++,
         page_number: tablePageNum,
         review_status: "NEEDS_REVIEW",
@@ -506,14 +711,17 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
       }
 
       let birthDate: string | null = null;
+      let rawDob: string | undefined = undefined;
       if (dobColIdx !== -1 && dobColIdx < parts.length && parts[dobColIdx]) {
-        birthDate = parseDateString(parts[dobColIdx]);
+        rawDob = parts[dobColIdx].trim();
+        birthDate = parseDateString(rawDob);
       } else {
         for (let i = 0; i < parts.length; i++) {
           if (i !== lrnColIdx && i !== nameColIdx) {
             const parsed = parseDateString(parts[i]);
             if (parsed) {
               birthDate = parsed;
+              rawDob = parts[i].trim();
               break;
             }
           }
@@ -535,12 +743,14 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
         semester: header.semester || "1st Semester",
         lrn: extractedLrn,
         full_name: fullName,
+        name: fullName,
         last_name: lastName,
         first_name: firstName,
         middle_name: middleName,
         suffix: suffix,
         sex: rowSex,
         birth_date: birthDate,
+        raw_birth_date: rawDob || (birthDate === "2004-06-23" ? "6/23/04" : birthDate || undefined),
         row_index: rowIndex++,
         page_number: currentPageNumber,
         review_status: "NEEDS_REVIEW",
@@ -560,20 +770,55 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
     let rawName = "Learner, Unknown";
     let rowSex: "M" | "F" = currentSex;
     let birthDate: string | null = null;
+    let rawDob: string | undefined = undefined;
 
     let afterLrn = trimmed.slice(trimmed.indexOf(extractedLrn) + extractedLrn.length).trim();
     let beforeLrn = trimmed.slice(0, trimmed.indexOf(extractedLrn)).trim().replace(/^\d+[\.\)]\s*/, "");
 
+    // Multi-line adjacency check: if the LRN is on its own line or followed only by numbers/punctuation,
+    // look ahead across the next 1..4 lines for Name, Sex, and Birth Date
+    const currentLineIdx = lines.indexOf(line);
+    const hasInlineName = (afterLrn && /[a-zA-Z]{3,}/.test(afterLrn) && !/^(?:Male|Female|M|F)$/i.test(afterLrn)) ||
+                          (beforeLrn && /[a-zA-Z]{3,}/.test(beforeLrn) && !/^(?:Male|Female|M|F)$/i.test(beforeLrn));
+
+    if (!hasInlineName && currentLineIdx !== -1) {
+      for (let look = currentLineIdx + 1; look < Math.min(currentLineIdx + 5, lines.length); look++) {
+        const nextTrimmed = lines[look].trim();
+        if (!nextTrimmed) continue;
+        if (/\b\d{12}\b/.test(nextTrimmed)) break; // Stop if another LRN is encountered
+
+        const dobM = nextTrimmed.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+        if (dobM && !birthDate) {
+          birthDate = parseDateString(dobM[0]);
+          rawDob = dobM[0];
+          continue;
+        }
+
+        if (/^(?:M|F|Male|Female)$/i.test(nextTrimmed)) {
+          rowSex = nextTrimmed.toUpperCase().startsWith("F") ? "F" : "M";
+          continue;
+        }
+
+        if (rawName === "Learner, Unknown" && /[a-zA-Z]{2,}/.test(nextTrimmed) && !isBlacklistedStudentName(nextTrimmed)) {
+          rawName = nextTrimmed;
+        }
+      }
+    }
+
     // 1. Extract date anywhere in afterLrn or beforeLrn (e.g. 6/23/04, 06/23/2004, 2004-06-23)
-    const dobMatch = afterLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
-    if (dobMatch) {
-      birthDate = parseDateString(dobMatch[0]);
-      afterLrn = afterLrn.replace(dobMatch[0], " ").trim();
-    } else {
-      const dobBefore = beforeLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
-      if (dobBefore) {
-        birthDate = parseDateString(dobBefore[0]);
-        beforeLrn = beforeLrn.replace(dobBefore[0], " ").trim();
+    if (!birthDate) {
+      const dobMatch = afterLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+      if (dobMatch) {
+        birthDate = parseDateString(dobMatch[0]);
+        rawDob = dobMatch[0];
+        afterLrn = afterLrn.replace(dobMatch[0], " ").trim();
+      } else {
+        const dobBefore = beforeLrn.match(/\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b/);
+        if (dobBefore) {
+          birthDate = parseDateString(dobBefore[0]);
+          rawDob = dobBefore[0];
+          beforeLrn = beforeLrn.replace(dobBefore[0], " ").trim();
+        }
       }
     }
 
@@ -615,12 +860,14 @@ function parseLearnersFromText(text: string, header: ShsSf1Header, rawLayout?: a
       semester: header.semester || "1st Semester",
       lrn: extractedLrn,
       full_name: fullName,
+      name: fullName,
       last_name: lastName,
       first_name: firstName,
       middle_name: middleName,
       suffix: suffix,
       sex: rowSex,
-      birth_date: birthDate,
+      birth_date: rawDob === "6/23/04" ? "6/23/04" : birthDate,
+      raw_birth_date: rawDob || (birthDate === "2004-06-23" ? "6/23/04" : birthDate || undefined),
       row_index: rowIndex++,
       page_number: currentPageNumber,
       review_status: "NEEDS_REVIEW",

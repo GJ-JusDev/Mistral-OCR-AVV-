@@ -222,7 +222,7 @@ export default function ShsConsolidatedValidationHub({
     return <span className="font-medium text-xs text-zinc-800 dark:text-zinc-200">{String(val)}</span>;
   };
 
-  const getStatusChip = (status: CrossDocumentValidationStatus) => {
+  const getStatusChip = (status: CrossDocumentValidationStatus | string) => {
     switch (status) {
       case "MATCH":
       case "RESOLVED":
@@ -237,6 +237,20 @@ export default function ShsConsolidatedValidationHub({
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-rose-800 border border-rose-300">
             <XCircle className="w-3.5 h-3.5 text-rose-600" />
             MISMATCH
+          </span>
+        );
+      case "INCOMPLETE":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+            INCOMPLETE
+          </span>
+        );
+      case "NO DATA":
+      case "NO_DATA":
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-zinc-100 text-zinc-600 border border-zinc-200">
+            NO DATA
           </span>
         );
       case "DISCREPANCIES_FOUND":

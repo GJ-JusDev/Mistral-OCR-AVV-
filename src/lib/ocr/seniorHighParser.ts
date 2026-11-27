@@ -1,9 +1,11 @@
 import type { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
 import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
-import { evaluateAttendanceData, parseAttendanceNumber } from "../attendance/attendanceEvaluator";
-import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
+import { evaluateAttendanceData, parseAttendanceNumber, isConcatenatedZeros, parseAttendanceTotalNumber } from "../attendance/attendanceEvaluator";
+import { normalizeGradeRecords, updateExtractedFieldsAverages, evaluateDynamicGradeStatus, normalizeObservedValueMarking, sanitizeLearnersObservedValues, normalizeStrictSex } from "../validation/gradeUtils";
 import { parseTextObservedValuesAndAchievement } from "./observedValuesParser";
+
+export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
 
 /**
  * MGA KEYWORDS NA HINDI DAPAT ITURING NA ACADEMIC SUBJECT
@@ -105,6 +107,15 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   // Kunin muna ang student identity sa itaas (Name, LRN, School, Section)
   const fields = parseOcrText(text, rawLayout); 
 
+  // Strict Sex extraction on Front SF9: extract Sex: Male / Sex: Female (or M / F near header block)
+  const rawSexMatch = text.match(/\b(?:Sex|Gender|Kasarian)\s*[:\-]?\s*\|?\s*(Male|Female|Lalaki|Babae|M\b|F\b)/i)
+    || text.match(/\b(?:Age|Edad)[^\n\r]{0,40}\b(?:Sex|Gender|Kasarian)\s*[:\-]?\s*([A-Za-z]+)/i)
+    || text.match(/\b(?:Grade|Section)[^\n\r]{0,40}\b(?:Sex|Gender|Kasarian)\s*[:\-]?\s*([A-Za-z]+)/i);
+  const detectedSex = normalizeStrictSex(fields.sex) || (rawSexMatch ? normalizeStrictSex(rawSexMatch[1]) : null);
+  if (detectedSex) {
+    fields.sex = detectedSex;
+  }
+
   const layoutTables = Array.isArray(rawLayout?.tables) && rawLayout.tables.length > 0
     ? rawLayout.tables
     : Array.isArray(rawLayout?.pages)
@@ -120,7 +131,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   if (layoutTables.length > 0) {
     const tableResult = parseAzureLayoutGrades(layoutTables, rawLayout);
     if (tableResult.observed_values) {
-      fields.observed_values = tableResult.observed_values;
+      fields.observed_values = sanitizeLearnersObservedValues(tableResult.observed_values);
     }
     if (tableResult.learner_progress_achievement) {
       fields.learner_progress_achievement = tableResult.learner_progress_achievement;
@@ -156,6 +167,23 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       if (tableResult.general_average !== undefined) {
         fields.general_average = tableResult.general_average;
       }
+      if (tableResult.general_average_confidence !== undefined) {
+        fields.general_average_confidence = tableResult.general_average_confidence;
+      }
+      if (tableResult.sem1_general_average !== undefined) {
+        fields.sem1_general_average = tableResult.sem1_general_average;
+        fields.sem1_printed_general_average = tableResult.sem1_general_average;
+      }
+      if (tableResult.sem1_confidence !== undefined) {
+        fields.sem1_confidence = tableResult.sem1_confidence;
+      }
+      if (tableResult.sem2_general_average !== undefined) {
+        fields.sem2_general_average = tableResult.sem2_general_average;
+        fields.sem2_printed_general_average = tableResult.sem2_general_average;
+      }
+      if (tableResult.sem2_confidence !== undefined) {
+        fields.sem2_confidence = tableResult.sem2_confidence;
+      }
       Object.assign(fields, updateExtractedFieldsAverages(fields));
 
       // FIX 3: Before returning early with Azure academic grades, fallback to text
@@ -163,7 +191,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       if (!fields.observed_values || !fields.learner_progress_achievement) {
         const textOv = parseTextObservedValuesAndAchievement(text);
         if (!fields.observed_values && textOv.observedValues) {
-          fields.observed_values = textOv.observedValues;
+          fields.observed_values = sanitizeLearnersObservedValues(textOv.observedValues);
         }
         if (!fields.learner_progress_achievement && textOv.learnerProgressAchievement) {
           fields.learner_progress_achievement = textOv.learnerProgressAchievement;
@@ -271,6 +299,9 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
             return monthKeywords.some(kw => l === kw || l.includes(kw));
           });
         }
+        if (fields.attendance_months.length === 10 && fields.attendance_months[0].toLowerCase().startsWith("jun") && fields.attendance_months[9].toLowerCase().startsWith("mar")) {
+          fields.attendance_months.push("Apr");
+        }
         continue;
       }
 
@@ -311,21 +342,6 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           values = cells.slice(1).map(c => c.trim());
         }
 
-        // Auto-sum if total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
-        let autoSum = 0;
-        let hasMonthlyNum = false;
-        for (const v of values) {
-          const num = parseAttendanceNumber(v);
-          if (num !== undefined) {
-            autoSum += num;
-            hasMonthlyNum = true;
-          }
-        }
-        if (hasMonthlyNum && (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—")) {
-          autoSum = Math.round(autoSum * 100) / 100;
-          totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
-        }
-
         // Normalize canonical DepEd label
         let normLabel = subject.trim();
         if (subjectLower.includes("school days") || subjectLower.includes("araw ng pasok")) {
@@ -334,6 +350,78 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           normLabel = "No. of Days Present";
         } else if (subjectLower.includes("absent") || subjectLower.includes("lumiban")) {
           normLabel = "No. of Days Absent";
+        }
+
+        const isAbsentRow = normLabel === "No. of Days Absent";
+        const rowHasConcatZeros =
+          isConcatenatedZeros(totalVal) ||
+          values.some((v) => isConcatenatedZeros(v)) ||
+          (isAbsentRow && (
+            values.length <= 1 ||
+            /^1?0{6,14}$/.test(cells.slice(1).join("").replace(/[\s\t|]+/g, ""))
+          ));
+
+        const targetMonthCount = (fields.attendance_months && fields.attendance_months.length > 0) ? fields.attendance_months.length : 11;
+
+        if (rowHasConcatZeros && isAbsentRow) {
+          values = Array.from({ length: targetMonthCount }, () => "0");
+          totalVal = "0";
+        } else {
+          // Process month cells and separate joined tokens like "17.5/201.5"
+          for (let vIdx = 0; vIdx < values.length; vIdx++) {
+            let v = values[vIdx];
+            if (v.includes("/")) {
+              const parts = v.split("/");
+              values[vIdx] = parts[0].trim();
+              if (!totalVal && parts[1]) {
+                totalVal = parts[1].trim();
+              }
+              v = values[vIdx];
+            }
+
+            if (isConcatenatedZeros(v)) {
+              values[vIdx] = "0";
+            } else {
+              const num = parseFloat(v);
+              if (!isNaN(num) && num > 31) {
+                if (/^1\d{2}(?:\.\d+)?$/.test(v)) {
+                  const rem = parseFloat(v.slice(1));
+                  if (!isNaN(rem) && rem <= 31) {
+                    values[vIdx] = String(rem);
+                  }
+                }
+              }
+            }
+          }
+
+          // Sanitize totalVal (prefer printed bottom 201.5 over scribbles like 162)
+          if (totalVal !== undefined) {
+            if (isConcatenatedZeros(totalVal)) {
+              totalVal = "0";
+            } else {
+              const totalNum = parseAttendanceTotalNumber(totalVal);
+              if (totalNum !== undefined) {
+                totalVal = String(totalNum);
+              }
+            }
+          }
+        }
+
+        // Auto-sum if total is blank while monthly numbers exist
+        if (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—") {
+          let autoSum = 0;
+          let hasMonthlyNum = false;
+          for (const v of values) {
+            const num = parseAttendanceNumber(v);
+            if (num !== undefined) {
+              autoSum += num;
+              hasMonthlyNum = true;
+            }
+          }
+          if (hasMonthlyNum) {
+            autoSum = Math.round(autoSum * 100) / 100;
+            totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+          }
         }
 
         const validNumCount = values.filter((v) => parseAttendanceNumber(v) !== undefined).length;
@@ -446,24 +534,18 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         }
       }
 
-      // Evaluate status based on final grade
-      let status: "Passed" | "Failed" | "Missing" = "Missing";
-      let needsVerification = false;
-      
-      if (final !== undefined) {
-        if (typeof final === "number") {
-          status = final < 75 ? "Failed" : "Passed";
-          if (final >= 72 && final <= 77) {
-            needsVerification = true;
-          }
-        } else {
-          status = "Missing";
-          needsVerification = true;
-        }
-      } else {
-        status = "Missing";
-        needsVerification = true;
-      }
+      // Evaluate status based on final grade dynamically
+      const gradeEval = evaluateDynamicGradeStatus({
+        grade: final,
+      });
+
+      let status: "Passed" | "Failed" | "Missing" =
+        gradeEval.status === "passed" ? "Passed" : gradeEval.status === "failed" ? "Failed" : "Missing";
+      let needsVerification =
+        final === undefined ||
+        gradeEval.isLowConfidence ||
+        gradeEval.status === "not_recognized" ||
+        (typeof final === "number" && final >= 72 && final <= 77);
 
       const record: GradeRecord = {
         category: currentCategory || undefined,
@@ -517,6 +599,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         const semForLine: "1st Semester" | "2nd Semester" =
           qAIndex === "3" || currentSemester === "2nd Semester" ? "2nd Semester" : "1st Semester";
 
+        const p1Eval = evaluateDynamicGradeStatus({ grade: finalVal });
         const record: GradeRecord = {
           category: currentCategory || undefined,
           subject,
@@ -530,8 +613,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           final: finalVal,
           sem1_final_grade: semForLine === "1st Semester" ? finalVal : undefined,
           sem2_final_grade: semForLine === "2nd Semester" ? finalVal : undefined,
-          status: finalVal !== undefined ? (finalVal < 75 ? "Failed" : "Passed") : "Missing",
-          needsVerification: finalVal === undefined || (finalVal >= 72 && finalVal <= 77),
+          status: p1Eval.status === "passed" ? "Passed" : p1Eval.status === "failed" ? "Failed" : "Missing",
+          remarks: p1Eval.remarkDisplay,
+          remark: p1Eval.remarkDisplay,
+          needsVerification: finalVal === undefined || p1Eval.isLowConfidence || (typeof finalVal === "number" && finalVal >= 72 && finalVal <= 77),
         };
         const existingIdx = grades.findIndex(
           g =>
@@ -559,6 +644,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         const semForLine = currentSemester || "1st Semester";
         const isNum = typeof finalVal === "number" && !isNaN(finalVal);
 
+        const p2Eval = evaluateDynamicGradeStatus({ grade: finalVal });
         const record: GradeRecord = {
           category: currentCategory || undefined,
           subject,
@@ -568,8 +654,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           final: finalVal,
           sem1_final_grade: semForLine === "1st Semester" ? finalVal : undefined,
           sem2_final_grade: semForLine === "2nd Semester" ? finalVal : undefined,
-          status: isNum ? ((finalVal as number) < 75 ? "Failed" : "Passed") : "Missing",
-          needsVerification: !isNum || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
+          status: p2Eval.status === "passed" ? "Passed" : p2Eval.status === "failed" ? "Failed" : "Missing",
+          remarks: p2Eval.remarkDisplay,
+          remark: p2Eval.remarkDisplay,
+          needsVerification: !isNum || p2Eval.isLowConfidence || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
         };
         const existingIdx = grades.findIndex(
           g =>
@@ -613,6 +701,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
         }
 
         const isSem2 = semForLine === "2nd Semester";
+        const p3Eval = evaluateDynamicGradeStatus({ grade: finalVal });
         const record: GradeRecord = {
           category: currentCategory || undefined,
           subject,
@@ -626,8 +715,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           final: finalVal,
           sem1_final_grade: !isSem2 ? finalVal : undefined,
           sem2_final_grade: isSem2 ? finalVal : undefined,
-          status: finalVal !== undefined ? (finalVal < 75 ? "Failed" : "Passed") : "Missing",
-          needsVerification: finalVal === undefined || (finalVal >= 72 && finalVal <= 77),
+          status: p3Eval.status === "passed" ? "Passed" : p3Eval.status === "failed" ? "Failed" : "Missing",
+          remarks: p3Eval.remarkDisplay,
+          remark: p3Eval.remarkDisplay,
+          needsVerification: finalVal === undefined || p3Eval.isLowConfidence || (finalVal >= 72 && finalVal <= 77),
         };
 
         const existingIdx = grades.findIndex(
@@ -694,6 +785,7 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           }
 
           const isNum = typeof finalVal === "number" && !isNaN(finalVal);
+          const p4Eval = evaluateDynamicGradeStatus({ grade: finalVal });
           const record: GradeRecord = {
             category: currentCategory || undefined,
             subject,
@@ -707,8 +799,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
             final: finalVal,
             sem1_final_grade: !isSem2 ? (isNum ? (finalVal as number) : undefined) : undefined,
             sem2_final_grade: isSem2 ? (isNum ? (finalVal as number) : undefined) : undefined,
-            status: finalVal !== undefined ? (isNum ? ((finalVal as number) < 75 ? "Failed" : "Passed") : "Missing") : "Missing",
-            needsVerification: finalVal === undefined || (!isNum) || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
+            status: p4Eval.status === "passed" ? "Passed" : p4Eval.status === "failed" ? "Failed" : "Missing",
+            remarks: p4Eval.remarkDisplay,
+            remark: p4Eval.remarkDisplay,
+            needsVerification: finalVal === undefined || (!isNum) || p4Eval.isLowConfidence || ((finalVal as number) >= 72 && (finalVal as number) <= 77),
           };
 
           const existingIdx = grades.findIndex(
@@ -748,9 +842,12 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
               break;
             }
           }
-          if (lines[j].toLowerCase().includes("no. of school days") || detectedMonths.length >= 10) {
+          if (lines[j].toLowerCase().includes("no. of school days") || detectedMonths.length >= 12) {
             break;
           }
+        }
+        if (detectedMonths.length === 10 && detectedMonths[0].toLowerCase().startsWith("jun") && detectedMonths[9].toLowerCase().startsWith("mar")) {
+          detectedMonths.push("Apr");
         }
       }
 
@@ -765,8 +862,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
 
       if (isMetric && detectedMonths.length > 0) {
         const label = lines[idx];
-        const values: string[] = [];
+        let values: string[] = [];
         let totalVal: string | undefined = undefined;
+
+        const isAbsentRow = label.toLowerCase().includes("absent") || label.toLowerCase().includes("lumiban");
 
         let j = idx + 1;
         while (j < lines.length) {
@@ -775,9 +874,10 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
             j++;
             continue;
           }
-          // Handle repeated 0s e.g. "000000000000"
-          if (/^0{5,}$/.test(next)) {
-            for (let k = 0; k < detectedMonths.length; k++) {
+          // Handle repeated 0s e.g. "100000000000" or "000000000000"
+          if (isConcatenatedZeros(next) || (isAbsentRow && /^1?0{5,}$/.test(next))) {
+            const targetCount = detectedMonths.length > 0 ? detectedMonths.length : 11;
+            for (let k = 0; k < targetCount; k++) {
               values.push("0");
             }
             totalVal = "0";
@@ -785,10 +885,26 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
             break;
           }
 
-          const tokens = next.split(/\s+/);
+          const rawTokens = next.split(/\s+/);
+          const tokens: string[] = [];
+          for (let tok of rawTokens) {
+            if (tok.includes("/")) {
+              const parts = tok.split("/");
+              tokens.push(parts[0].trim());
+              if (!totalVal && parts[1]) {
+                totalVal = parts[1].trim();
+              }
+            } else if (isConcatenatedZeros(tok)) {
+              tokens.push("0");
+            } else {
+              tokens.push(tok);
+            }
+          }
+
           const isAttendanceToken = (tok: string) =>
             /^\d+(?:\.\d+)?$/.test(tok) ||
             /^[-—–_]$/.test(tok) ||
+            isConcatenatedZeros(tok) ||
             /^(?:blank|none|n\/?a|na|null|missing|unreadable|:unselected:)$/i.test(tok);
 
           if (tokens.length > 0 && tokens.every(isAttendanceToken)) {
@@ -805,20 +921,58 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
           }
         }
 
-        if (values.length > 0) {
-          // Auto-sum if total is blank while monthly numbers exist (preserving half-days like 17.5, 201.5)
-          let autoSum = 0;
-          let hasMonthlyNum = false;
-          for (const v of values) {
-            const num = parseAttendanceNumber(v);
-            if (num !== undefined) {
-              autoSum += num;
-              hasMonthlyNum = true;
+        // Sanitize totalVal (prefer printed bottom 201.5 over scribbles like 162)
+        if (totalVal !== undefined) {
+          if (isConcatenatedZeros(totalVal)) {
+            totalVal = "0";
+          } else {
+            const totalNum = parseAttendanceTotalNumber(totalVal);
+            if (totalNum !== undefined) {
+              totalVal = String(totalNum);
             }
           }
-          if (hasMonthlyNum && (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—")) {
-            autoSum = Math.round(autoSum * 100) / 100;
-            totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+        }
+
+        // Fix absent row if collapsed into a single run of zeros
+        if (isAbsentRow && (values.length <= 1 || values.some(v => isConcatenatedZeros(v)))) {
+          const targetCount = detectedMonths.length > 0 ? detectedMonths.length : 11;
+          values = Array.from({ length: targetCount }, () => "0");
+          totalVal = "0";
+        } else {
+          // Bounds enforcement for values
+          for (let vIdx = 0; vIdx < values.length; vIdx++) {
+            if (isConcatenatedZeros(values[vIdx])) {
+              values[vIdx] = "0";
+            } else {
+              const num = parseFloat(values[vIdx]);
+              if (!isNaN(num) && num > 31) {
+                if (/^1\d{2}(?:\.\d+)?$/.test(values[vIdx])) {
+                  const rem = parseFloat(values[vIdx].slice(1));
+                  if (!isNaN(rem) && rem <= 31) {
+                    values[vIdx] = String(rem);
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (values.length > 0) {
+          // Auto-sum ONLY if total is blank while monthly numbers exist
+          if (totalVal === undefined || totalVal === "" || totalVal === "-" || totalVal === "—") {
+            let autoSum = 0;
+            let hasMonthlyNum = false;
+            for (const v of values) {
+              const num = parseAttendanceNumber(v);
+              if (num !== undefined) {
+                autoSum += num;
+                hasMonthlyNum = true;
+              }
+            }
+            if (hasMonthlyNum) {
+              autoSum = Math.round(autoSum * 100) / 100;
+              totalVal = Number.isInteger(autoSum) ? String(autoSum) : String(autoSum);
+            }
           }
 
           let normLabel = label.trim();
@@ -898,12 +1052,16 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
   if (!fields.observed_values || !fields.learner_progress_achievement) {
     const textOv = parseTextObservedValuesAndAchievement(text);
     if (!fields.observed_values && textOv.observedValues) {
-      fields.observed_values = textOv.observedValues;
+      fields.observed_values = sanitizeLearnersObservedValues(textOv.observedValues);
     }
     if (!fields.learner_progress_achievement && textOv.learnerProgressAchievement) {
       fields.learner_progress_achievement = textOv.learnerProgressAchievement;
       fields.grading_scale = textOv.learnerProgressAchievement;
     }
+  }
+
+  if (fields.observed_values) {
+    fields.observed_values = sanitizeLearnersObservedValues(fields.observed_values);
   }
 
   return fields;

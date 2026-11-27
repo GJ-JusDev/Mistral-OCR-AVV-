@@ -1,6 +1,7 @@
 import type { ExtractedFields, GradeRecord } from "@/types/documents";
 import { parseOcrText } from "./parser";
 import { parseAzureLayoutGrades } from "./tableGradesParser";
+import { evaluateDynamicGradeStatus } from "../validation/gradeUtils";
 
 export function parseElementaryGradesText(text: string, rawLayout?: any): ExtractedFields {
   // First, use the regular parser in case there's a name at the top
@@ -154,22 +155,15 @@ export function parseElementaryGradesText(text: string, rawLayout?: any): Extrac
         [final] = validNumbers;
       }
 
-      // Evaluate status based on final grade
-      let status: "Passed" | "Failed" | "Missing" = "Missing";
-      let needsVerification = false;
-      
-      if (final !== undefined) {
-        // Requirements: 74-0 is failing, 75+ is passed
-        status = final < 75 ? "Failed" : "Passed";
-        
-        // Flag borderline grades for manual verification
-        if (final >= 72 && final <= 77) {
-          needsVerification = true;
-        }
-      } else {
-        status = "Missing";
-        needsVerification = true;
-      }
+      // Evaluate status based on final grade dynamically
+      const gradeEval = evaluateDynamicGradeStatus({ grade: final });
+      let status: "Passed" | "Failed" | "Missing" =
+        gradeEval.status === "passed" ? "Passed" : gradeEval.status === "failed" ? "Failed" : "Missing";
+      let needsVerification =
+        final === undefined ||
+        gradeEval.isLowConfidence ||
+        gradeEval.status === "not_recognized" ||
+        (typeof final === "number" && final >= 72 && final <= 77);
 
       grades.push({
         category: currentCategory || undefined,
@@ -180,6 +174,8 @@ export function parseElementaryGradesText(text: string, rawLayout?: any): Extrac
         q4,
         final,
         status,
+        remarks: gradeEval.remarkDisplay,
+        remark: gradeEval.remarkDisplay,
         needsVerification
       });
     }

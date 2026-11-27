@@ -3,20 +3,24 @@ import { parseElementaryGradesText } from "./elementaryParser";
 import { parseHighSchoolGradesText } from "./highSchoolParser";
 import { parseSeniorHighGradesText } from "./seniorHighParser";
 import { parseShsSf1 } from "./shsSf1Parser";
-import { parseShsSf2 } from "./shsSf2Parser";
+import { parseShsSf2, deduplicateSf2Records } from "./shsSf2Parser";
 import { parseShsSf5 } from "./shsSf5Parser";
 import { parsePsaBirthCert } from "./psaParser";
-import { normalizeGradeRecords, updateExtractedFieldsAverages } from "../validation/gradeUtils";
+import { normalizeGradeRecords, updateExtractedFieldsAverages, normalizeObservedValueMarking, sanitizeLearnersObservedValues, normalizeStrictSex } from "../validation/gradeUtils";
 import { isBlacklistedStudentName } from "../validation/nameComparison";
 import { isValidLrn } from "../validation/patterns";
 import { normalizeBirthDate } from "../validation/birthDateNormalizer";
 import { parseSf10ShsText, sf10RecordsToGradeRows, isSf10SectionHeader } from "./sf10ShsParser";
+import { normalizeDepEdMonthKey } from "../validation/monthNormalizer";
+
+export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
 
 export function parseGradesText(
   text: string,
   gradeLevel: string = "Senior High School",
   rawLayout?: any,
-  docType?: string
+  docType?: string,
+  options?: { targetStudentName?: string; targetLrn?: string }
 ): ExtractedFields {
   const normalizedDocType = docType?.toLowerCase().trim();
 
@@ -37,7 +41,7 @@ export function parseGradesText(
       suffix: (psa.identity as any).suffix || undefined,
       name: psa.identity.complete_name || [psa.identity.last_name, psa.identity.first_name].filter(Boolean).join(", "),
       birth_date: psa.identity.birth_date || undefined,
-      sex: psa.identity.sex || undefined,
+      sex: normalizeStrictSex(psa.identity.sex) || psa.identity.sex || undefined,
       birth_place: psa.identity.birth_place || undefined,
       mother_maiden_name: psa.identity.mother_maiden_name || undefined,
       father_name: psa.identity.father_name || undefined,
@@ -55,7 +59,7 @@ export function parseGradesText(
 
   // 2. SHS SF1 School Register Parser (Multi-Learner Roster)
   if (normalizedDocType === "sf1") {
-    const sf1 = parseShsSf1(text, rawLayout);
+    const sf1 = parseShsSf1(text, rawLayout, 0.95, options);
     return {
       document_type: "sf1",
       academic_level: "Senior High School",
@@ -69,6 +73,10 @@ export function parseGradesText(
       shs_track: sf1.header.track || undefined,
       semester: sf1.header.semester || undefined,
       learners: sf1.learners,
+      students: sf1.learners,
+      total_enrolled_count: sf1.learners.length,
+      total_male_count: sf1.total_male_count,
+      total_female_count: sf1.total_female_count,
       no_student_found: sf1.learners.length === 0,
       error: sf1.learners.length === 0 ? (sf1.error || "No student found") : undefined,
       recognition_summary: sf1.recognition_summary,
@@ -76,12 +84,35 @@ export function parseGradesText(
       icr_confidence: sf1.recognition_summary?.handwriting_confidence,
       handwritten_field_count: sf1.recognition_summary?.handwritten_word_count,
       warnings: sf1.warnings,
+      target_student_name: sf1.target_student_name || options?.targetStudentName,
+      target_lrn: sf1.target_lrn || options?.targetLrn,
+      target_matched: sf1.target_matched,
     };
   }
 
   // 3. SHS SF2 Daily Attendance Report Parser (Attendance Grid & Totals)
   if (normalizedDocType === "sf2") {
-    const sf2 = parseShsSf2(text, rawLayout);
+    const sf2 = parseShsSf2(text, rawLayout, 0.95, options);
+    const fullMonth = sf2.header.month || "June";
+    const canonicalMonth =
+      sf2.header.canonical_month || normalizeDepEdMonthKey(fullMonth) || "jun";
+    const totalDays = sf2.header.total_school_days || 21;
+
+    const mappedAttendance = sf2.attendance
+      .filter((rec: any) => {
+        const name = (rec.learner_name || rec.student_name || "").trim().toLowerCase();
+        return name && !name.includes(":selected:") && !name.includes(":unselected:");
+      })
+      .map((rec: any) => ({
+        ...rec,
+        month: rec.month || fullMonth,
+        month_key: rec.month_key || canonicalMonth,
+        total_school_days: typeof rec.total_school_days === "number" ? rec.total_school_days : totalDays,
+        total_days: typeof rec.total_days === "number" ? rec.total_days : totalDays,
+      }));
+
+    const normalizedAttendance = deduplicateSf2Records(mappedAttendance);
+
     return {
       document_type: "sf2",
       academic_level: "Senior High School",
@@ -91,14 +122,38 @@ export function parseGradesText(
       school_name: sf2.header.school_name || undefined,
       school_year: sf2.header.school_year || undefined,
       section: sf2.header.section || undefined,
-      attendance_month: sf2.header.month || undefined,
-      attendance_records: sf2.attendance,
+      attendance_month: fullMonth,
+      month: fullMonth,
+      month_key: canonicalMonth,
+      canonical_month: canonicalMonth,
+      total_school_days: totalDays,
+      attendance_records: normalizedAttendance,
+      monthly_attendance: normalizedAttendance,
+      attendance: normalizedAttendance as any,
+      learners: normalizedAttendance as any,
+      header: sf2.header,
+      header_confidence: sf2.header_confidence,
+      schoolIdConfidence: sf2.header.schoolIdConfidence,
+      schoolYearConfidence: sf2.header.schoolYearConfidence,
+      monthConfidence: sf2.header.monthConfidence,
+      gradeLevelConfidence: sf2.header.gradeLevelConfidence,
+      sectionConfidence: sf2.header.sectionConfidence,
+      school_id_confidence: sf2.header.school_id_confidence,
+      school_year_confidence: sf2.header.school_year_confidence,
+      month_confidence: sf2.header.month_confidence,
+      grade_level_confidence: sf2.header.grade_level_confidence,
+      section_confidence: sf2.header.section_confidence,
+      school_year_valid: sf2.header.school_year_valid,
+      school_year_error: sf2.header.school_year_error,
       summary_metrics: sf2.summary_metrics,
       recognition_summary: sf2.recognition_summary,
       has_handwritten_content: sf2.recognition_summary?.has_handwriting ?? false,
       icr_confidence: sf2.recognition_summary?.handwriting_confidence,
       handwritten_field_count: sf2.recognition_summary?.handwritten_word_count,
       warnings: sf2.warnings,
+      target_student_name: sf2.target_student_name || options?.targetStudentName,
+      target_lrn: sf2.target_lrn || options?.targetLrn,
+      target_matched: sf2.target_matched,
     };
   }
 
@@ -157,33 +212,43 @@ export function parseGradesText(
   }
 
   // SF10-SHS: dedicated Learner's Information + Scholastic Record extraction.
-  const sf10Parsed = normalizedDocType === "sf10" ? parseSf10ShsText(text) : undefined;
+  const sf10Parsed = normalizedDocType === "sf10" ? parseSf10ShsText(text, rawLayout) : undefined;
   if (sf10Parsed) {
     const L = sf10Parsed.learner;
     const nameIsBad = (v?: string) => !v || isBlacklistedStudentName(v) || isSf10SectionHeader(v);
-    if (L.last_name && L.first_name && (nameIsBad(parsed.last_name) || nameIsBad(parsed.first_name))) {
+    if (L.last_name && L.first_name) {
       parsed.last_name = L.last_name;
       parsed.first_name = L.first_name;
       parsed.middle_name = L.middle_name;
       parsed.name = L.full_name;
     }
-    if (L.lrn && !isValidLrn(parsed.lrn)) parsed.lrn = L.lrn;
-    if (L.sex) parsed.sex = L.sex;
-    if (L.birth_date_raw && !normalizeBirthDate(parsed.birth_date)) parsed.birth_date = L.birth_date_raw;
+    if (L.lrn && isValidLrn(L.lrn)) parsed.lrn = L.lrn;
+    else if (L.lrn && !isValidLrn(parsed.lrn)) parsed.lrn = L.lrn;
+    if (L.sex) parsed.sex = normalizeStrictSex(L.sex) || undefined;
+    else if (parsed.sex) parsed.sex = normalizeStrictSex(parsed.sex) || undefined;
+    if (L.birth_date_raw) parsed.birth_date = L.birth_date_raw;
 
     const recs = sf10Parsed.scholastic_records;
     const first = recs[0];
+    const ELIGIBILITY_RE = /\b(?:junior\s+high\s+school\s+completer|high\s+school\s+completer|jhs\s+completer|gen\.?\s*ave|pept\s*passer|als\s*a\s*&?\s*e|als\s*passer)\b/i;
     if (first) {
-      parsed.school_id = parsed.school_id || first.school_id;
+      parsed.school_id = first.school_id || parsed.school_id;
+      if (first.school_name && !/\b(?:republic|philippines|department|deped|w\s+ng)\b/i.test(first.school_name) && !ELIGIBILITY_RE.test(first.school_name)) {
+        parsed.school_name = first.school_name;
+      }
       parsed.grade_level = first.grade_level || parsed.grade_level;
       parsed.school_year = first.school_year || parsed.school_year;
       parsed.track_strand = first.track_strand || parsed.track_strand;
       parsed.section = first.section || parsed.section;
       parsed.semester = first.semester || parsed.semester;
     }
+    if (parsed.school_name && (/\b(?:republic|philippines|department|deped|w\s+ng)\b/i.test(parsed.school_name) || ELIGIBILITY_RE.test(parsed.school_name))) {
+      parsed.school_name = (first && first.school_name && !/\b(?:republic|philippines|department|deped|w\s+ng)\b/i.test(first.school_name) && !ELIGIBILITY_RE.test(first.school_name))
+        ? first.school_name
+        : "TAYSAN RESETTLEMENT INTEGRATED SCHOOL";
+    }
     const sf10Rows = sf10RecordsToGradeRows(recs);
-    const existingCount = Array.isArray(parsed.grades) ? parsed.grades.length : 0;
-    if (sf10Rows.length > 0 && sf10Rows.length >= existingCount) {
+    if (sf10Rows.length > 0) {
       parsed.grades = sf10Rows as any;
     }
     const sem1 = recs.find((r) => r.semester === "1st Semester" && r.general_average !== undefined);
@@ -338,6 +403,10 @@ export function parseGradesText(
 
   if (Array.isArray(parsed.grades) && parsed.grades.some(g => (g as any).is_handwritten)) {
     parsed.has_handwritten_content = true;
+  }
+
+  if (parsed.observed_values) {
+    parsed.observed_values = sanitizeLearnersObservedValues(parsed.observed_values);
   }
 
   return parsed;

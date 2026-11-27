@@ -681,8 +681,8 @@ export function compareDocuments(
       academicResults.push({
         subject: "General Average",
         gradeLevel: targetGrade,
-        doc1Grade: isValuePresent(ga1) ? ga1 : "-",
-        doc2Grade: isValuePresent(ga2) ? ga2 : "-",
+        doc1Grade: isValuePresent(ga1) ? (ga1 ?? "-") : "-",
+        doc2Grade: isValuePresent(ga2) ? (ga2 ?? "-") : "-",
         status: gaStatus,
         details: gaDetails,
       });

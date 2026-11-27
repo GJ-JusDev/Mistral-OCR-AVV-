@@ -140,10 +140,44 @@ export async function POST(request: NextRequest) {
   // 3. Fast-path: Direct raw text OCR testing (used in synthetic tests or debug)
   if (typeof rawText === "string" && rawText.trim().length > 0) {
     const parsed = parsePsaBirthCert(rawText);
+    const resolvedSex = parsed.identity.sex === "M" ? "Male" : parsed.identity.sex === "F" ? "Female" : (parsed.identity.sex || null);
+    const resolvedConfidence =
+      typeof parsed.confidence === "number"
+        ? (parsed.confidence > 1 ? parsed.confidence : parsed.confidence * 100)
+        : 95;
+
+    const flatFields = {
+      document_type: "birth_cert",
+      first_name: parsed.identity.first_name,
+      middle_name: parsed.identity.middle_name,
+      last_name: parsed.identity.last_name,
+      complete_name: parsed.identity.complete_name,
+      formatted_name: parsed.identity.formatted_name,
+      child_first_name: parsed.identity.first_name,
+      child_middle_name: parsed.identity.middle_name,
+      child_last_name: parsed.identity.last_name,
+      sex: resolvedSex,
+      sex_label: parsed.identity.sex_label || resolvedSex,
+      birth_date: parsed.identity.birth_date,
+      date_of_birth: parsed.identity.birth_date,
+      registry_number: parsed.identity.registry_number,
+      civil_registry_number: parsed.identity.registry_number,
+      mother_maiden_name: parsed.identity.mother_maiden_name,
+      mother_name: parsed.identity.mother_name,
+      father_name: parsed.identity.father_name,
+      identity: parsed.identity,
+      field_statuses: parsed.field_statuses,
+      confidence: Math.round(resolvedConfidence),
+      ocr_confidence_percent: Math.round(resolvedConfidence),
+    };
+
     return NextResponse.json({
       success: true,
       text: rawText,
       identity: parsed.identity,
+      fields: flatFields,
+      psa_data: flatFields,
+      structured_data: flatFields,
       field_statuses: parsed.field_statuses,
       confidence: parsed.confidence,
       warnings: parsed.warnings,
@@ -339,10 +373,44 @@ export async function POST(request: NextRequest) {
     }
 
     // Return structured extraction result (TEST MODE: strictly in-memory, no DB write)
+    const resolvedSex = parsed.identity.sex === "M" ? "Male" : parsed.identity.sex === "F" ? "Female" : (parsed.identity.sex || null);
+    const resolvedConfidence =
+      typeof overallConfidence === "number"
+        ? (overallConfidence > 1 ? overallConfidence : overallConfidence * 100)
+        : 95;
+
+    const flatFields = {
+      document_type: "birth_cert",
+      first_name: parsed.identity.first_name,
+      middle_name: parsed.identity.middle_name,
+      last_name: parsed.identity.last_name,
+      complete_name: parsed.identity.complete_name,
+      formatted_name: parsed.identity.formatted_name,
+      child_first_name: parsed.identity.first_name,
+      child_middle_name: parsed.identity.middle_name,
+      child_last_name: parsed.identity.last_name,
+      sex: resolvedSex,
+      sex_label: parsed.identity.sex_label || resolvedSex,
+      birth_date: parsed.identity.birth_date,
+      date_of_birth: parsed.identity.birth_date,
+      registry_number: parsed.identity.registry_number,
+      civil_registry_number: parsed.identity.registry_number,
+      mother_maiden_name: parsed.identity.mother_maiden_name,
+      mother_name: parsed.identity.mother_name,
+      father_name: parsed.identity.father_name,
+      identity: parsed.identity,
+      field_statuses: parsed.field_statuses,
+      confidence: Math.round(resolvedConfidence),
+      ocr_confidence_percent: Math.round(resolvedConfidence),
+    };
+
     return NextResponse.json({
       success: true,
       text: combinedText,
       identity: parsed.identity,
+      fields: flatFields,
+      psa_data: flatFields,
+      structured_data: flatFields,
       field_statuses: parsed.field_statuses,
       confidence: parsed.confidence,
       warnings: parsed.warnings,

@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
 import { deriveMiddleInitial, evaluateRegistryMatch } from "@/lib/registry/nameMatcher";
@@ -39,13 +39,8 @@ export async function login(formData: FormData) {
   if (data.user) {
     let accountStatus: string | null = null;
     let roleQueryFailed = false;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (serviceKey) {
-      const adminClient = createSupabaseClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        serviceKey,
-        { auth: { autoRefreshToken: false, persistSession: false } }
-      );
+    const adminClient = createAdminClient();
+    if (adminClient) {
       const { data: roleRow, error: roleError } = await adminClient
         .from("user_roles")
         .select("role, account_status, school_id")
@@ -166,12 +161,14 @@ export async function login(formData: FormData) {
 }
 
 export async function register(formData: FormData) {
-  const email = (formData.get("email") as string)?.trim();
-  const password = formData.get("password") as string;
-  const firstName = (formData.get("firstName") as string)?.trim();
-  const middleName = (formData.get("middleName") as string)?.trim();
+  const emailRaw = (formData.get("email") as string)?.trim();
+  const email = emailRaw ? emailRaw.toLowerCase() : "";
+  const password = (formData.get("password") as string) || "";
+  const firstName = (formData.get("firstName") as string)?.trim() || "";
+  const middleNameRaw = (formData.get("middleName") as string)?.trim();
   const hasNoMiddleName = formData.get("hasNoMiddleName") === "true" || formData.get("hasNoMiddleName") === "on";
-  const lastName = (formData.get("lastName") as string)?.trim();
+  const middleName = hasNoMiddleName ? "" : (middleNameRaw || "");
+  const lastName = (formData.get("lastName") as string)?.trim() || "";
   const nameExtension = (formData.get("nameExtension") as string)?.trim() || "";
 
   if (!email) {
@@ -187,12 +184,6 @@ export async function register(formData: FormData) {
     return { error: "First Name and Last Name are required." };
   }
 
-  if (!hasNoMiddleName && !middleName) {
-    // If user didn't enter a middle name, they must acknowledge having no middle name or enter it
-    // To allow flexibility while enforcing awareness:
-    // (If user leaves it blank without checking, we treat it as no middle name with warning or allow if checked)
-  }
-
   const derivedMi = deriveMiddleInitial(middleName, hasNoMiddleName);
 
   const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,}$/;
@@ -202,11 +193,23 @@ export async function register(formData: FormData) {
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!serviceKey) {
-    return { error: "Server configuration error: unable to process faculty registration." };
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.error("[POST /api/auth/register] Faculty verification failed: Missing Supabase environment configuration.");
+    return { error: "Server configuration error: Database connection settings are missing. Please contact the administrator." };
   }
+
+  // Resolve admin client safely using createAdminClient helper
+  let adminClient: ReturnType<typeof createAdminClient> = null;
+  try {
+    adminClient = createAdminClient();
+  } catch (adminInitErr) {
+    console.warn("[POST /api/auth/register] Faculty verification: createAdminClient() initialization warning:", adminInitErr);
+    adminClient = null;
+  }
+
+  const serverClient = await createClient();
+  const dbClient = adminClient || serverClient;
 
   // Use an isolated client with persistSession: false to avoid setting session cookies
   // or overwriting existing user/admin sessions in the caller's browser.
@@ -227,7 +230,7 @@ export async function register(formData: FormData) {
         middle_initial: derivedMi,
         has_no_middle_name: hasNoMiddleName,
         last_name: lastName,
-        name_extension: nameExtension,
+        name_extension: nameExtension || null,
         role: "Teacher",
         account_status: "Pending", // Automatically mark new users as Pending
         school_id: TRIS_SCHOOL_ID,
@@ -236,10 +239,12 @@ export async function register(formData: FormData) {
   });
 
   if (error) {
+    console.error("[POST /api/auth/register] Faculty verification failed during auth signUp:", error);
     return { error: error.message };
   }
 
   if (!signUpData.user) {
+    console.error("[POST /api/auth/register] Faculty verification failed: No user returned from auth signUp.");
     return { error: "Registration could not be completed. Please try again." };
   }
 
@@ -256,10 +261,6 @@ export async function register(formData: FormData) {
   let matchedTeacherName: string | null = null;
   let matchReason: string = "Registry evaluation initialized";
 
-  const adminClient = createSupabaseClient(supabaseUrl, serviceKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-
   const createdUserId = signUpData.user.id;
   // Track whether we confirmed that existingRole already belonged to a pre-existing user
   let isPreExistingAccount = false;
@@ -270,15 +271,19 @@ export async function register(formData: FormData) {
       return { error: failureMessage };
     }
     try {
-      const { error: deleteError } = await adminClient.auth.admin.deleteUser(signUpData.user.id);
-      if (deleteError) {
-        console.error("CRITICAL: Failed to roll back orphaned auth user after user_roles error:", {
-          userId: createdUserId,
-          deleteError,
-        });
-        return {
-          error: `${failureMessage} Additionally, automatic account cleanup failed. Please contact the system administrator.`,
-        };
+      if (adminClient?.auth?.admin) {
+        const { error: deleteError } = await adminClient.auth.admin.deleteUser(signUpData.user.id);
+        if (deleteError) {
+          console.error("CRITICAL: Failed to roll back orphaned auth user after user_roles error:", {
+            userId: createdUserId,
+            deleteError,
+          });
+          return {
+            error: `${failureMessage} Additionally, automatic account cleanup failed. Please contact the system administrator.`,
+          };
+        }
+      } else {
+        console.warn("[POST /api/auth/register] Faculty verification: Admin client unavailable for automatic auth cleanup of user:", createdUserId);
       }
     } catch (cleanupErr) {
       console.error("CRITICAL: Exception while rolling back orphaned auth user:", {
@@ -294,25 +299,26 @@ export async function register(formData: FormData) {
 
   try {
     // Fetch official registry for TRIS to evaluate deterministic match
-    const { data: registryTeachers, error: registryFetchError } = await adminClient
+    const { data: registryTeachers, error: registryFetchError } = await dbClient
       .from("school_teacher_registry")
       .select("*")
       .eq("school_id", TRIS_SCHOOL_ID);
 
     if (registryFetchError) {
-      console.error("Failed to query school_teacher_registry during registration:", registryFetchError);
+      console.error("[POST /api/auth/register] Faculty verification failed to query faculty registry:", registryFetchError);
       matchStatus = "REVIEW_REQUIRED";
       matchedRegistryId = null;
       matchedTeacherName = null;
-      matchReason = "Teacher registry lookup failed due to a database query error; manual administrator verification is required.";
+      matchReason = `Teacher registry lookup failed due to database query error: ${registryFetchError.message || String(registryFetchError)}. Manual administrator verification is required.`;
     } else {
       const matchResult = evaluateRegistryMatch(
         {
           firstName,
           lastName,
-          middleName: hasNoMiddleName ? null : middleName,
+          middleName: hasNoMiddleName ? null : (middleName || null),
           hasNoMiddleName,
           email,
+          userId: signUpData.user.id,
         },
         registryTeachers || []
       );
@@ -321,9 +327,19 @@ export async function register(formData: FormData) {
       matchedRegistryId = matchResult.matchedRegistryEntry?.id || null;
       matchedTeacherName = matchResult.matchedRegistryEntry?.full_name_original || null;
       matchReason = matchResult.reasons.join("; ") || "Registry evaluation completed";
+
+      if (matchStatus === "DUPLICATE_CLAIM") {
+        console.error("[POST /api/auth/register] Faculty verification failed: Duplicate registry claim for user:", signUpData.user.id);
+        return await rollbackAuthUser("This faculty profile has already been claimed by another registered account. If you believe this is an error, please contact the school administrator.");
+      }
+
+      if (matchStatus === "INACTIVE_REGISTRY_ENTRY") {
+        console.error("[POST /api/auth/register] Faculty verification failed: Inactive registry entry for user:", signUpData.user.id);
+        return await rollbackAuthUser("The faculty profile in the official registry is currently deactivated. Please contact the school administrator.");
+      }
     }
 
-    const { data: existingRole, error: existingRoleError } = await adminClient
+    const { data: existingRole, error: existingRoleError } = await dbClient
       .from("user_roles")
       .select(
         "role, account_status, school_id, requested_grade_level, requested_strand, requested_section, request_status, request_submitted_at"
@@ -332,12 +348,18 @@ export async function register(formData: FormData) {
       .maybeSingle();
 
     if (existingRoleError) {
-      console.error("Failed to check existing user_roles entry:", existingRoleError);
-      return await rollbackAuthUser("Registration failed while verifying faculty profile. Please try again.");
+      console.error("[POST /api/auth/register] Faculty verification failed:", existingRoleError);
+      if (adminClient) {
+        return await rollbackAuthUser(`Registration database error while verifying faculty profile: ${existingRoleError.message || String(existingRoleError)}. Please try again or contact the school administrator.`);
+      }
+      // If adminClient is null and userClient has RLS restriction on user_roles,
+      // the on_auth_user_created trigger has already initialized the row with Pending status.
+      console.warn("[POST /api/auth/register] Faculty verification: user_roles query restricted by RLS on unauthenticated client; account provisioned via database trigger defaults.");
     }
 
     if (!existingRole) {
-      const { error: insertError } = await adminClient
+      const insertClient = adminClient || serverClient;
+      const { error: insertError } = await (insertClient as any)
         .from("user_roles")
         .insert({
           user_id: signUpData.user.id,
@@ -359,10 +381,14 @@ export async function register(formData: FormData) {
         });
 
       if (insertError) {
-        console.error("Failed to initialize user_roles entry:", insertError);
-        return await rollbackAuthUser("Registration failed to initialize faculty profile. Please try again.");
+        console.error("[POST /api/auth/register] Faculty verification failed to initialize faculty profile:", insertError);
+        if (adminClient) {
+          return await rollbackAuthUser(`Registration database error while initializing faculty profile: ${insertError.message || String(insertError)}. Please try again or contact the school administrator.`);
+        }
+        console.warn("[POST /api/auth/register] user_roles insert deferred to database trigger defaults:", insertError.message);
+      } else {
+        profileSaved = true;
       }
-      profileSaved = true;
     } else {
       // Note: The on_auth_user_created database trigger inserts a skeleton user_roles row
       // right when auth.signUp creates a new auth.users record (with requested_* = NULL and
@@ -373,7 +399,7 @@ export async function register(formData: FormData) {
       if (hasLockedAccountStatus) {
         isPreExistingAccount = true;
         return {
-          error: "An account with this email is already registered and processed.",
+          error: "An account with this email is already registered and processed. Please sign in or contact the administrator.",
         };
       }
 
@@ -395,16 +421,21 @@ export async function register(formData: FormData) {
         request_submitted_at: null,
       };
 
-      const { error: updateError } = await adminClient
+      const updateClient = adminClient || serverClient;
+      const { error: updateError } = await (updateClient as any)
         .from("user_roles")
         .update(updatePayload)
         .eq("user_id", signUpData.user.id);
 
       if (updateError) {
-        console.error("Failed to update user_roles entry during registration:", updateError);
-        return await rollbackAuthUser("Registration failed to update faculty profile. Please try again.");
+        console.error("[POST /api/auth/register] Faculty verification failed to update faculty profile:", updateError);
+        if (adminClient) {
+          return await rollbackAuthUser(`Registration database error while updating faculty profile: ${updateError.message || String(updateError)}. Please try again or contact the school administrator.`);
+        }
+        console.warn("[POST /api/auth/register] user_roles update skipped under unauthenticated client; database trigger defaults retained.");
+      } else {
+        profileSaved = true;
       }
-      profileSaved = true;
     }
 
     // Record audit log for new registration submission
@@ -470,17 +501,17 @@ export async function register(formData: FormData) {
       });
     }
   } catch (unexpectedErr) {
-    console.error("Unexpected runtime error during post-signup registration initialization:", unexpectedErr);
+    console.error("[POST /api/auth/register] Faculty verification failed with unexpected exception:", unexpectedErr);
     if (!profileSaved && !isPreExistingAccount) {
-      return await rollbackAuthUser("Registration encountered an unexpected network or database failure. Please try again.");
+      return await rollbackAuthUser(`Registration encountered an unexpected system error: ${unexpectedErr instanceof Error ? unexpectedErr.message : String(unexpectedErr)}. Please try again or contact the administrator.`);
     }
   }
 
   // Safety cleanup: Ensure the caller's server session cookie does not hold this new registration session
-  const serverClient = await createClient();
-  const { data: currentSession } = await serverClient.auth.getUser();
+  const serverClientCleanup = await createClient();
+  const { data: currentSession } = await serverClientCleanup.auth.getUser();
   if (currentSession?.user?.id === signUpData.user.id) {
-    await serverClient.auth.signOut();
+    await serverClientCleanup.auth.signOut();
   }
 
   revalidatePath("/login");

@@ -27,6 +27,9 @@ import {
   UploadCloud,
   ArrowLeft,
   PlusCircle,
+  Info,
+  Sparkles,
+  RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -39,7 +42,65 @@ import type {
   LearnerValidationDossier,
 } from "@/lib/validation/batchCrossDocumentValidator";
 import type { DocumentSegment } from "@/lib/validation/batchDocumentSegmenter";
-import type { UnifiedFieldComparisonRow } from "@/lib/validation/crossDocumentEngine";
+import {
+  evaluate4StateRowStatus,
+  formatBirthDateWithDocLabel,
+  reconcileStudentDataFromPrimarySources,
+  normalizeAttendanceMonthKey,
+  type UnifiedFieldComparisonRow,
+  type ReconciliationLogItem,
+} from "@/lib/validation/crossDocumentEngine";
+import { extractNameComponents } from "@/lib/validation/nameComparison";
+import { levenshteinDistance } from "@/lib/validation/studentMatcher";
+import { normalizeObservedValueMarking } from "@/lib/validation/gradeUtils";
+
+function areLearnerNamesMatching(
+  cand: { lastName?: string; firstName?: string; middleName?: string; fullName?: string },
+  target: { lastName?: string; firstName?: string; middleName?: string; fullName?: string }
+): boolean {
+  const normCand = extractNameComponents(cand);
+  const normTarget = extractNameComponents(target);
+
+  if (normCand.lastName && normTarget.lastName) {
+    const lastA = normCand.lastName;
+    const lastB = normTarget.lastName;
+    const isExactLast = lastA === lastB;
+    const maxLenLast = Math.max(lastA.length, lastB.length);
+    const distLast = levenshteinDistance(lastA, lastB);
+    const isLastMatch = isExactLast || distLast <= (maxLenLast >= 6 ? 2 : 1);
+    if (!isLastMatch) return false;
+  } else {
+    return false;
+  }
+
+  if (normCand.firstName && normTarget.firstName) {
+    const firstA = normCand.firstName;
+    const firstB = normTarget.firstName;
+    const isExactFirst = firstA === firstB || firstA.includes(firstB) || firstB.includes(firstA);
+    const wordsA = firstA.split(" ");
+    const wordsB = firstB.split(" ");
+    const hasOverlap = wordsA.some((w) => wordsB.includes(w));
+    const maxLenFirst = Math.max(firstA.length, firstB.length);
+    const distFirst = levenshteinDistance(firstA, firstB);
+    const isFirstMatch = isExactFirst || hasOverlap || distFirst <= (maxLenFirst >= 6 ? 2 : 1);
+    if (!isFirstMatch) return false;
+  } else {
+    return false;
+  }
+
+  if (normCand.middleName && normTarget.middleName) {
+    const midA = normCand.middleName;
+    const midB = normTarget.middleName;
+    const isExactMid = midA === midB;
+    const isInitial = (midA.length === 1 && midB.startsWith(midA)) || (midB.length === 1 && midA.startsWith(midB));
+    const maxLenMid = Math.max(midA.length, midB.length);
+    const distMid = levenshteinDistance(midA, midB);
+    const isMidMatch = isExactMid || isInitial || distMid <= (maxLenMid >= 6 ? 2 : 1);
+    if (!isMidMatch) return false;
+  }
+
+  return true;
+}
 
 export type UnifiedWorkflowStage =
   | "stage_a" // Stage A: Uploaded Documents
@@ -112,6 +173,41 @@ export default function UnifiedBatchResultsView({
     "4": true,
   });
 
+  const [reconciledDossiers, setReconciledDossiers] = useState<
+    Record<string, { dossier: LearnerValidationDossier; log: ReconciliationLogItem[] }>
+  >({});
+  const [reconcileAuditOpen, setReconcileAuditOpen] = useState<Record<string, boolean>>({});
+
+  const handleFixStudentData = (dossierKey: string, targetDossier: LearnerValidationDossier) => {
+    const reconciled = reconcileStudentDataFromPrimarySources(targetDossier);
+    setReconciledDossiers((prev) => ({
+      ...prev,
+      [dossierKey]: {
+        dossier: reconciled as unknown as LearnerValidationDossier,
+        log: reconciled.reconciliationLog || [],
+      },
+    }));
+    setReconcileAuditOpen((prev) => ({
+      ...prev,
+      [dossierKey]: true,
+    }));
+  };
+
+  const handleRevertStudentData = (dossierKey: string) => {
+    setReconciledDossiers((prev) => {
+      const copy = { ...prev };
+      delete copy[dossierKey];
+      return copy;
+    });
+  };
+
+  const toggleAuditOpen = (dossierKey: string) => {
+    setReconcileAuditOpen((prev) => ({
+      ...prev,
+      [dossierKey]: !prev[dossierKey],
+    }));
+  };
+
   const toggleDossierCv = (indexStr: string) => {
     setExpandedCvIndex((prev) => ({
       ...prev,
@@ -119,7 +215,99 @@ export default function UnifiedBatchResultsView({
     }));
   };
 
-  const { summary, categorizedResults, learnerDossiers } = report;
+  const { summary, categorizedResults, learnerDossiers: rawLearnerDossiers = [] } = report;
+
+  const learnerDossiers = useMemo(() => {
+    const rawList = rawLearnerDossiers || [];
+    const mergedList: LearnerValidationDossier[] = [];
+
+    const filterAndDeduplicateMatrix = (matrix: UnifiedFieldComparisonRow[]) => {
+      const seenMonths = new Set<string>();
+      return (matrix || [])
+        .filter((row) => row.field !== "mother_maiden_name" && row.label !== "Mother's Maiden Name")
+        .filter((row) => {
+          if (row.category === "ATTENDANCE" || row.field.startsWith("attendance_")) {
+            const mKey = normalizeAttendanceMonthKey(row.field.replace(/^attendance_/, "") || row.label || "");
+            if (mKey && mKey !== "total" && mKey !== "annual_summary") {
+              if (seenMonths.has(mKey)) return false;
+              seenMonths.add(mKey);
+            }
+          }
+          return true;
+        })
+        .map((row) => ({
+          ...row,
+          status: evaluate4StateRowStatus(row),
+          isMatch: evaluate4StateRowStatus(row) === "MATCH",
+        }));
+    };
+
+    for (const d of rawList) {
+      const existing = mergedList.find((m) =>
+        areLearnerNamesMatching(
+          { lastName: m.lastName, firstName: m.firstName, middleName: m.middleName, fullName: m.fullName },
+          { lastName: d.lastName, firstName: d.firstName, middleName: d.middleName, fullName: d.fullName }
+        )
+      );
+      if (existing) {
+        // Merge matched sources across all 5 forms
+        existing.matchedSources = {
+          ...existing.matchedSources,
+          ...(d.matchedSources.sf1 ? { sf1: d.matchedSources.sf1 } : {}),
+          ...(d.matchedSources.sf2 ? { sf2: d.matchedSources.sf2 } : {}),
+          ...(d.matchedSources.sf9 ? { sf9: d.matchedSources.sf9 } : {}),
+          ...(d.matchedSources.sf10 ? { sf10: d.matchedSources.sf10 } : {}),
+          ...(d.matchedSources.psa ? { psa: d.matchedSources.psa } : {}),
+        };
+        existing.documentPresence = {
+          ...existing.documentPresence,
+          sf1: existing.documentPresence.sf1 || d.documentPresence.sf1,
+          sf2: existing.documentPresence.sf2 || d.documentPresence.sf2,
+          sf9: existing.documentPresence.sf9 || d.documentPresence.sf9,
+          sf10: existing.documentPresence.sf10 || d.documentPresence.sf10,
+          psa: existing.documentPresence.psa || d.documentPresence.psa,
+          totalAvailable: [
+            existing.documentPresence.sf1 || d.documentPresence.sf1,
+            existing.documentPresence.sf2 || d.documentPresence.sf2,
+            existing.documentPresence.sf9 || d.documentPresence.sf9,
+            existing.documentPresence.sf10 || d.documentPresence.sf10,
+            existing.documentPresence.psa || d.documentPresence.psa,
+          ].filter(Boolean).length,
+        };
+        if ((!existing.lrn || existing.lrn.startsWith("UNREGISTERED")) && d.lrn && !d.lrn.startsWith("UNREGISTERED")) {
+          existing.lrn = d.lrn;
+        }
+        if (d.unifiedMatrix && existing.unifiedMatrix) {
+          for (const dRow of d.unifiedMatrix) {
+            if (dRow.field === "mother_maiden_name" || dRow.label === "Mother's Maiden Name") continue;
+            const eRow = existing.unifiedMatrix.find((r) => r.field === dRow.field);
+            if (eRow) {
+              if (eRow.psaValue === undefined && dRow.psaValue !== undefined) eRow.psaValue = dRow.psaValue;
+              if (eRow.sf1Value === undefined && dRow.sf1Value !== undefined) eRow.sf1Value = dRow.sf1Value;
+              if (eRow.sf2Value === undefined && dRow.sf2Value !== undefined) eRow.sf2Value = dRow.sf2Value;
+              if (eRow.sf9Value === undefined && dRow.sf9Value !== undefined) eRow.sf9Value = dRow.sf9Value;
+              if (eRow.sf10Value === undefined && dRow.sf10Value !== undefined) eRow.sf10Value = dRow.sf10Value;
+              eRow.status = evaluate4StateRowStatus(eRow);
+              eRow.isMatch = eRow.status === "MATCH";
+            } else {
+              existing.unifiedMatrix.push({
+                ...dRow,
+                status: evaluate4StateRowStatus(dRow),
+                isMatch: evaluate4StateRowStatus(dRow) === "MATCH",
+              });
+            }
+          }
+          existing.unifiedMatrix = filterAndDeduplicateMatrix(existing.unifiedMatrix);
+        }
+      } else {
+        mergedList.push({
+          ...d,
+          unifiedMatrix: filterAndDeduplicateMatrix(d.unifiedMatrix || []),
+        });
+      }
+    }
+    return mergedList;
+  }, [rawLearnerDossiers]);
   const rawSegments =
     propSegments && propSegments.length > 0
       ? propSegments
@@ -292,8 +480,18 @@ export default function UnifiedBatchResultsView({
     );
   };
 
+  const isBlankVal = (v: any) =>
+    v === undefined ||
+    v === null ||
+    String(v).trim() === "" ||
+    String(v).trim() === "—" ||
+    String(v).trim() === "-" ||
+    String(v).trim().toLowerCase() === "blank" ||
+    String(v).trim().toLowerCase() === "null" ||
+    String(v).trim().toLowerCase() === "undefined";
+
   const renderCellValue = (val: any) => {
-    if (val === undefined || val === null || val === "") {
+    if (isBlankVal(val)) {
       return <span className="text-slate-300 dark:text-slate-600 font-mono text-[11px]">—</span>;
     }
     if (typeof val === "boolean") {
@@ -302,8 +500,27 @@ export default function UnifiedBatchResultsView({
     return <span className="font-medium text-xs text-slate-800 dark:text-slate-200">{String(val)}</span>;
   };
 
-  const getRowStatusBadge = (status: string) => {
-    switch (status) {
+  const isBirthDateRow = (row: UnifiedFieldComparisonRow) =>
+    row.field === "birth_date" ||
+    row.field === "date_of_birth" ||
+    row.label?.toLowerCase().includes("date of birth") ||
+    row.label?.toLowerCase().includes("birth date");
+
+  const renderMatrixCell = (val: any, docLabel: string, isBirthDate: boolean) => {
+    if (isBlankVal(val)) {
+      return <span className="text-slate-300 dark:text-slate-600 font-mono text-[11px]">—</span>;
+    }
+    if (isBirthDate) {
+      const formatted = formatBirthDateWithDocLabel(val, docLabel);
+      return <span className="font-medium text-xs text-slate-800 dark:text-slate-200">{formatted}</span>;
+    }
+    return renderCellValue(val);
+  };
+
+  const getRowStatusBadge = (status: string, row?: UnifiedFieldComparisonRow) => {
+    const computedStatus = row ? evaluate4StateRowStatus(row) : status;
+    const finalStatus = computedStatus === "NO_DATA" ? "NO DATA" : computedStatus;
+    switch (finalStatus) {
       case "MATCH":
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
@@ -316,24 +533,21 @@ export default function UnifiedBatchResultsView({
             <XCircle className="w-3 h-3 text-rose-600 shrink-0" /> MISMATCH
           </span>
         );
+      case "INCOMPLETE":
       case "NEEDS_VERIFICATION":
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
-            <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" /> VERIFY
+            <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" /> INCOMPLETE
           </span>
         );
+      case "NO DATA":
+      case "NOT_APPLICABLE":
       case "INCOMPLETE_COVERAGE":
       case "MISSING_SOURCE":
-        return (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
-            INCOMPLETE COVERAGE
-          </span>
-        );
-      case "NOT_APPLICABLE":
       default:
         return (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
-            N/A
+            NO DATA
           </span>
         );
     }
@@ -349,6 +563,29 @@ export default function UnifiedBatchResultsView({
     summary.missingDocumentsCount +
     summary.incompleteDataCount +
     summary.needsManualVerificationCount;
+
+  const hasAnySf9BlankGradeError =
+    learnerDossiers.some((d) => {
+      const sf9 = d.matchedSources.sf9?.raw;
+      if (!sf9) return false;
+      if (sf9.has_blank_grade_error) return true;
+      const grades = Array.isArray(sf9.grades) ? sf9.grades : [];
+      if (grades.length === 0) return false;
+      const hasBlankSubj = grades.some((g: any) => isBlankVal(g.final ?? g.final_grade ?? g.sem1_final_grade ?? g.sem2_final_grade));
+      const hasBlankAvg = isBlankVal(sf9.general_average);
+      return hasBlankSubj || hasBlankAvg;
+    }) ||
+    segments.some((seg) => {
+      if (seg.documentType !== "sf9") return false;
+      const data = effectiveExtractedData[seg.id];
+      if (!data) return false;
+      if (data.has_blank_grade_error) return true;
+      const grades = Array.isArray(data.grades) ? data.grades : [];
+      if (grades.length === 0) return false;
+      const hasBlankSubj = grades.some((g: any) => isBlankVal(g.final ?? g.final_grade ?? g.sem1_final_grade ?? g.sem2_final_grade));
+      const hasBlankAvg = isBlankVal(data.general_average);
+      return hasBlankSubj || hasBlankAvg;
+    });
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
@@ -644,6 +881,63 @@ export default function UnifiedBatchResultsView({
             </Button>
           </div>
 
+          {/* Blank Grade Error Alert */}
+          {hasAnySf9BlankGradeError && (
+            <div
+              data-testid="sf9-blank-grade-error"
+              className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 flex items-start gap-2 text-xs"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="font-bold">Blank Grade Error:</strong> One or more Final Grades or Semester General Averages are blank on the uploaded SF9 Back card.
+              </div>
+            </div>
+          )}
+
+          {/* Teacher-Friendly Error & Status Legends Header */}
+          <div
+            data-testid="sf9-error-legends"
+            className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/60 text-xs space-y-2"
+          >
+            <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200 text-[11px] uppercase tracking-wider">
+              <Info className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span>SF9 Academic &amp; Clearance Status Guide (Teacher Reference)</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 text-[11px] leading-relaxed">
+              <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
+                <div className="flex items-center gap-1.5 font-bold mb-1">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <span>Blank Grade Error</span>
+                </div>
+                <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
+                  Triggered when one or more subject <strong className="font-semibold">FINAL</strong> grades or <strong className="font-semibold">General Average for the Semester</strong> boxes are left blank on the uploaded SF9 card (no automatic grade calculation is performed).
+                </p>
+              </div>
+
+              <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
+                <div className="flex items-center gap-1.5 font-bold mb-1">
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                    Blank / Incomplete
+                  </span>
+                </div>
+                <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
+                  Indicates an empty/unwritten grade cell on the form that requires teacher completion before final clearance.
+                </p>
+              </div>
+
+              <div className="p-2.5 rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200">
+                <div className="flex items-center gap-1.5 font-bold mb-1">
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
+                    Passed / Failed
+                  </span>
+                </div>
+                <p className="text-emerald-800/90 dark:text-emerald-300/90 text-[10.5px]">
+                  Official DepEd remark displayed only when an explicit numeric grade (<strong className="font-semibold">&gt;= 75 Passed, &lt; 75 Failed</strong>) is written on the card.
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Search bar */}
           <div className="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
             <div className="relative min-w-[280px]">
@@ -677,17 +971,21 @@ export default function UnifiedBatchResultsView({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {getVisibleDossiers().map((d) => {
-                    const isExpanded = expandedDossierLrn === (d.lrn || d.fullName);
+                  {getVisibleDossiers().map((rawD) => {
+                    const dossierKey = rawD.lrn || rawD.fullName;
+                    const reconciledEntry = reconciledDossiers[dossierKey];
+                    const d = reconciledEntry ? reconciledEntry.dossier : rawD;
+                    const isFixed = Boolean(reconciledEntry);
+                    const isExpanded = expandedDossierLrn === dossierKey;
                     const sf9Data = d.matchedSources.sf9?.raw;
                     const ovData = sf9Data?.observed_values;
                     const achData = sf9Data?.learner_progress_achievement || sf9Data?.grading_scale;
 
                     return (
-                      <React.Fragment key={d.lrn || d.fullName}>
+                      <React.Fragment key={dossierKey}>
                         <tr
                           onClick={() =>
-                            setExpandedDossierLrn(isExpanded ? null : (d.lrn || d.fullName))
+                            setExpandedDossierLrn(isExpanded ? null : dossierKey)
                           }
                           className={`hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer ${
                             isExpanded ? "bg-slate-50/80 dark:bg-slate-800/40" : ""
@@ -778,22 +1076,30 @@ export default function UnifiedBatchResultsView({
 
                           {/* Overall Status */}
                           <td className="py-3 px-4 text-center">
-                            <span
-                              className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                                d.overallStatus === "MATCH"
-                                  ? "bg-emerald-100 text-emerald-800"
-                                  : d.overallStatus === "MISMATCH"
-                                  ? "bg-rose-100 text-rose-800"
-                                  : "bg-amber-100 text-amber-800"
-                              }`}
-                            >
-                              {d.overallStatus}
-                            </span>
+                            {isFixed ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" /> MATCHED / VERIFIED
+                              </span>
+                            ) : (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                                  d.overallStatus === "MATCH"
+                                    ? "bg-emerald-100 text-emerald-800"
+                                    : d.overallStatus === "MISMATCH"
+                                    ? "bg-rose-100 text-rose-800"
+                                    : "bg-amber-100 text-amber-800"
+                                }`}
+                              >
+                                {d.overallStatus}
+                              </span>
+                            )}
                           </td>
 
                           {/* Discrepancies Count */}
                           <td className="py-3 px-4 text-right font-medium">
-                            {d.discrepancies.length > 0 ? (
+                            {isFixed ? (
+                              <span className="text-emerald-600 font-medium">Reconciled (0 issues)</span>
+                            ) : d.discrepancies.length > 0 ? (
                               <span className="text-rose-600 font-bold">
                                 {d.discrepancies.length} issues
                               </span>
@@ -948,77 +1254,217 @@ export default function UnifiedBatchResultsView({
                               </div>
 
                               {/* View Switcher Tabs inside Dossier */}
-                              <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDossierViewTab((prev) => ({ ...prev, [d.lrn]: "matrix" }))
-                                  }
-                                  className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
-                                    (dossierViewTab[d.lrn] || "matrix") === "matrix"
-                                      ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                                      : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-                                  }`}
-                                >
-                                  <Layers className="w-3.5 h-3.5" />
-                                  <span>Cross-Document Matrix ({d.unifiedMatrix?.length || 0})</span>
-                                </button>
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-1">
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDossierViewTab((prev) => ({ ...prev, [dossierKey]: "matrix" }))
+                                    }
+                                    className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
+                                      (dossierViewTab[dossierKey] || "matrix") === "matrix"
+                                        ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                                        : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    }`}
+                                  >
+                                    <Layers className="w-3.5 h-3.5" />
+                                    <span>Cross-Document Matrix ({d.unifiedMatrix?.length || 0})</span>
+                                  </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDossierViewTab((prev) => ({ ...prev, [d.lrn]: "sources" }))
-                                  }
-                                  className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
-                                    dossierViewTab[d.lrn] === "sources"
-                                      ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                                      : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-                                  }`}
-                                >
-                                  <FileText className="w-3.5 h-3.5" />
-                                  <span>Extracted Records by Source</span>
-                                </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDossierViewTab((prev) => ({ ...prev, [dossierKey]: "sources" }))
+                                    }
+                                    className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
+                                      dossierViewTab[dossierKey] === "sources"
+                                        ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                                        : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    }`}
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                    <span>Extracted Records by Source</span>
+                                  </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDossierViewTab((prev) => ({
-                                      ...prev,
-                                      [d.lrn]: "observed_values",
-                                    }))
-                                  }
-                                  className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
-                                    dossierViewTab[d.lrn] === "observed_values"
-                                      ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                                      : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-                                  }`}
-                                >
-                                  <Heart className="w-3.5 h-3.5 text-rose-500" />
-                                  <span>Observed Values & Scale</span>
-                                </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDossierViewTab((prev) => ({
+                                        ...prev,
+                                        [dossierKey]: "observed_values",
+                                      }))
+                                    }
+                                    className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
+                                      dossierViewTab[dossierKey] === "observed_values"
+                                        ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                                        : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    }`}
+                                  >
+                                    <Heart className="w-3.5 h-3.5 text-rose-500" />
+                                    <span>Observed Values & Scale</span>
+                                  </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDossierViewTab((prev) => ({
-                                      ...prev,
-                                      [d.lrn]: "discrepancies",
-                                    }))
-                                  }
-                                  className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
-                                    dossierViewTab[d.lrn] === "discrepancies"
-                                      ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                                      : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-                                  }`}
-                                >
-                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                                  <span>Discrepancies ({d.discrepancies.length})</span>
-                                </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setDossierViewTab((prev) => ({
+                                        ...prev,
+                                        [dossierKey]: "discrepancies",
+                                      }))
+                                    }
+                                    className={`pb-2.5 px-3 text-xs font-bold transition-colors border-b-2 flex items-center gap-1.5 ${
+                                      dossierViewTab[dossierKey] === "discrepancies"
+                                        ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                                        : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    }`}
+                                  >
+                                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                                    <span>Discrepancies ({d.discrepancies.length})</span>
+                                  </button>
+                                </div>
+
+                                {/* Top Matrix Header Action: One-Click Fix Student Data Button */}
+                                <div className="ml-auto flex items-center gap-2 pb-1.5">
+                                  {!isFixed ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleFixStudentData(dossierKey, rawD)}
+                                      title="Pull baseline data from Primary Sources — SF1: LRN • PSA: Full Name, Sex, Birthday • SF9: Grades"
+                                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 cursor-pointer"
+                                    >
+                                      <Sparkles className="w-3.5 h-3.5" />
+                                      <span>
+                                        Fix Student Data
+                                        {(() => {
+                                          const count = (d.unifiedMatrix || []).filter(
+                                            (r) => r.status === "MISMATCH" || r.status === "INCOMPLETE"
+                                          ).length || d.discrepancies.length;
+                                          return count > 0 ? ` (${count})` : "";
+                                        })()}
+                                      </span>
+                                    </button>
+                                  ) : (
+                                    <div className="flex items-center gap-2">
+                                      <span
+                                        title="Pull baseline data from Primary Sources — SF1: LRN • PSA: Full Name, Sex, Birthday • SF9: Grades"
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 cursor-default"
+                                      >
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                                        ✓ Student Data Fixed (All Matched)
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleAuditOpen(dossierKey)}
+                                        className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
+                                      >
+                                        {reconcileAuditOpen[dossierKey] ? "Hide Summary" : "Primary Source Summary"} ({reconciledEntry.log.length})
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
 
                               {/* View 1: Unified Comparison Matrix */}
-                              {(dossierViewTab[d.lrn] || "matrix") === "matrix" && (
+                              {(dossierViewTab[dossierKey] || "matrix") === "matrix" && (
                                 <div className="space-y-3">
+                                  {/* Collapsible Primary Source Reconciliation Summary */}
+                                  {isFixed && (
+                                    <div className="rounded-xl border border-emerald-200 dark:border-emerald-800/60 bg-emerald-50/50 dark:bg-emerald-950/20 p-3.5 space-y-3">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="p-1 rounded-lg bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300">
+                                            <CheckCircle2 className="w-4 h-4" />
+                                          </span>
+                                          <div>
+                                            <h5 className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
+                                              Primary Source Reconciliation Summary
+                                            </h5>
+                                            <p className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                                              Fields reconciled from uploaded Primary Source Documents: SF1 (LRN & Enrollment), PSA (Civil Identity), and SF9 (Grades & Attendance Baseline).
+                                            </p>
+                                          </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleRevertStudentData(dossierKey)}
+                                            className="text-xs h-7 px-2.5 text-slate-600 hover:text-rose-600 border-slate-300 dark:border-slate-700 flex items-center gap-1 cursor-pointer"
+                                          >
+                                            <RotateCcw className="w-3 h-3" /> Revert Changes
+                                          </Button>
+                                          <button
+                                            type="button"
+                                            onClick={() => toggleAuditOpen(dossierKey)}
+                                            className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 hover:underline cursor-pointer"
+                                          >
+                                            {reconcileAuditOpen[dossierKey] ? "Collapse Summary" : `View ${reconciledEntry.log.length} Reconciled Fields`}
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      {reconcileAuditOpen[dossierKey] && reconciledEntry.log.length > 0 && (
+                                        <div className="overflow-x-auto rounded-lg border border-emerald-200 dark:border-emerald-800 bg-white dark:bg-slate-900">
+                                          <table className="w-full text-left text-xs">
+                                            <thead className="bg-emerald-100/60 dark:bg-emerald-900/40 text-emerald-900 dark:text-emerald-200 text-[10px] font-bold uppercase tracking-wider">
+                                              <tr>
+                                                <th className="py-2 px-3">Field Name</th>
+                                                <th className="py-2 px-3 text-center">Primary Source</th>
+                                                <th className="py-2 px-3">Baseline Value</th>
+                                                <th className="py-2 px-3">Updated Form(s)</th>
+                                                <th className="py-2 px-3 text-center">Previous Status</th>
+                                                <th className="py-2 px-3 text-center">Reconciled Status</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-emerald-100 dark:divide-emerald-900/50">
+                                              {reconciledEntry.log.map((item, idx) => (
+                                                <tr key={idx} className="hover:bg-emerald-50/50 dark:hover:bg-emerald-950/30">
+                                                  <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200">
+                                                    {item.fieldName}
+                                                  </td>
+                                                  <td className="py-2 px-3 text-center">
+                                                    <span
+                                                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                                        item.primarySource === "SF1"
+                                                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-900 dark:text-emerald-200"
+                                                          : item.primarySource === "PSA"
+                                                          ? "bg-purple-100 text-purple-800 border border-purple-300 dark:bg-purple-900 dark:text-purple-200"
+                                                          : "bg-indigo-100 text-indigo-800 border border-indigo-300 dark:bg-indigo-900 dark:text-indigo-200"
+                                                      }`}
+                                                    >
+                                                      {item.primarySource}
+                                                    </span>
+                                                  </td>
+                                                  <td className="py-2 px-3 font-mono font-medium text-slate-700 dark:text-slate-300">
+                                                    {item.baselineValue}
+                                                  </td>
+                                                  <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
+                                                    {item.updatedForms.join(", ")}
+                                                  </td>
+                                                  <td className="py-2 px-3 text-center">
+                                                    <span
+                                                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                                        item.previousStatus === "MISMATCH"
+                                                          ? "bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-950 dark:text-rose-300"
+                                                          : "bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950 dark:text-amber-300"
+                                                      }`}
+                                                    >
+                                                      {item.previousStatus}
+                                                    </span>
+                                                  </td>
+                                                  <td className="py-2 px-3 text-center">
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950 dark:text-emerald-300">
+                                                      <CheckCircle2 className="w-3 h-3 text-emerald-600" /> MATCH
+                                                    </span>
+                                                  </td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                   <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl bg-white dark:bg-slate-900">
                                     <table className="w-full text-left text-xs">
                                       <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 text-[10px] font-bold uppercase tracking-wider border-b border-slate-200 dark:border-slate-800">
@@ -1033,31 +1479,34 @@ export default function UnifiedBatchResultsView({
                                         </tr>
                                       </thead>
                                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                                        {(d.unifiedMatrix || []).map((row, rIdx) => (
-                                          <tr key={rIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                                            <td className="py-2 px-3 font-medium text-slate-800 dark:text-slate-200">
-                                              {row.label || row.field}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.psaValue)}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.sf1Value)}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.sf2Value)}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.sf9Value)}
-                                            </td>
-                                            <td className="py-2 px-2 text-center">
-                                              {renderCellValue(row.sf10Value)}
-                                            </td>
-                                            <td className="py-2 px-3 text-center">
-                                              {getRowStatusBadge(row.status)}
-                                            </td>
-                                          </tr>
-                                        ))}
+                                        {(d.unifiedMatrix || []).map((row, rIdx) => {
+                                          const isDob = isBirthDateRow(row);
+                                          return (
+                                            <tr key={rIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                                              <td className="py-2 px-3 font-medium text-slate-800 dark:text-slate-200">
+                                                {row.label || row.field}
+                                              </td>
+                                              <td className="py-2 px-2 text-center">
+                                                {renderMatrixCell(row.psaValue, "PSA", isDob)}
+                                              </td>
+                                              <td className="py-2 px-2 text-center">
+                                                {renderMatrixCell(row.sf1Value, "SF1", isDob)}
+                                              </td>
+                                              <td className="py-2 px-2 text-center">
+                                                {renderMatrixCell(row.sf2Value, "SF2", isDob)}
+                                              </td>
+                                              <td className="py-2 px-2 text-center">
+                                                {renderMatrixCell(row.sf9Value, "SF9", isDob)}
+                                              </td>
+                                              <td className="py-2 px-2 text-center">
+                                                {renderMatrixCell(row.sf10Value, "SF10", isDob)}
+                                              </td>
+                                              <td className="py-2 px-3 text-center">
+                                                {getRowStatusBadge(row.status, row)}
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
                                       </tbody>
                                     </table>
                                   </div>
@@ -1065,7 +1514,7 @@ export default function UnifiedBatchResultsView({
                               )}
 
                               {/* View 2: Extracted Data From Sources */}
-                              {dossierViewTab[d.lrn] === "sources" && (
+                              {dossierViewTab[dossierKey] === "sources" && (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                                   {d.matchedSources.sf1 && (
                                     <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-1.5">
@@ -1092,13 +1541,39 @@ export default function UnifiedBatchResultsView({
                                         <span className="font-bold text-emerald-700 dark:text-emerald-400">
                                           SF2-SHS Daily Attendance ({d.allSf2Records?.length || 1} Month)
                                         </span>
-                                        <span className="font-mono text-[10px] text-slate-400">
-                                          P{d.matchedSources.sf2.pageNumber ?? 1}:R{d.matchedSources.sf2.raw?.row_index ?? "—"}
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                          {((d.matchedSources.sf2.raw?.overallRowAccuracy ?? d.matchedSources.sf2.raw?.rowAccuracyPercent) !== undefined) && (
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                              (d.matchedSources.sf2.raw?.overallRowAccuracy ?? d.matchedSources.sf2.raw?.rowAccuracyPercent) >= 85
+                                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                                : (d.matchedSources.sf2.raw?.overallRowAccuracy ?? d.matchedSources.sf2.raw?.rowAccuracyPercent) >= 65
+                                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                                                : "bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300"
+                                            }`}>
+                                              {d.matchedSources.sf2.raw?.overallRowAccuracy ?? d.matchedSources.sf2.raw?.rowAccuracyPercent}% accuracy
+                                            </span>
+                                          )}
+                                          <span className="font-mono text-[10px] text-slate-400">
+                                            P{d.matchedSources.sf2.pageNumber ?? 1}:R{d.matchedSources.sf2.raw?.row_index ?? "—"}
+                                          </span>
+                                        </div>
                                       </div>
                                       <div className="space-y-1 font-mono text-[11px] text-slate-700 dark:text-slate-300">
-                                        <div>Month: {d.matchedSources.sf2.raw?.month || "August"}</div>
-                                        <div>Present: <span className="font-bold text-emerald-600">{d.matchedSources.sf2.raw?.days_present ?? d.matchedSources.sf2.raw?.total_present ?? "—"}</span> • Absent: <span className="font-bold text-rose-600">{d.matchedSources.sf2.raw?.days_absent ?? d.matchedSources.sf2.raw?.total_absent ?? "—"}</span></div>
+                                        <div>Month: <span className="font-bold">{(d.matchedSources.sf2 as any)?.month || d.matchedSources.sf2.raw?.month || "June"}</span></div>
+                                        <div>
+                                          Present: <span className="font-bold text-emerald-600">{d.matchedSources.sf2.raw?.days_present ?? d.matchedSources.sf2.raw?.total_present ?? "—"}</span>
+                                          {" • "}Absent: <span className="font-bold text-rose-600">{d.matchedSources.sf2.raw?.days_absent ?? d.matchedSources.sf2.raw?.total_absent ?? "0"}</span>
+                                          {((d.matchedSources.sf2.raw?.days_tardy ?? d.matchedSources.sf2.raw?.gridTardyCount ?? d.matchedSources.sf2.raw?.writtenTardy) !== undefined) && (
+                                            <>
+                                              {" • "}Tardy: <span className="font-bold text-amber-600">{d.matchedSources.sf2.raw?.days_tardy ?? d.matchedSources.sf2.raw?.gridTardyCount ?? d.matchedSources.sf2.raw?.writtenTardy ?? 0}</span>
+                                            </>
+                                          )}
+                                          {d.matchedSources.sf2.raw?.total_school_days !== undefined && (
+                                            <>
+                                              {" • "}Total Days: <span className="font-bold text-slate-600 dark:text-slate-400">{d.matchedSources.sf2.raw?.total_school_days}</span>
+                                            </>
+                                          )}
+                                        </div>
                                         <div>Remarks: {d.matchedSources.sf2.raw?.remarks || "—"}</div>
                                       </div>
                                     </div>
@@ -1115,9 +1590,21 @@ export default function UnifiedBatchResultsView({
                                         </span>
                                       </div>
                                       <div className="space-y-1 font-mono text-[11px] text-slate-700 dark:text-slate-300">
-                                        <div>General Average: <span className="font-bold text-amber-700">{d.matchedSources.sf9.raw?.general_average ?? "—"}</span></div>
+                                        <div>General Average: <span className="font-bold text-amber-700">{d.matchedSources.sf9.raw?.general_average ?? "Blank"}</span></div>
                                         <div>Subject Count: {Array.isArray(d.matchedSources.sf9.raw?.grades) ? d.matchedSources.sf9.raw.grades.length : 0}</div>
                                       </div>
+                                      {(Boolean(d.matchedSources.sf9.raw?.has_blank_grade_error) ||
+                                        (Array.isArray(d.matchedSources.sf9.raw?.grades) && d.matchedSources.sf9.raw.grades.length > 0 &&
+                                          (d.matchedSources.sf9.raw.grades.some((g: any) => isBlankVal(g.final ?? g.final_grade ?? g.sem1_final_grade ?? g.sem2_final_grade)) ||
+                                           isBlankVal(d.matchedSources.sf9.raw.general_average)))) && (
+                                        <div
+                                          data-testid="sf9-blank-grade-error"
+                                          className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 flex items-start gap-1.5 text-[11px] mt-2"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                                          <span>Blank Grade Error: One or more Final Grades or Semester General Averages are blank on the uploaded SF9 Back card.</span>
+                                        </div>
+                                      )}
                                     </div>
                                   )}
 
@@ -1141,17 +1628,93 @@ export default function UnifiedBatchResultsView({
                               )}
 
                               {/* View 3: Observed Values */}
-                              {dossierViewTab[d.lrn] === "observed_values" && (
+                              {dossierViewTab[dossierKey] === "observed_values" && (
                                 <div className="space-y-3">
                                   {ovData ? (
-                                    <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-2">
-                                      <h5 className="font-bold text-xs text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
-                                        <Heart className="w-3.5 h-3.5 text-rose-500" />
-                                        <span>Learner Observed Values Rating</span>
-                                      </h5>
-                                      <div className="text-xs text-slate-600 dark:text-slate-400">
-                                        Ratings: AO (Always Observed), SO (Sometimes Observed), RO (Rarely Observed), NO (Not Observed).
+                                    <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 space-y-3">
+                                      <div className="flex items-center justify-between">
+                                        <h5 className="font-bold text-xs text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                                          <Heart className="w-3.5 h-3.5 text-rose-500" />
+                                          <span>Report on Learner&apos;s Observed Values</span>
+                                        </h5>
+                                        <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                                          <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">AO</span>
+                                          <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-bold">SO</span>
+                                          <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-bold">RO</span>
+                                          <span className="px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold">NO</span>
+                                        </div>
                                       </div>
+                                      {(() => {
+                                        const renderBadge = (val: any) => {
+                                          const norm = normalizeObservedValueMarking(val?.normalized_rating ?? val?.original_mark ?? val);
+                                          if (!norm) return <span className="text-slate-400 font-mono text-xs">—</span>;
+                                          const cls =
+                                            norm === "AO"
+                                              ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                              : norm === "SO"
+                                              ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400"
+                                              : norm === "RO"
+                                              ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400"
+                                              : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400";
+                                          return (
+                                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${cls}`}>
+                                              {norm}
+                                            </span>
+                                          );
+                                        };
+
+                                        const groups = Array.isArray(ovData.core_values) && ovData.core_values.length > 0
+                                          ? ovData.core_values
+                                          : null;
+
+                                        if (groups) {
+                                          return (
+                                            <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-lg">
+                                              <table className="w-full text-xs text-left">
+                                                <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold border-b border-slate-200 dark:border-slate-800">
+                                                  <tr>
+                                                    <th className="py-2 px-3">Core Values</th>
+                                                    <th className="py-2 px-3">Behavior Statements</th>
+                                                    <th className="py-2 px-2 text-center w-12">Q1</th>
+                                                    <th className="py-2 px-2 text-center w-12">Q2</th>
+                                                    <th className="py-2 px-2 text-center w-12">Q3</th>
+                                                    <th className="py-2 px-2 text-center w-12">Q4</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                                  {groups.map((group: any, gIdx: number) =>
+                                                    (group.statements || []).map((stmt: any, sIdx: number) => (
+                                                      <tr key={`${gIdx}-${sIdx}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                                                        {sIdx === 0 && (
+                                                          <td
+                                                            rowSpan={group.statements.length}
+                                                            className="py-2 px-3 font-bold text-slate-900 dark:text-slate-100 bg-slate-50/30 dark:bg-slate-800/20 align-top border-r border-slate-100 dark:border-slate-800"
+                                                          >
+                                                            {group.name}
+                                                          </td>
+                                                        )}
+                                                        <td className="py-2 px-3 text-slate-700 dark:text-slate-300 font-medium">
+                                                          {stmt.statement}
+                                                        </td>
+                                                        <td className="py-2 px-2 text-center">{renderBadge(stmt.q1)}</td>
+                                                        <td className="py-2 px-2 text-center">{renderBadge(stmt.q2)}</td>
+                                                        <td className="py-2 px-2 text-center">{renderBadge(stmt.q3)}</td>
+                                                        <td className="py-2 px-2 text-center">{renderBadge(stmt.q4)}</td>
+                                                      </tr>
+                                                    ))
+                                                  )}
+                                                </tbody>
+                                              </table>
+                                            </div>
+                                          );
+                                        }
+
+                                        return (
+                                          <div className="text-xs text-slate-500 italic">
+                                            Observed values ratings recorded: AO (Always Observed), SO (Sometimes Observed), RO (Rarely Observed), NO (Not Observed).
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                   ) : (
                                     <div className="p-6 text-center border border-dashed rounded-xl text-xs text-slate-400">
@@ -1162,7 +1725,7 @@ export default function UnifiedBatchResultsView({
                               )}
 
                               {/* View 4: Discrepancies Details */}
-                              {dossierViewTab[d.lrn] === "discrepancies" && (
+                              {dossierViewTab[dossierKey] === "discrepancies" && (
                                 <div className="space-y-2.5">
                                   {d.discrepancies.length === 0 ? (
                                     <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/50 dark:bg-emerald-950/20 text-center text-xs text-emerald-700 dark:text-emerald-300">

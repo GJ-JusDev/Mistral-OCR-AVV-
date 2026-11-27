@@ -5,13 +5,19 @@ import { useRouter } from "next/navigation";
 import PageContainer from "@/components/layout/PageContainer";
 import Header from "@/components/layout/Header";
 import DocumentTable, { resolveDisplayStudentName } from "@/components/documents/DocumentTable";
-import { isBlacklistedStudentName } from "@/lib/validation/nameComparison";
+import {
+  isBlacklistedStudentName,
+  formatBatchNumber,
+  getDocumentCompositeKey,
+  aggregateDocumentsIntoBatchFolders,
+} from "@/lib/validation/nameComparison";
 import { LoadingState } from "@/components/ui/LoadingState";
 import { DataTableContainer } from "@/components/ui/DataTableContainer";
 import { Button } from "@/components/ui/Button";
-import { Upload, RefreshCw } from "lucide-react";
+import { Upload, RefreshCw, Trash2, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { type Document } from "@/types/database";
+import { Modal } from "@/components/ui/Modal";
 
 export default function DocumentsPage() {
   const router = useRouter();
@@ -20,6 +26,72 @@ export default function DocumentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+
+  async function handleClearAllOldFiles() {
+    setIsClearing(true);
+    try {
+      const res = await fetch("/api/documents", {
+        method: "DELETE",
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const errorMsg = data?.error || (data?.details?.message) || "Failed to clear documents from registry.";
+        const detailsMsg = data?.details
+          ? typeof data.details === "string"
+            ? data.details
+            : JSON.stringify(data.details)
+          : "";
+        throw new Error(detailsMsg ? `${errorMsg} — Details: ${detailsMsg}` : errorMsg);
+      }
+
+      // Reset local session storage and local storage batch state so next upload starts at BATCH-001
+      if (typeof window !== "undefined") {
+        sessionStorage.removeItem("avv_active_batch_id");
+        sessionStorage.removeItem("avv_is_new_batch");
+        sessionStorage.removeItem("avv_batch_counter");
+        localStorage.removeItem("avv_active_batch_id");
+        localStorage.removeItem("avv_is_new_batch");
+        localStorage.removeItem("avv_batch_counter");
+
+        // Clear all staged OCR and avv_* keys from sessionStorage
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (
+            key &&
+            (key.startsWith("avv_staged_ocr_") ||
+              key.startsWith("avv_ocr_") ||
+              key.startsWith("avv_"))
+          ) {
+            sessionStorage.removeItem(key);
+          }
+        }
+
+        // Clear all staged OCR and avv_* keys from localStorage
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (
+            key &&
+            (key.startsWith("avv_staged_ocr_") ||
+              key.startsWith("avv_ocr_") ||
+              key.startsWith("avv_"))
+          ) {
+            localStorage.removeItem(key);
+          }
+        }
+      }
+
+      // Reset local state to empty array
+      setDocuments([]);
+      setIsClearModalOpen(false);
+      await fetchDocuments();
+    } catch (err: any) {
+      alert(`Clear failed: ${err.message || String(err)}`);
+    } finally {
+      setIsClearing(false);
+    }
+  }
 
   async function fetchDocuments() {
     setLoading(true);
@@ -44,8 +116,33 @@ export default function DocumentsPage() {
     return () => clearTimeout(timer);
   }, []);
 
+  // Zero redundancy: deduplicate records in place keeping only the most recent
+  // record per unique composite key (LRN + Normalized Student Name + Document Type)
+  // and eliminate blank/unextracted "-" ghost rows.
+  const deduplicatedDocuments = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const doc of documents) {
+      if (doc.status === "archived") continue;
+      const studentName = resolveDisplayStudentName(doc);
+      if (!studentName || studentName === "-") continue;
+
+      const compKey = getDocumentCompositeKey(doc);
+      const existing = map.get(compKey);
+      if (!existing) {
+        map.set(compKey, doc);
+      } else {
+        const existingTime = new Date(existing.updated_at || existing.created_at || 0).getTime();
+        const docTime = new Date(doc.updated_at || doc.created_at || 0).getTime();
+        if (docTime >= existingTime) {
+          map.set(compKey, doc);
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [documents]);
+
   const filteredDocuments = useMemo(() => {
-    return documents.filter((doc) => {
+    return deduplicatedDocuments.filter((doc) => {
       if (doc.status === "archived") return false;
       const q = searchQuery.toLowerCase().trim();
       const docType = String(doc.document_type || "").toLowerCase().trim();
@@ -59,10 +156,6 @@ export default function DocumentsPage() {
         matchesType = docType === "sf1";
       } else if (typeFilter === "sf2") {
         matchesType = docType === "sf2";
-      } else if (typeFilter === "sf5a") {
-        matchesType = docType === "sf5a" || (docType === "sf5" && (formVariant.includes("SF5A") || !formVariant.includes("SF5B")));
-      } else if (typeFilter === "sf5b") {
-        matchesType = docType === "sf5b" || (docType === "sf5" && formVariant.includes("SF5B"));
       } else if (typeFilter === "sf9") {
         matchesType = docType === "sf9";
       } else if (typeFilter === "sf10") {
@@ -74,6 +167,53 @@ export default function DocumentsPage() {
       if (!matchesType) return false;
       if (!q) return true;
 
+      // 1. Search by Batch Number (e.g. BATCH-20261126-001 or BATCH-001)
+      const rawBatch = ef.batch_number || ef.batch_id || doc.batch_id || doc.batch_number;
+      const batchNumber = formatBatchNumber(rawBatch, doc.created_at || doc.submission_date || doc.updated_at);
+      if (batchNumber.toLowerCase().includes(q)) {
+        return true;
+      }
+
+      // 2. Search by 12-digit DepEd LRN
+      const lrn = String(
+        doc.canonical_lrn ||
+        ef.lrn ||
+        ef.learner_reference_number ||
+        ef.inherited_lrn ||
+        doc.students?.lrn ||
+        ""
+      ).replace(/[^0-9]/g, "");
+      const numQ = q.replace(/[^0-9]/g, "");
+      if (lrn && numQ && (lrn.includes(numQ) || numQ.includes(lrn))) {
+        return true;
+      }
+
+      // 3. Search by Extracted Student Name
+      const displayName = resolveDisplayStudentName(doc).toLowerCase();
+      if (displayName.includes(q)) {
+        return true;
+      }
+
+      // 4. Search by Validation Status & Findings (MATCH, MISMATCH, BLANK)
+      const findings = (ef.validation_findings || doc.validation_findings) as any;
+      if (findings) {
+        if (findings.status && String(findings.status).toLowerCase().includes(q)) {
+          return true;
+        }
+        if (findings.summary && String(findings.summary).toLowerCase().includes(q)) {
+          return true;
+        }
+        if (Array.isArray(findings.mismatched_fields) && findings.mismatched_fields.some((m: string) => m.toLowerCase().includes(q))) {
+          return true;
+        }
+        if (Array.isArray(findings.blank_fields) && findings.blank_fields.some((b: string) => b.toLowerCase().includes(q))) {
+          return true;
+        }
+        if (Array.isArray(findings.matched_fields) && findings.matched_fields.some((m: string) => m.toLowerCase().includes(q))) {
+          return true;
+        }
+      }
+
       // Check document top-level attributes
       if (
         (doc.id && String(doc.id).toLowerCase().includes(q)) ||
@@ -84,12 +224,6 @@ export default function DocumentsPage() {
         (doc.document_type && String(doc.document_type).toLowerCase().includes(q)) ||
         (formVariant && formVariant.toLowerCase().includes(q))
       ) {
-        return true;
-      }
-
-      // Check reconstructed sanitized display name first (never matches blacklisted headers)
-      const displayName = resolveDisplayStudentName(doc).toLowerCase();
-      if (displayName.includes(q)) {
         return true;
       }
 
@@ -156,7 +290,15 @@ export default function DocumentsPage() {
 
       return false;
     });
-  }, [documents, searchQuery, typeFilter]);
+  }, [deduplicatedDocuments, searchQuery, typeFilter]);
+
+  const batchFoldersCount = useMemo(() => {
+    return aggregateDocumentsIntoBatchFolders(filteredDocuments).length;
+  }, [filteredDocuments]);
+
+  const totalBatchFoldersCount = useMemo(() => {
+    return aggregateDocumentsIntoBatchFolders(documents).length;
+  }, [documents]);
 
   const handleRowClick = (doc: any) => {
     router.push(`/documents/${doc.id}`);
@@ -171,6 +313,15 @@ export default function DocumentsPage() {
         schoolInfo={{ schoolName: "Taysan Resettlement Integrated School", depedSchoolId: "500169" }}
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsClearModalOpen(true)}
+              leftIcon={<Trash2 className="h-3.5 w-3.5 text-red-500" />}
+              className="text-red-600 border-red-200 hover:bg-red-50"
+            >
+              Clear All Old Files
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -204,9 +355,10 @@ export default function DocumentsPage() {
           description="Click any row to open the complete extraction card and validation report."
           searchValue={searchQuery}
           onSearchChange={setSearchQuery}
-          searchPlaceholder="Search by student name, LRN, section, grade, document ID, or type..."
-          itemCount={filteredDocuments.length}
-          totalCount={documents.length}
+          searchPlaceholder="Search by Batch Number, 12-digit LRN, Student Name, or Document Type..."
+          itemCount={batchFoldersCount}
+          totalCount={totalBatchFoldersCount}
+          itemLabel="batch folders"
           filters={
             <select
               value={typeFilter}
@@ -217,8 +369,6 @@ export default function DocumentsPage() {
               <option value="all">All Document Types</option>
               <option value="sf1">SF1-SHS School Register</option>
               <option value="sf2">SF2-SHS Daily Attendance</option>
-              <option value="sf5a">SF5A-SHS End of Semester Status</option>
-              <option value="sf5b">SF5B-SHS Graduation Candidates</option>
               <option value="sf9">SF9-SHS Progress Report</option>
               <option value="sf10">SF10-SHS Permanent Record</option>
               <option value="birth_cert">PSA Birth Certificate</option>
@@ -233,6 +383,50 @@ export default function DocumentsPage() {
             <DocumentTable documents={filteredDocuments} onRowClick={handleRowClick} />
           )}
         </DataTableContainer>
+
+        {/* Clear All Old Files Confirmation Modal */}
+        <Modal
+          isOpen={isClearModalOpen}
+          onClose={() => !isClearing && setIsClearModalOpen(false)}
+          title="Clear All Old Files & Reset Registry"
+          size="md"
+          footer={
+            <div className="flex justify-end gap-2 w-full">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isClearing}
+                onClick={() => setIsClearModalOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={isClearing}
+                onClick={handleClearAllOldFiles}
+                className="bg-red-600 hover:bg-red-700 text-white font-bold"
+              >
+                {isClearing ? "Clearing Files..." : "Yes, Clear All Old Files"}
+              </Button>
+            </div>
+          }
+        >
+          <div className="space-y-3 text-xs sm:text-sm text-slate-600">
+            <div className="flex items-center gap-2 p-3 bg-red-50 rounded-lg border border-red-200 text-red-700">
+              <AlertTriangle className="w-5 h-5 shrink-0 text-red-600" />
+              <p className="font-semibold">
+                Are you sure you want to clear all stored document records and batches?
+              </p>
+            </div>
+            <p>
+              This action will permanently purge all previously uploaded documents, section rosters, and cross-validation reports from the registry.
+            </p>
+            <p className="text-slate-500 text-xs">
+              • Next upload batch will automatically restart sequentially from <strong>BATCH-001</strong>.<br />
+              • All temporary browser session caches and draft files will be cleared.
+            </p>
+          </div>
+        </Modal>
       </div>
     </PageContainer>
   );

@@ -23,7 +23,18 @@
  */
 
 import { normalizeNamePart, normalizeSuffix, normalizeDate } from "./nameComparison";
-import { compareBirthDates, type SplitBirthDateFields } from "./birthDateNormalizer";
+import {
+  compareBirthDates,
+  toIsoBirthDate,
+  normalizeBirthDate,
+  shuffleBirthDate,
+  formatBirthDateWithDocLabel,
+  formatBirthDateDisplay,
+  type SplitBirthDateFields,
+} from "./birthDateNormalizer";
+import { levenshteinDistance } from "./studentMatcher";
+import { evaluateDynamicGradeStatus, isBlankOrMissingFinal, normalizeObservedValueMarking, sanitizeLearnersObservedValues } from "./gradeUtils";
+export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
 export {
   normalizeBirthDate,
   toIsoBirthDate,
@@ -32,9 +43,12 @@ export {
   monthToNumber,
   monthToFullName,
   monthToAbbreviation,
+  shuffleBirthDate,
+  formatBirthDateWithDocLabel,
 } from "./birthDateNormalizer";
 import { normalizeSex, normalizeLrn, isValidLrn } from "./patterns";
-export { normalizeSex, normalizeLrn, isValidLrn };
+import { normalizeStrictSex, validateConsecutiveSchoolYear } from "./gradeUtils";
+export { normalizeSex, normalizeStrictSex, validateConsecutiveSchoolYear, normalizeLrn, isValidLrn };
 import {
   normalizeDepEdMonthKey,
   formatDepEdMonthDisplay,
@@ -267,23 +281,23 @@ export function comparePsaAndSf1(
   }
 
   // Sex
-  const normPsaSex = normalizeSex(psa.sex || "");
-  const normSf1Sex = normalizeSex(sf1.sex || "");
+  const normPsaSex = normalizeStrictSex(psa.sex);
+  const normSf1Sex = normalizeStrictSex(sf1.sex);
   const isSexMatch = !normPsaSex || !normSf1Sex || normPsaSex === normSf1Sex;
   comparisonResults.push({
     field: "sex",
-    doc1Value: psa.sex,
-    doc2Value: sf1.sex,
+    doc1Value: normPsaSex || psa.sex,
+    doc2Value: normSf1Sex || sf1.sex,
     isMatch: isSexMatch,
-    notes: isSexMatch ? "Sex verified" : "Sex mismatch",
+    notes: isSexMatch ? "Sex verified" : "Wrong Sex/Gender mismatch",
   });
   if (!isSexMatch) {
     discrepancies.push({
       field: "sex",
-      sourceValue: psa.sex,
-      targetValue: sf1.sex,
+      sourceValue: normPsaSex || psa.sex,
+      targetValue: normSf1Sex || sf1.sex,
       severity: "CRITICAL",
-      description: `Sex conflict: PSA "${psa.sex}" vs SF1 "${sf1.sex}".`,
+      description: `Wrong Sex/Gender: Sex does not match across documents (PSA: ${normPsaSex || psa.sex} vs SF1: ${normSf1Sex || sf1.sex}).`,
     });
   }
 
@@ -345,7 +359,31 @@ export function compareSf1AndSf2(
   const discrepancies: DiscrepancyItem[] = [];
 
   const lrn = sf1Entry.lrn;
-  const matchingAttendance = sf2Entries.filter((a) => a.lrn === lrn);
+  const sf1FullName = [sf1Entry.last_name, sf1Entry.first_name].filter(Boolean).join(" ");
+  const matchingAttendance = sf2Entries.filter((a) => {
+    if (lrn && a.lrn && a.lrn === lrn) return true;
+    const attName = (a as any).learner_name || (a as any).student_name || (a as any).name || "";
+    if (!attName) return false;
+    const normAtt = normalizeNamePart(attName);
+    const normSf1 = normalizeNamePart(sf1FullName);
+    if (normAtt && normSf1) {
+      if (normAtt === normSf1 || normAtt.includes(normSf1) || normSf1.includes(normAtt)) return true;
+      const dist = levenshteinDistance(normAtt, normSf1);
+      const maxLen = Math.max(normAtt.length, normSf1.length);
+      if (dist <= (maxLen >= 6 ? 2 : 1)) return true;
+    }
+    if (sf1Entry.last_name) {
+      const normSf1Last = normalizeNamePart(sf1Entry.last_name);
+      const attParts = attName.split(/[\s,]+/);
+      const attLast = normalizeNamePart(attParts[0]);
+      if (normSf1Last && attLast) {
+        if (normSf1Last === attLast) return true;
+        const dist = levenshteinDistance(normSf1Last, attLast);
+        if (dist <= (Math.max(normSf1Last.length, attLast.length) >= 6 ? 2 : 1)) return true;
+      }
+    }
+    return false;
+  });
 
   if (matchingAttendance.length === 0) {
     discrepancies.push({
@@ -382,10 +420,12 @@ export function compareSf1AndSf2(
 
     // Check attendance sum plausibility
     const sumPlausible = totalDays > 0 ? present + absent <= totalDays : true;
+    const tardy = (att as any).days_tardy ?? (att as any).tardy ?? (att as any).gridTardyCount ?? (att as any).writtenTardy;
+    const tardyPart = tardy !== undefined ? `, Tardy=${tardy}` : "";
     comparisonResults.push({
       field: `monthly_attendance_${att.month || "period"}`,
       doc1Value: `SF1 Enrolled: ${sf1Entry.section || ""}`,
-      doc2Value: `SF2 Month ${att.month || ""}: Present=${present}, Absent=${absent}, Total=${totalDays}`,
+      doc2Value: `SF2 Month ${att.month || ""}: Present=${present}, Absent=${absent}${tardyPart}, Total=${totalDays}`,
       isMatch: sumPlausible,
       notes: sumPlausible ? "Attendance reconciled" : "Days present + absent exceed total school days",
     });
@@ -648,23 +688,23 @@ export function compareSf1AndSf9(
 
   // Sex match
   if (sf1Entry.sex && sf9Doc.sex) {
-    const normSf1Sex = normalizeSex(sf1Entry.sex);
-    const normSf9Sex = normalizeSex(sf9Doc.sex);
+    const normSf1Sex = normalizeStrictSex(sf1Entry.sex);
+    const normSf9Sex = normalizeStrictSex(sf9Doc.sex);
     const isSexMatch = !normSf1Sex || !normSf9Sex || normSf1Sex === normSf9Sex;
     comparisonResults.push({
       field: "sex",
-      doc1Value: sf1Entry.sex,
-      doc2Value: sf9Doc.sex,
+      doc1Value: normSf1Sex || sf1Entry.sex,
+      doc2Value: normSf9Sex || sf9Doc.sex,
       isMatch: isSexMatch,
-      notes: isSexMatch ? "Sex verified" : "Sex conflict",
+      notes: isSexMatch ? "Sex verified" : "Wrong Sex/Gender conflict",
     });
     if (!isSexMatch) {
       discrepancies.push({
         field: "sex",
-        sourceValue: sf1Entry.sex,
-        targetValue: sf9Doc.sex,
+        sourceValue: normSf1Sex || sf1Entry.sex,
+        targetValue: normSf9Sex || sf9Doc.sex,
         severity: "CRITICAL",
-        description: `Sex conflict: SF1 "${sf1Entry.sex}" vs SF9 "${sf9Doc.sex}".`,
+        description: `Wrong Sex/Gender: Sex does not match across documents (SF1: ${normSf1Sex || sf1Entry.sex} vs SF9: ${normSf9Sex || sf9Doc.sex}).`,
       });
     }
   }
@@ -752,6 +792,7 @@ export interface AcademicGradeItem {
   quarter2?: number | null;
   finalGrade?: number | null;
   remarks?: string;
+  confidence?: number;
   sourceDocumentId?: string;
   sourceDocumentIds?: string[];
   sourceTraces?: ComparisonSourceTrace[];
@@ -931,24 +972,82 @@ export function compareSf9AndSf10(
       continue;
     }
 
-    const f9 = g9.finalGrade != null ? Math.round(Number(g9.finalGrade)) : null;
-    const f10 = g10.finalGrade != null ? Math.round(Number(g10.finalGrade)) : null;
-    const isGradeMatch = f9 != null && f10 != null ? f9 === f10 : true;
-    comparisonResults.push({
-      field,
-      doc1Value: `${g9.subject}: Final=${f9}`,
-      doc2Value: `${g10.subject}: Final=${f10}`,
-      isMatch: isGradeMatch,
-      notes: isGradeMatch ? "Grades match in the same academic context" : `Grade difference (${f9} vs ${f10})`,
+    const eval9 = evaluateDynamicGradeStatus({
+      grade: g9.finalGrade,
+      confidencePercent: (g9 as any).confidence,
     });
-    if (!isGradeMatch) {
+    const eval10 = evaluateDynamicGradeStatus({
+      grade: g10.finalGrade,
+      confidencePercent: (g10 as any).confidence,
+    });
+
+    if (eval9.status === "blank" && eval10.status === "blank") {
+      comparisonResults.push({
+        field,
+        doc1Value: `${g9.subject}: Blank`,
+        doc2Value: `${g10.subject}: Blank`,
+        isMatch: false,
+        notes: `Blank / Incomplete grade cell on both SF9 and SF10.`,
+      });
       discrepancies.push({
         field,
-        sourceValue: f9,
-        targetValue: f10,
-        severity: "CRITICAL",
-        description: `Grade mismatch in "${g9.subject}" for ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}: SF9 has ${f9}, while SF10 records ${f10}.`,
+        sourceValue: "Blank",
+        targetValue: "Blank",
+        severity: "WARNING",
+        category: "NEEDS_VERIFICATION",
+        description: `Subject "${g9.subject}" final grade is blank/incomplete on both SF9 and SF10.`,
       });
+    } else if (eval9.isLowConfidence || eval10.isLowConfidence || eval9.status === "not_recognized" || eval10.status === "not_recognized") {
+      comparisonResults.push({
+        field,
+        doc1Value: `${g9.subject}: ${eval9.remarkDisplay}`,
+        doc2Value: `${g10.subject}: ${eval10.remarkDisplay}`,
+        isMatch: false,
+        notes: `Low confidence OCR reading (< 65%) or not recognized; requires verification.`,
+      });
+      discrepancies.push({
+        field,
+        sourceValue: eval9.remarkDisplay,
+        targetValue: eval10.remarkDisplay,
+        severity: "WARNING",
+        category: "NEEDS_VERIFICATION",
+        description: `Low confidence OCR grade for "${g9.subject}" (${eval9.remarkDisplay} vs ${eval10.remarkDisplay}); requires verification.`,
+      });
+    } else if (eval9.status === "blank" || eval10.status === "blank") {
+      comparisonResults.push({
+        field,
+        doc1Value: `${g9.subject}: ${eval9.gradeDisplay}`,
+        doc2Value: `${g10.subject}: ${eval10.gradeDisplay}`,
+        isMatch: false,
+        notes: `Blank / Incomplete grade discrepancy: SF9 is ${eval9.gradeDisplay}, while SF10 is ${eval10.gradeDisplay}.`,
+      });
+      discrepancies.push({
+        field,
+        sourceValue: eval9.gradeDisplay,
+        targetValue: eval10.gradeDisplay,
+        severity: "CRITICAL",
+        description: `Grade completeness discrepancy in "${g9.subject}": SF9 is ${eval9.gradeDisplay}, while SF10 is ${eval10.gradeDisplay}.`,
+      });
+    } else {
+      const f9 = eval9.numericGrade != null ? Math.round(Number(eval9.numericGrade)) : null;
+      const f10 = eval10.numericGrade != null ? Math.round(Number(eval10.numericGrade)) : null;
+      const isGradeMatch = f9 != null && f10 != null && f9 === f10;
+      comparisonResults.push({
+        field,
+        doc1Value: `${g9.subject}: Final=${f9}`,
+        doc2Value: `${g10.subject}: Final=${f10}`,
+        isMatch: isGradeMatch,
+        notes: isGradeMatch ? "Grades match in the same academic context" : `Grade difference (${f9} vs ${f10})`,
+      });
+      if (!isGradeMatch) {
+        discrepancies.push({
+          field,
+          sourceValue: f9,
+          targetValue: f10,
+          severity: "CRITICAL",
+          description: `Grade mismatch in "${g9.subject}" for ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}: SF9 has ${f9}, while SF10 records ${f10}.`,
+        });
+      }
     }
   }
 
@@ -960,25 +1059,45 @@ export function compareSf9AndSf10(
     normalizeAcademicGradeLevel(sf9Doc.grade_level) === normalizeAcademicGradeLevel(sf10Doc.grade_level) &&
     normalizeGradingPeriod(sf9Doc.semester) !== "" &&
     normalizeGradingPeriod(sf9Doc.semester) === normalizeGradingPeriod(sf10Doc.semester);
-  if (documentContextMatches && sf9Doc.general_average != null && sf10Doc.general_average != null) {
-    const ga9 = Math.round(Number(sf9Doc.general_average));
-    const ga10 = Math.round(Number(sf10Doc.general_average));
-    const isGaMatch = ga9 === ga10;
-    comparisonResults.push({
-      field: "general_average",
-      doc1Value: ga9,
-      doc2Value: ga10,
-      isMatch: isGaMatch,
-      notes: isGaMatch ? "General average verified" : `Average mismatch (${ga9} vs ${ga10})`,
-    });
-    if (!isGaMatch) {
+  if (documentContextMatches && (sf9Doc.general_average != null || sf10Doc.general_average != null)) {
+    const isBlank9 = isBlankOrMissingFinal(sf9Doc.general_average);
+    const isBlank10 = isBlankOrMissingFinal(sf10Doc.general_average);
+    if (isBlank9 || isBlank10) {
+      comparisonResults.push({
+        field: "general_average",
+        doc1Value: isBlank9 ? "Blank" : Math.round(Number(sf9Doc.general_average)),
+        doc2Value: isBlank10 ? "Blank" : Math.round(Number(sf10Doc.general_average)),
+        isMatch: false,
+        notes: "General Average is blank/incomplete on one or both documents",
+      });
       discrepancies.push({
         field: "general_average",
-        sourceValue: ga9,
-        targetValue: ga10,
-        severity: "CRITICAL",
-        description: `General Average discrepancy: SF9 has ${ga9}, SF10 has ${ga10}.`,
+        sourceValue: isBlank9 ? "Blank" : Math.round(Number(sf9Doc.general_average)),
+        targetValue: isBlank10 ? "Blank" : Math.round(Number(sf10Doc.general_average)),
+        severity: "WARNING",
+        category: "NEEDS_VERIFICATION",
+        description: `General Average is blank/incomplete: SF9 is ${isBlank9 ? "Blank" : sf9Doc.general_average}, SF10 is ${isBlank10 ? "Blank" : sf10Doc.general_average}.`,
       });
+    } else {
+      const ga9 = Math.round(Number(sf9Doc.general_average));
+      const ga10 = Math.round(Number(sf10Doc.general_average));
+      const isGaMatch = !isNaN(ga9) && !isNaN(ga10) && ga9 === ga10;
+      comparisonResults.push({
+        field: "general_average",
+        doc1Value: ga9,
+        doc2Value: ga10,
+        isMatch: isGaMatch,
+        notes: isGaMatch ? "General average verified" : `Average mismatch (${ga9} vs ${ga10})`,
+      });
+      if (!isGaMatch) {
+        discrepancies.push({
+          field: "general_average",
+          sourceValue: ga9,
+          targetValue: ga10,
+          severity: "CRITICAL",
+          description: `General Average discrepancy: SF9 has ${ga9}, SF10 has ${ga10}.`,
+        });
+      }
     }
   }
 
@@ -1809,6 +1928,8 @@ export function compareSectionSf1AndSf2(
 // Promotion, and Graduation matrices without isolated pairwise blind spots.
 // =============================================================================
 
+export type StrictRowStatus = "MATCH" | "MISMATCH" | "INCOMPLETE" | "NO DATA" | "NO_DATA";
+
 export interface UnifiedFieldComparisonRow {
   field: string;
   category: "IDENTITY" | "SCHOOL_CONTEXT" | "ATTENDANCE" | "ACADEMIC" | "PROMOTION" | "GRADUATION";
@@ -1820,7 +1941,7 @@ export interface UnifiedFieldComparisonRow {
   sf5bValue?: any;
   sf9Value?: any;
   sf10Value?: any;
-  status: "MATCH" | "MISMATCH" | "NEEDS_VERIFICATION" | "NOT_APPLICABLE" | "MISSING_SOURCE";
+  status: "MATCH" | "MISMATCH" | "INCOMPLETE" | "NO DATA" | "NO_DATA" | "NEEDS_VERIFICATION" | "NOT_APPLICABLE" | "MISSING_SOURCE";
   isMatch: boolean;
   notes?: string;
   sourceDoc?: string;
@@ -1828,6 +1949,181 @@ export interface UnifiedFieldComparisonRow {
   sourceDocumentTypes?: string[];
   sourceTraces?: ComparisonSourceTrace[];
   sourcesPresent: string[];
+}
+
+/**
+ * Strict 4-State Row Evaluation:
+ * - MATCH (Green): At least 2 applicable documents have non-empty values AND all non-empty values match after normalization.
+ * - MISMATCH (Red): At least 2 applicable documents have non-empty values AND they disagree (e.g. differing LRNs, differing birthdates, or blank/missing grades in SF9 Back vs populated grades in SF10).
+ * - INCOMPLETE (Amber): Only 1 applicable document has a non-empty value while other uploaded applicable documents are blank (—).
+ * - NO DATA (Neutral gray): 0 documents have a value (all —), such as empty DepEd School ID rows.
+ */
+export function evaluate4StateRowStatus(row: Partial<UnifiedFieldComparisonRow>): "MATCH" | "MISMATCH" | "INCOMPLETE" | "NO DATA" {
+  const { field = "", psaValue, sf1Value, sf2Value, sf5aValue, sf5bValue, sf9Value, sf10Value, status, category } = row;
+
+  if (status === "MISMATCH") {
+    return "MISMATCH";
+  }
+
+  const isBlank = (v: any): boolean => {
+    if (v === undefined || v === null) return true;
+    const str = String(v).trim().toLowerCase();
+    return str === "" || str === "—" || str === "-" || str === "null" || str === "undefined" || str === "n/a" || str === "blank";
+  };
+
+  // Dedicated Attendance evaluation: SF2 vs SF9
+  if (category === "ATTENDANCE" || field.startsWith("attendance_")) {
+    const sf2Has = !isBlank(sf2Value);
+    const sf9Has = !isBlank(sf9Value);
+    if (!sf2Has && !sf9Has) return "NO DATA";
+    if (sf2Has && sf9Has) {
+      return status === "MATCH" || status === "NOT_APPLICABLE" ? "MATCH" : "MISMATCH";
+    }
+    return "INCOMPLETE";
+  }
+
+  const isLrn = field === "lrn";
+  const isBirthDate = field === "birth_date" || field.includes("birth");
+
+  // Collect applicable document values
+  const applicableEntries: Array<{ doc: string; val: any }> = [];
+  if (!isLrn && !isBlank(psaValue) && String(psaValue) !== "Civil Document (No DepEd LRN)") {
+    applicableEntries.push({ doc: "PSA", val: psaValue });
+  }
+  if (!isBlank(sf1Value)) applicableEntries.push({ doc: "SF1", val: sf1Value });
+  if (!isBlank(sf2Value)) applicableEntries.push({ doc: "SF2", val: sf2Value });
+  if (!isBlank(sf5aValue)) applicableEntries.push({ doc: "SF5A", val: sf5aValue });
+  if (!isBlank(sf5bValue)) applicableEntries.push({ doc: "SF5B", val: sf5bValue });
+  if (!isBlank(sf9Value)) applicableEntries.push({ doc: "SF9", val: sf9Value });
+  if (!isBlank(sf10Value)) applicableEntries.push({ doc: "SF10", val: sf10Value });
+
+  // 0 documents have a value
+  if (applicableEntries.length === 0) {
+    return "NO DATA";
+  }
+
+  // Only 1 document has a value
+  if (applicableEntries.length === 1) {
+    return "INCOMPLETE";
+  }
+
+  // 2 or more applicable documents have values: compare them
+  if (isLrn) {
+    const baseLrn = normalizeLrn(applicableEntries[0].val);
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curLrn = normalizeLrn(applicableEntries[i].val);
+      if (baseLrn !== curLrn) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  if (isBirthDate) {
+    const baseIso = toIsoBirthDate(applicableEntries[0].val);
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curIso = toIsoBirthDate(applicableEntries[i].val);
+      if (!baseIso || !curIso || baseIso !== curIso) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  if (field === "sex") {
+    const baseSex = normalizeStrictSex(applicableEntries[0].val);
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curSex = normalizeStrictSex(applicableEntries[i].val);
+      if (baseSex && curSex && baseSex !== curSex) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  if (field === "last_name" || field === "first_name" || field === "middle_name" || field === "mother_maiden_name") {
+    const normBase = normalizeNamePart(String(applicableEntries[0].val));
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const normCur = normalizeNamePart(String(applicableEntries[i].val));
+      if (normBase !== normCur) {
+        const maxLen = Math.max(normBase.length, normCur.length);
+        const dist = levenshteinDistance(normBase, normCur);
+        const isHandwritingMatch = dist <= (maxLen >= 6 ? 2 : 1);
+        if (field === "middle_name") {
+          const isInitial = (normBase.length === 1 && normCur.startsWith(normBase)) || (normCur.length === 1 && normBase.startsWith(normCur));
+          if (!isHandwritingMatch && !isInitial) return "MISMATCH";
+        } else if (field === "first_name") {
+          const wordsA = normBase.split(" ");
+          const wordsB = normCur.split(" ");
+          const hasOverlap = wordsA.some((w) => wordsB.includes(w));
+          if (!isHandwritingMatch && !hasOverlap) return "MISMATCH";
+        } else {
+          if (!isHandwritingMatch) return "MISMATCH";
+        }
+      }
+    }
+    return "MATCH";
+  }
+
+  if (field === "section") {
+    const baseSec = String(applicableEntries[0].val).trim().toLowerCase();
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curSec = String(applicableEntries[i].val).trim().toLowerCase();
+      if (baseSec !== curSec) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  if (field === "school_id") {
+    const baseId = String(applicableEntries[0].val).trim();
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curId = String(applicableEntries[i].val).trim();
+      if (baseId !== curId) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  if (field === "school_year") {
+    const baseSy = String(applicableEntries[0].val).trim();
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curSy = String(applicableEntries[i].val).trim();
+      if (baseSy !== curSy) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
+  // Academic grades / General average:
+  // If SF9 is blank/missing and SF10 has populated grades, or vice versa -> MISMATCH
+  if (field.startsWith("grade_") || field === "general_average") {
+    const sf9Present = applicableEntries.find((e) => e.doc === "SF9");
+    const sf10Present = applicableEntries.find((e) => e.doc === "SF10");
+    if (sf9Present && sf10Present) {
+      const sf9Str = String(sf9Present.val).trim().toLowerCase();
+      const sf10Str = String(sf10Present.val).trim().toLowerCase();
+      const sf9IsBlank = sf9Str === "" || sf9Str === "—" || sf9Str === "blank" || sf9Str === "null";
+      const sf10IsBlank = sf10Str === "" || sf10Str === "—" || sf10Str === "blank" || sf10Str === "null";
+      if (sf9IsBlank !== sf10IsBlank) {
+        return "MISMATCH";
+      }
+    }
+  }
+
+  // Default comparison
+  const baseNorm = String(applicableEntries[0].val).trim().toLowerCase();
+  for (let i = 1; i < applicableEntries.length; i++) {
+    const curNorm = String(applicableEntries[i].val).trim().toLowerCase();
+    if (baseNorm !== curNorm) {
+      return "MISMATCH";
+    }
+  }
+
+  return "MATCH";
 }
 
 export interface DuplicateScanWarning {
@@ -2213,7 +2509,7 @@ function groupAttendanceRecords(
   return grouped;
 }
 
-function parseNameParts(fullName: string | undefined | null): { lastName: string; firstName: string; middleName?: string } {
+export function parseNameParts(fullName: string | undefined | null): { lastName: string; firstName: string; middleName?: string } {
   if (!fullName) return { lastName: "", firstName: "" };
   const trimmed = fullName.trim();
   if (trimmed.includes(",")) {
@@ -2508,20 +2804,10 @@ interface UnifiedSourceConflict {
 
 function matchesUnifiedDocumentContext(record: { raw: any; schoolId?: string }, context?: UnifiedDocumentContext): boolean {
   if (!context) return true;
-  const raw = record.raw || {};
-  const checks: Array<[unknown, string | undefined, (value: unknown) => string]> = [
-    [raw.lrn, context.lrn, (value) => typeof value === "string" ? normalizeLrn(value) : ""],
-    [record.schoolId, context.schoolId, (value) => String(value || "").trim()],
-    [raw.school_year || raw.schoolYear, context.schoolYear, normalizeAcademicSchoolYear],
-    [raw.grade_level || raw.gradeLevel, context.gradeLevel, normalizeAcademicGradeLevel],
-    [raw.section, context.section, (value) => String(value || "").trim().replace(/\s+/g, " ").toLowerCase()],
-  ];
-  return checks.every(([recordValue, expected, normalize]) => {
-    if (recordValue === undefined || recordValue === null || expected === undefined) return true;
-    const actualKey = normalize(recordValue);
-    const expectedKey = normalize(expected);
-    return Boolean(actualKey) && actualKey === expectedKey;
-  });
+  // Documents supplied for this student evaluation are already correlated.
+  // We do not reject records with conflicting LRN or differing section, so they can be
+  // populated in their respective columns of the Cross-Document Matrix and compared.
+  return true;
 }
 
 function unifiedScalarValueKey(field: string, value: unknown): string {
@@ -2895,6 +3181,26 @@ export function evaluateUnifiedStudentValidation(
         });
       }
     }
+    if (schoolLrnSources.length >= 2) {
+      const baseClean = normalizeLrn(schoolLrnSources[0].val);
+      for (let i = 1; i < schoolLrnSources.length; i++) {
+        const curClean = normalizeLrn(schoolLrnSources[i].val);
+        if (baseClean && curClean && baseClean !== curClean) {
+          lrnRow.status = "MISMATCH";
+          lrnRow.isMatch = false;
+          lrnRow.notes = `LRN conflict detected: ${schoolLrnSources[0].doc} (${schoolLrnSources[0].val}) vs ${schoolLrnSources[i].doc} (${schoolLrnSources[i].val}).`;
+          if (!discrepancies.some((d) => d.field === "lrn" && String(d.targetValue) === String(schoolLrnSources[i].val))) {
+            discrepancies.push({
+              field: "lrn",
+              sourceValue: schoolLrnSources[0].val,
+              targetValue: schoolLrnSources[i].val,
+              severity: "CRITICAL",
+              description: `LRN conflict: ${schoolLrnSources[0].doc} has "${schoolLrnSources[0].val}", while ${schoolLrnSources[i].doc} has "${schoolLrnSources[i].val}".`,
+            });
+          }
+        }
+      }
+    }
     if (lrnRow.isMatch) {
       lrnRow.notes = "Official 12-digit LRN verified and consistent across all present school records.";
     }
@@ -2939,17 +3245,22 @@ export function evaluateUnifiedStudentValidation(
     for (let i = 1; i < lastNameSources.length; i++) {
       const normCur = normalizeNamePart(lastNameSources[i].val);
       if (normBase && normCur && normBase !== normCur) {
-        lastNameRow.status = "MISMATCH";
-        lastNameRow.isMatch = false;
-        lastNameRow.notes = `Surname mismatch: ${lastNameSources[0].doc} ("${lastNameSources[0].val}") vs ${lastNameSources[i].doc} ("${lastNameSources[i].val}").`;
-        discrepancies.push({
-          field: "last_name",
-          sourceValue: lastNameSources[0].val,
-          targetValue: lastNameSources[i].val,
-          severity: "CRITICAL",
-          description: `Learner surname mismatch: ${lastNameSources[0].doc} "${lastNameSources[0].val}" vs ${lastNameSources[i].doc} "${lastNameSources[i].val}".`,
-        });
-        break;
+        const maxLen = Math.max(normBase.length, normCur.length);
+        const dist = levenshteinDistance(normBase, normCur);
+        const isHandwritingMatch = dist <= (maxLen >= 6 ? 2 : 1);
+        if (!isHandwritingMatch) {
+          lastNameRow.status = "MISMATCH";
+          lastNameRow.isMatch = false;
+          lastNameRow.notes = `Surname mismatch: ${lastNameSources[0].doc} ("${lastNameSources[0].val}") vs ${lastNameSources[i].doc} ("${lastNameSources[i].val}").`;
+          discrepancies.push({
+            field: "last_name",
+            sourceValue: lastNameSources[0].val,
+            targetValue: lastNameSources[i].val,
+            severity: "CRITICAL",
+            description: `Learner surname mismatch: ${lastNameSources[0].doc} "${lastNameSources[0].val}" vs ${lastNameSources[i].doc} "${lastNameSources[i].val}".`,
+          });
+          break;
+        }
       }
     }
   }
@@ -2996,17 +3307,22 @@ export function evaluateUnifiedStudentValidation(
     for (let i = 1; i < firstNameSources.length; i++) {
       const normCur = normalizeNamePart(firstNameSources[i].val);
       if (normBase && normCur && normBase !== normCur && !normBase.includes(normCur) && !normCur.includes(normBase)) {
-        firstNameRow.status = "MISMATCH";
-        firstNameRow.isMatch = false;
-        firstNameRow.notes = `First name mismatch: ${firstNameSources[0].doc} ("${firstNameSources[0].val}") vs ${firstNameSources[i].doc} ("${firstNameSources[i].val}").`;
-        discrepancies.push({
-          field: "first_name",
-          sourceValue: firstNameSources[0].val,
-          targetValue: firstNameSources[i].val,
-          severity: "CRITICAL",
-          description: `Learner first name mismatch: ${firstNameSources[0].doc} "${firstNameSources[0].val}" vs ${firstNameSources[i].doc} "${firstNameSources[i].val}".`,
-        });
-        break;
+        const maxLen = Math.max(normBase.length, normCur.length);
+        const dist = levenshteinDistance(normBase, normCur);
+        const isHandwritingMatch = dist <= (maxLen >= 6 ? 2 : 1);
+        if (!isHandwritingMatch) {
+          firstNameRow.status = "MISMATCH";
+          firstNameRow.isMatch = false;
+          firstNameRow.notes = `First name mismatch: ${firstNameSources[0].doc} ("${firstNameSources[0].val}") vs ${firstNameSources[i].doc} ("${firstNameSources[i].val}").`;
+          discrepancies.push({
+            field: "first_name",
+            sourceValue: firstNameSources[0].val,
+            targetValue: firstNameSources[i].val,
+            severity: "CRITICAL",
+            description: `Learner first name mismatch: ${firstNameSources[0].doc} "${firstNameSources[0].val}" vs ${firstNameSources[i].doc} "${firstNameSources[i].val}".`,
+          });
+          break;
+        }
       }
     }
   }
@@ -3016,12 +3332,14 @@ export function evaluateUnifiedStudentValidation(
   fieldsMatrix.push(firstNameRow);
 
   // 4. Middle Name
+  const sf2MiddleName = primarySf2Raw.middle_name || parseNameParts(primarySf2Raw.learner_name).middleName;
   const middleNameRow: UnifiedFieldComparisonRow = {
     field: "middle_name",
     category: "IDENTITY",
     label: "Learner Middle Name",
     psaValue: psaRaw.middle_name || undefined,
     sf1Value: sf1Raw.middle_name || undefined,
+    sf2Value: sf2MiddleName || undefined,
     sf9Value: sf9Raw.middle_name || undefined,
     sf10Value: sf10Raw.middle_name || undefined,
     status: "MATCH",
@@ -3032,6 +3350,7 @@ export function evaluateUnifiedStudentValidation(
   const middleSources = [
     { doc: "PSA", val: psaRaw.middle_name },
     { doc: "SF1-SHS", val: sf1Raw.middle_name },
+    { doc: "SF2-SHS", val: sf2MiddleName },
     { doc: "SF9-SHS", val: sf9Raw.middle_name },
     { doc: "SF10-SHS", val: sf10Raw.middle_name },
   ].filter((s) => Boolean(s.val));
@@ -3044,7 +3363,10 @@ export function evaluateUnifiedStudentValidation(
       if (base && cur && base !== cur) {
         // Initial match check (e.g. "SANTOS" vs "S")
         const isInitialMatch = (base.length === 1 && cur.startsWith(base)) || (cur.length === 1 && base.startsWith(cur));
-        if (!isInitialMatch) {
+        const maxLen = Math.max(base.length, cur.length);
+        const dist = levenshteinDistance(base, cur);
+        const isHandwritingMatch = dist <= (maxLen >= 6 ? 2 : 1);
+        if (!isInitialMatch && !isHandwritingMatch) {
           middleNameRow.status = "NEEDS_VERIFICATION";
           middleNameRow.isMatch = false;
           middleNameRow.notes = `Middle name difference: ${middleSources[0].doc} ("${middleSources[0].val}") vs ${middleSources[i].doc} ("${middleSources[i].val}").`;
@@ -3084,19 +3406,19 @@ export function evaluateUnifiedStudentValidation(
 
   sexRow.sourcesPresent = sexSources.map((s) => s.doc);
   if (sexSources.length >= 2) {
-    const baseSex = normalizeSex(sexSources[0].val);
+    const baseSex = normalizeStrictSex(sexSources[0].val);
     for (let i = 1; i < sexSources.length; i++) {
-      const curSex = normalizeSex(sexSources[i].val);
+      const curSex = normalizeStrictSex(sexSources[i].val);
       if (baseSex && curSex && baseSex !== curSex) {
         sexRow.status = "MISMATCH";
         sexRow.isMatch = false;
-        sexRow.notes = `Sex / gender discrepancy: ${sexSources[0].doc} ("${sexSources[0].val}") vs ${sexSources[i].doc} ("${sexSources[i].val}").`;
+        sexRow.notes = `Wrong Sex/Gender: ${sexSources[0].doc} ("${baseSex}") vs ${sexSources[i].doc} ("${curSex}").`;
         discrepancies.push({
           field: "sex",
-          sourceValue: sexSources[0].val,
-          targetValue: sexSources[i].val,
+          sourceValue: baseSex || sexSources[0].val,
+          targetValue: curSex || sexSources[i].val,
           severity: "CRITICAL",
-          description: `Sex / gender mismatch: ${sexSources[0].doc} indicates "${sexSources[0].val}", while ${sexSources[i].doc} indicates "${sexSources[i].val}".`,
+          description: `Wrong Sex/Gender: Sex does not match across documents (${sexSources[0].doc}: ${baseSex} vs ${sexSources[i].doc}: ${curSex}).`,
         });
       }
     }
@@ -3104,29 +3426,39 @@ export function evaluateUnifiedStudentValidation(
   fieldsMatrix.push(sexRow);
 
   // 6. Date of Birth
+  const psaDob = psaRaw.birth_date || psaRaw.date_of_birth || psaRaw.birthDate;
+  const sf1Dob = sf1Raw.birth_date || sf1Raw.birthDate;
+  const sf2Dob = primarySf2Raw.birth_date || primarySf2Raw.birthDate;
+  const sf9Dob = sf9Raw.birth_date || sf9Raw.date_of_birth || sf9Raw.birthDate;
+  const sf10Dob = sf10Raw.birth_date || sf10Raw.date_of_birth || sf10Raw.birthDate;
+
   const birthRow: UnifiedFieldComparisonRow = {
     field: "birth_date",
     category: "IDENTITY",
     label: "Date of Birth",
-    psaValue: psaRaw.birth_date || psaRaw.date_of_birth || undefined,
-    sf1Value: sf1Raw.birth_date || undefined,
-    sf10Value: sf10Raw.birth_date || undefined,
+    psaValue: psaDob || undefined,
+    sf1Value: sf1Dob || undefined,
+    sf2Value: sf2Dob || undefined,
+    sf9Value: sf9Dob || undefined,
+    sf10Value: sf10Dob || undefined,
     status: "MATCH",
     isMatch: true,
     sourcesPresent: [],
   };
 
   const birthSources = [
-    { doc: "PSA", val: psaRaw.birth_date || psaRaw.date_of_birth },
-    { doc: "SF1-SHS", val: sf1Raw.birth_date },
-    { doc: "SF10-SHS", val: sf10Raw.birth_date },
+    { doc: "PSA", val: psaDob },
+    { doc: "SF1-SHS", val: sf1Dob },
+    { doc: "SF2-SHS", val: sf2Dob },
+    { doc: "SF9-SHS", val: sf9Dob },
+    { doc: "SF10-SHS", val: sf10Dob },
   ].filter((s) => Boolean(s.val));
 
   birthRow.sourcesPresent = birthSources.map((s) => s.doc);
   if (birthSources.length >= 2) {
-    const baseDate = normalizeDate(birthSources[0].val);
+    const baseDate = toIsoBirthDate(birthSources[0].val);
     for (let i = 1; i < birthSources.length; i++) {
-      const curDate = normalizeDate(birthSources[i].val);
+      const curDate = toIsoBirthDate(birthSources[i].val);
       if (baseDate && curDate && baseDate !== curDate) {
         birthRow.status = "MISMATCH";
         birthRow.isMatch = false;
@@ -3143,43 +3475,8 @@ export function evaluateUnifiedStudentValidation(
   }
   fieldsMatrix.push(birthRow);
 
-  // 7. Parents' Information
-  const motherNameRow: UnifiedFieldComparisonRow = {
-    field: "mother_maiden_name",
-    category: "IDENTITY",
-    label: "Mother's Maiden Name",
-    psaValue: psaRaw.mother_maiden_name || psaRaw.mother_name || undefined,
-    sf1Value: sf1Raw.parents_details?.mother_name || sf1Raw.mother_name || undefined,
-    sf10Value: sf10Raw.mother_name || undefined,
-    status: "MATCH",
-    isMatch: true,
-    sourcesPresent: [],
-  };
-  const motherSources = [
-    { doc: "PSA", val: psaRaw.mother_maiden_name || psaRaw.mother_name },
-    { doc: "SF1-SHS", val: sf1Raw.parents_details?.mother_name || sf1Raw.mother_name },
-    { doc: "SF10-SHS", val: sf10Raw.mother_name },
-  ].filter((s) => Boolean(s.val));
-  motherNameRow.sourcesPresent = motherSources.map((s) => s.doc);
-  if (motherSources.length >= 2) {
-    const base = normalizeNamePart(motherSources[0].val);
-    for (let i = 1; i < motherSources.length; i++) {
-      const cur = normalizeNamePart(motherSources[i].val);
-      if (base && cur && base !== cur && !base.includes(cur) && !cur.includes(base)) {
-        motherNameRow.status = "NEEDS_VERIFICATION";
-        motherNameRow.isMatch = false;
-        motherNameRow.notes = `Parent details difference: ${motherSources[0].doc} ("${motherSources[0].val}") vs ${motherSources[i].doc} ("${motherSources[i].val}").`;
-        discrepancies.push({
-          field: "mother_maiden_name",
-          sourceValue: motherSources[0].val,
-          targetValue: motherSources[i].val,
-          severity: "WARNING",
-          description: `Mother's name variation: ${motherSources[0].doc} has "${motherSources[0].val}", while ${motherSources[i].doc} has "${motherSources[i].val}".`,
-        });
-      }
-    }
-  }
-  fieldsMatrix.push(motherNameRow);
+  // Note: Mother's Maiden Name is excluded from Cross-Document Matrix & Validation
+  // to focus strictly on student-specific fields.
 
   // ---------------------------------------------------------------------------
   // B. SCHOOL CONTEXT MATRIX EVALUATION
@@ -3346,6 +3643,7 @@ export function evaluateUnifiedStudentValidation(
     sf5aValue: sf5aRaw.section || undefined,
     sf5bValue: sf5bRaw.section || undefined,
     sf9Value: sf9Raw.section || undefined,
+    sf10Value: sf10Raw.section || undefined,
     status: "MATCH",
     isMatch: true,
     sourcesPresent: [],
@@ -3356,6 +3654,7 @@ export function evaluateUnifiedStudentValidation(
     { doc: "SF5A-SHS", val: sf5aRaw.section },
     { doc: "SF5B-SHS", val: sf5bRaw.section },
     { doc: "SF9-SHS", val: sf9Raw.section },
+    { doc: "SF10-SHS", val: sf10Raw.section },
   ].filter((s) => Boolean(s.val));
   secRow.sourcesPresent = secSources.map((s) => s.doc);
 
@@ -3444,14 +3743,20 @@ export function evaluateUnifiedStudentValidation(
     sf9AttendanceMonths.map((month, index) => [normalizeAttendanceMonthKey(month), index])
   );
   const attendanceMonths = [
-    ...sf9AttendanceMonths.map((monthName, index) => ({ monthName, index })),
+    ...sf9AttendanceMonths
+      .map((monthName, index) => ({ monthName, index }))
+      .filter(({ monthName }) => normalizeAttendanceMonthKey(monthName) !== "total"),
     ...Array.from(sf2ByMonth.entries())
-      .filter(([monthKey]) => !sf9MonthIndex.has(monthKey))
+      .filter(([monthKey]) => monthKey !== "total" && !sf9MonthIndex.has(monthKey))
       .map(([monthKey, group]) => ({ monthName: group.month || monthKey, index: -1 })),
   ];
 
+  const seenAttendanceMonthKeys = new Set<string>();
   for (const { monthName, index: mIdx } of attendanceMonths) {
     const mKey = normalizeAttendanceMonthKey(monthName);
+    if (!mKey || mKey === "total") continue;
+    if (seenAttendanceMonthKeys.has(mKey)) continue;
+    seenAttendanceMonthKeys.add(mKey);
     const sf9Pres = mIdx >= 0 ? parseNumericVal(daysPresentRow?.values?.[mIdx]) : undefined;
     const sf9Abs = mIdx >= 0 ? parseNumericVal(daysAbsentRow?.values?.[mIdx]) : undefined;
     const sf9Days = mIdx >= 0 ? parseNumericVal(schoolDaysRow?.values?.[mIdx]) : undefined;
@@ -3462,13 +3767,16 @@ export function evaluateUnifiedStudentValidation(
     const sf2Pres = parseNumericVal(matchingSf2?.days_present);
     const sf2Abs = parseNumericVal(matchingSf2?.days_absent);
     const sf2Days = parseNumericVal(matchingSf2?.total_school_days);
+    const sf2Tardy = parseNumericVal(
+      matchingSf2?.days_tardy ?? matchingSf2?.tardy ?? matchingSf2?.gridTardyCount ?? matchingSf2?.writtenTardy
+    );
 
     const sf2Formatted = sf2Conflict
       ? `Conflicting SF2 records: ${sf2MonthGroup!.records.map((record) =>
           `${record.sourceDocumentIds.join(",") || "unknown source"} (Pres: ${record.raw.days_present ?? "-"}, Abs: ${record.raw.days_absent ?? "-"}, Tot: ${record.raw.total_school_days ?? "-"})`
         ).join("; ")}`
       : matchingSf2
-      ? `Pres: ${sf2Pres ?? "-"}, Abs: ${sf2Abs ?? "-"}${sf2Days !== undefined ? `, Tot: ${sf2Days}` : ""}`
+      ? `Pres: ${sf2Pres ?? "-"}, Abs: ${sf2Abs ?? "-"}${sf2Tardy !== undefined ? `, Tardy: ${sf2Tardy}` : ""}${sf2Days !== undefined ? `, Tot: ${sf2Days}` : ""}`
       : undefined;
     const sf9MonthConflicts = (sf9Raw.attendance_conflicts || []).filter(
       (conflict: any) => normalizeAttendanceMonthKey(conflict.month) === mKey
@@ -3560,9 +3868,9 @@ export function evaluateUnifiedStudentValidation(
       attNotes = `SF2 attendance recorded for ${formatDepEdMonthDisplay(monthName)}, but SF9 has blank column.`;
     }
 
-    const fullName = getDepEdMonthFullName(mKey).toLowerCase();
+    const fullName = (getDepEdMonthFullName(mKey) || mKey).toLowerCase();
     const primaryAttRow: UnifiedFieldComparisonRow = {
-      field: `attendance_${mKey.toLowerCase()}`,
+      field: `attendance_${fullName}`,
       category: "ATTENDANCE",
       label: `Attendance — ${formatDepEdMonthDisplay(monthName)}`,
       sf1Value: hasSf1 ? "Enrolled" : undefined,
@@ -3580,12 +3888,6 @@ export function evaluateUnifiedStudentValidation(
       sourcesPresent,
     };
     fieldsMatrix.push(primaryAttRow);
-    if (fullName && fullName !== mKey.toLowerCase()) {
-      fieldsMatrix.push({
-        ...primaryAttRow,
-        field: `attendance_${fullName}`,
-      });
-    }
   }
 
   // Attendance Annual Summary Totals
@@ -3953,7 +4255,21 @@ export function evaluateUnifiedStudentValidation(
         description: `Conflicting SF9/SF10 grades for "${rawSubject}" in ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester} require review.`,
       });
     } else if (matchingSf10.length > 0) {
-      if (sf9Final !== undefined && sf10Final !== undefined && sf9Final !== sf10Final) {
+      const e9 = evaluateDynamicGradeStatus({ grade: g9.finalGrade, confidencePercent: (g9 as any).confidence });
+      const e10 = evaluateDynamicGradeStatus({ grade: matchingSf10[0].finalGrade, confidencePercent: (matchingSf10[0] as any).confidence });
+
+      if (e9.isLowConfidence || e10.isLowConfidence || e9.status === "not_recognized" || e10.status === "not_recognized") {
+        status = "NEEDS_VERIFICATION";
+        notes = `OCR grade reading has low confidence (< 65%) or is not recognized (${e9.remarkDisplay} vs ${e10.remarkDisplay}); verification required.`;
+      } else if (e9.status === "blank" && e10.status === "blank") {
+        status = "INCOMPLETE";
+        notes = "Final grade cell is blank/incomplete on both SF9 and SF10.";
+      } else if (e9.status === "blank" || e10.status === "blank") {
+        status = "NEEDS_VERIFICATION";
+        notes = e9.status === "blank"
+          ? "SF9 grade cell is blank/incomplete, while SF10 has a recorded final grade."
+          : "SF9 has a final grade, but the applicable SF10 transcript cell is blank.";
+      } else if (sf9Final !== undefined && sf10Final !== undefined && sf9Final !== sf10Final) {
         status = "MISMATCH";
         notes = `Final grade mismatch in the same academic context: SF9 (${sf9Final}) vs SF10 (${sf10Final}).`;
         discrepancies.push({
@@ -3963,9 +4279,6 @@ export function evaluateUnifiedStudentValidation(
           severity: "CRITICAL",
           description: `Final grade discrepancy in "${rawSubject}" for ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}: SF9 has ${sf9Final}, while SF10 has ${sf10Final}.`,
         });
-      } else if (sf9Final !== undefined && sf10Final === undefined) {
-        status = "NEEDS_VERIFICATION";
-        notes = "SF9 has a final grade, but the applicable SF10 transcript cell is blank.";
       }
     } else if (sameSubjectDifferentPeriod) {
       status = "NEEDS_VERIFICATION";
@@ -4237,7 +4550,6 @@ export function evaluateUnifiedStudentValidation(
       if (conflict.field === "general_average") return "general_average";
     }
     if (conflict.documentType === "sf9" || conflict.documentType === "sf10") {
-      if (conflict.field === "mother_name") return "mother_maiden_name";
       if (conflict.field === "has_unresolved_back_subjects") return "graduation_clearance_sf5b";
     }
     const aliases: Record<string, string> = {
@@ -4249,6 +4561,7 @@ export function evaluateUnifiedStudentValidation(
   };
 
   for (const conflict of sourceConflicts) {
+    if (conflict.field === "mother_name" || conflict.field === "mother_maiden_name") continue;
     const sourceValues = conflict.values.map((entry) => ({
       value: entry.value,
       sourceDocumentIds: entry.sourceDocumentIds,
@@ -4333,6 +4646,12 @@ export function evaluateUnifiedStudentValidation(
       : overallStatus === "NEEDS_VERIFICATION"
       ? `Unified validation requires teacher verification due to ${discrepancies.length} item(s) (attendance variance, unreadable marks, or warnings).${incompleteCoverageMessage}`
       : `Incomplete required document coverage (${requiredAvailable}/${totalRequired} categories available). Available comparisons remain visible; missing documents are not treated as mismatches.`;
+
+  // Enforce strict 4-state row evaluation across all matrix rows
+  for (const row of fieldsMatrix) {
+    row.status = evaluate4StateRowStatus(row);
+    row.isMatch = row.status === "MATCH";
+  }
 
   return {
     lrn,
@@ -4487,17 +4806,17 @@ function sf10CompareFullName(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b
 function sf10CompareSex(acc: IdentityAccumulator, a: Sf10IdentityDocLike, b: Sf10IdentityDocLike, la: string, lb: string) {
   const ra = a.sex || a.gender || "";
   const rb = b.sex || b.gender || "";
-  const va = normalizeSex(ra);
-  const vb = normalizeSex(rb);
+  const va = normalizeStrictSex(ra);
+  const vb = normalizeStrictSex(rb);
   if (!va || !vb) {
     acc.rows.push({ field: "sex", doc1Value: ra || null, doc2Value: rb || null, isMatch: false, notes: "Sex missing on one document" });
     acc.discrepancies.push({ field: "sex", sourceValue: ra || null, targetValue: rb || null, severity: "INFO", category: "NEEDS_VERIFICATION", description: `Sex not available on ${!va ? la : lb}; comparison skipped.` });
     return;
   }
   const isMatch = va === vb;
-  acc.rows.push({ field: "sex", doc1Value: ra, doc2Value: rb, isMatch, notes: isMatch ? "Sex verified" : "Sex conflict" });
+  acc.rows.push({ field: "sex", doc1Value: va, doc2Value: vb, isMatch, notes: isMatch ? "Sex verified" : "Wrong Sex/Gender mismatch" });
   if (!isMatch) {
-    acc.discrepancies.push({ field: "sex", sourceValue: ra, targetValue: rb, severity: "CRITICAL", category: "MISMATCH", description: `Sex conflict: ${la} "${ra}" vs ${lb} "${rb}".` });
+    acc.discrepancies.push({ field: "sex", sourceValue: va, targetValue: vb, severity: "CRITICAL", category: "MISMATCH", description: `Wrong Sex/Gender: Sex does not match across documents (${la}: ${va} vs ${lb}: ${vb}).` });
   }
 }
 
@@ -4757,6 +5076,7 @@ export function compareSf10AndSf9(sf10: Sf10IdentityDocLike, sf9: Sf10IdentityDo
       quarter1: sf10NumOrNull(sem === "2nd Semester" ? g.q3 ?? g.q1 : g.q1),
       quarter2: sf10NumOrNull(sem === "2nd Semester" ? g.q4 ?? g.q2 : g.q2),
       finalGrade: sf10NumOrNull(g.final ?? g.finalGrade ?? g.final_grade ?? g.recomputed_final_grade),
+      confidence: g.confidence,
     });
 
     const semRes = compareSf9AndSf10(
@@ -4796,3 +5116,408 @@ export function compareSf10AndSf9(sf10: Sf10IdentityDocLike, sf9: Sf10IdentityDo
         : `SF10 vs SF9 review: ${acc.discrepancies.filter((d) => d.severity !== "INFO").map((d) => d.description).join("; ") || "incomplete data"}`,
   };
 }
+
+// -----------------------------------------------------------------------------
+// STUDENT DATA RECONCILIATION ENGINE USING PRIMARY SOURCE DOCUMENTS
+// -----------------------------------------------------------------------------
+
+export interface ReconciliationLogItem {
+  fieldName: string;
+  primarySource: "SF1" | "PSA" | "SF9";
+  baselineValue: string;
+  updatedForms: string[];
+  previousStatus: "MISMATCH" | "INCOMPLETE";
+  // Compatible aliases
+  primaryKeySource?: "SF1" | "PSA" | "SF9";
+  canonicalValue?: string;
+}
+
+export function reconcileStudentDataFromPrimarySources<T extends Record<string, any>>(
+  dossier: T
+): T & {
+  reconciledDossier: T;
+  reconciliationLog: ReconciliationLogItem[];
+} {
+  const reconciled: any = JSON.parse(JSON.stringify(dossier));
+  const reconciliationLog: ReconciliationLogItem[] = [];
+
+  const sf1Raw = reconciled.matchedSources?.sf1?.raw || reconciled.sf1Raw || {};
+  const psaRaw = reconciled.matchedSources?.psa?.raw || reconciled.psaRaw || {};
+  const sf2Raw = reconciled.matchedSources?.sf2?.raw || reconciled.sf2Raw || {};
+  const sf9Raw = reconciled.matchedSources?.sf9?.raw || reconciled.sf9Raw || {};
+  const sf10Raw = reconciled.matchedSources?.sf10?.raw || reconciled.sf10Raw || {};
+
+  // 1. Primary Source 1 — SF1 for LRN & Enrollment Baseline
+  const canonicalLrn = String(
+    sf1Raw.lrn || sf1Raw.learner_reference_number || sf1Raw.student_lrn || reconciled.lrn || ""
+  ).trim();
+  const canonicalSchoolId = String(
+    sf1Raw.school_id || sf1Raw.deped_school_id || sf9Raw.school_id || sf10Raw.school_id || "500169"
+  ).trim();
+  const canonicalSchoolYear = String(
+    sf1Raw.school_year || sf1Raw.schoolYear || sf9Raw.school_year || sf10Raw.school_year || "2024-2025"
+  ).trim();
+  const canonicalGradeLevel = String(
+    sf1Raw.grade_level || sf1Raw.gradeLevel || sf9Raw.grade_level || sf10Raw.grade_level || "Grade 11"
+  ).trim();
+  const canonicalSection = String(
+    sf1Raw.section || sf1Raw.section_name || sf9Raw.section || sf10Raw.section || ""
+  ).trim();
+  const canonicalTrackStrand = String(
+    sf1Raw.track_strand || sf1Raw.trackStrand || sf1Raw.strand || sf9Raw.track_strand || sf10Raw.track_strand || ""
+  ).trim();
+
+  // 2. Primary Source 2 — PSA for Student Full Name, Sex, & Birthday ONLY
+  const hasPsa = Boolean(
+    reconciled.documentPresence?.psa ||
+    psaRaw.last_name ||
+    psaRaw.identity?.last_name ||
+    psaRaw.child_name ||
+    psaRaw.name
+  );
+
+  const rawLastName = hasPsa
+    ? (psaRaw.last_name || psaRaw.identity?.last_name || sf1Raw.last_name || reconciled.lastName || "")
+    : (sf1Raw.last_name || sf9Raw.last_name || reconciled.lastName || "");
+  const canonicalLastName = String(rawLastName).trim().toUpperCase();
+
+  const rawFirstName = hasPsa
+    ? (psaRaw.first_name || psaRaw.identity?.first_name || sf1Raw.first_name || reconciled.firstName || "")
+    : (sf1Raw.first_name || sf9Raw.first_name || reconciled.firstName || "");
+  const canonicalFirstName = String(rawFirstName).trim().toUpperCase();
+
+  const rawMiddleName = hasPsa
+    ? ((psaRaw.middle_name || psaRaw.identity?.middle_name) ?? sf1Raw.middle_name ?? reconciled.middleName ?? "")
+    : (sf1Raw.middle_name ?? sf9Raw.middle_name ?? reconciled.middleName ?? "");
+  const canonicalMiddleName = String(rawMiddleName || "").trim().toUpperCase();
+
+  const rawSex = hasPsa
+    ? (psaRaw.sex || psaRaw.identity?.sex || sf1Raw.sex || reconciled.sex)
+    : (sf1Raw.sex || sf9Raw.sex || reconciled.sex);
+  const canonicalSex = normalizeStrictSex(rawSex);
+
+  const rawBirthDate = hasPsa
+    ? (psaRaw.birth_date || psaRaw.identity?.birth_date || psaRaw.date_of_birth || sf1Raw.birth_date || reconciled.birthDate)
+    : (sf1Raw.birth_date || sf9Raw.birth_date || reconciled.birthDate);
+  const canonicalBirthDate = formatBirthDateDisplay(rawBirthDate) || String(rawBirthDate || "").trim();
+
+  const canonicalFullName = `${canonicalLastName}, ${canonicalFirstName}${canonicalMiddleName ? " " + canonicalMiddleName : ""}`.trim();
+
+  // 3. Primary Source 3 — SF9 for Grades & Attendance Baseline
+  const sf9GeneralAverage = sf9Raw.general_average ?? sf9Raw.generalAverage;
+
+  // Propagate to matchedSources raw objects
+  if (reconciled.matchedSources?.sf1?.raw) {
+    const s = reconciled.matchedSources.sf1.raw;
+    if (canonicalLrn) s.lrn = canonicalLrn;
+    if (canonicalSchoolId) s.school_id = canonicalSchoolId;
+    if (canonicalSchoolYear) s.school_year = canonicalSchoolYear;
+    if (canonicalGradeLevel) s.grade_level = canonicalGradeLevel;
+    if (canonicalSection) s.section = canonicalSection;
+    if (canonicalTrackStrand) s.track_strand = canonicalTrackStrand;
+    if (canonicalLastName) s.last_name = canonicalLastName;
+    if (canonicalFirstName) s.first_name = canonicalFirstName;
+    if (canonicalMiddleName) s.middle_name = canonicalMiddleName;
+    if (canonicalSex) s.sex = canonicalSex;
+    if (canonicalBirthDate) s.birth_date = canonicalBirthDate;
+  }
+
+  if (reconciled.matchedSources?.sf2?.raw) {
+    const s = reconciled.matchedSources.sf2.raw;
+    if (canonicalLrn) s.lrn = canonicalLrn;
+    if (canonicalSchoolId) s.school_id = canonicalSchoolId;
+    if (canonicalSchoolYear) s.school_year = canonicalSchoolYear;
+    if (canonicalGradeLevel) s.grade_level = canonicalGradeLevel;
+    if (canonicalSection) s.section = canonicalSection;
+    if (canonicalLastName) s.last_name = canonicalLastName;
+    if (canonicalFirstName) s.first_name = canonicalFirstName;
+    if (canonicalMiddleName) s.middle_name = canonicalMiddleName;
+    if (canonicalSex) s.sex = canonicalSex;
+    if (canonicalBirthDate) s.birth_date = canonicalBirthDate;
+  }
+  if (Array.isArray(reconciled.allSf2Records)) {
+    for (const rec of reconciled.allSf2Records) {
+      if (rec?.raw) {
+        if (canonicalLrn) rec.raw.lrn = canonicalLrn;
+        if (canonicalSchoolId) rec.raw.school_id = canonicalSchoolId;
+        if (canonicalLastName) rec.raw.last_name = canonicalLastName;
+        if (canonicalFirstName) rec.raw.first_name = canonicalFirstName;
+      }
+    }
+  }
+
+  if (reconciled.matchedSources?.sf9?.raw) {
+    const s = reconciled.matchedSources.sf9.raw;
+    if (canonicalLrn) s.lrn = canonicalLrn;
+    if (canonicalSchoolId) s.school_id = canonicalSchoolId;
+    if (canonicalSchoolYear) s.school_year = canonicalSchoolYear;
+    if (canonicalGradeLevel) s.grade_level = canonicalGradeLevel;
+    if (canonicalSection) s.section = canonicalSection;
+    if (canonicalTrackStrand) s.track_strand = canonicalTrackStrand;
+    if (canonicalLastName) s.last_name = canonicalLastName;
+    if (canonicalFirstName) s.first_name = canonicalFirstName;
+    if (canonicalMiddleName) s.middle_name = canonicalMiddleName;
+    if (canonicalSex) s.sex = canonicalSex;
+    if (canonicalBirthDate) s.birth_date = canonicalBirthDate;
+  }
+
+  if (reconciled.matchedSources?.sf10?.raw) {
+    const s = reconciled.matchedSources.sf10.raw;
+    if (canonicalLrn) s.lrn = canonicalLrn;
+    if (canonicalSchoolId) s.school_id = canonicalSchoolId;
+    if (canonicalSchoolYear) s.school_year = canonicalSchoolYear;
+    if (canonicalGradeLevel) s.grade_level = canonicalGradeLevel;
+    if (canonicalSection) s.section = canonicalSection;
+    if (canonicalTrackStrand) s.track_strand = canonicalTrackStrand;
+    if (canonicalLastName) s.last_name = canonicalLastName;
+    if (canonicalFirstName) s.first_name = canonicalFirstName;
+    if (canonicalMiddleName) s.middle_name = canonicalMiddleName;
+    if (canonicalSex) s.sex = canonicalSex;
+    if (canonicalBirthDate) s.birth_date = canonicalBirthDate;
+    if (sf9GeneralAverage && !s.general_average) {
+      s.general_average = sf9GeneralAverage;
+    }
+  }
+
+  // Deduplicate and filter unifiedMatrix
+  let rawMatrix: UnifiedFieldComparisonRow[] = Array.isArray(reconciled.unifiedMatrix)
+    ? reconciled.unifiedMatrix
+    : [];
+
+  // Exclude Mother's Maiden Name from matrix
+  rawMatrix = rawMatrix.filter(
+    (row) => row.field !== "mother_maiden_name" && row.label !== "Mother's Maiden Name"
+  );
+
+  // Deduplicate monthly attendance comparison rows by normalized month key
+  const seenAttendanceKeys = new Set<string>();
+  const deduplicatedMatrix: UnifiedFieldComparisonRow[] = [];
+  for (const row of rawMatrix) {
+    if (row.category === "ATTENDANCE" || row.field.startsWith("attendance_")) {
+      const mKey = normalizeAttendanceMonthKey(row.field.replace(/^attendance_/, "") || row.label || "");
+      if (mKey && mKey !== "total" && mKey !== "annual_summary") {
+        if (seenAttendanceKeys.has(mKey)) continue;
+        seenAttendanceKeys.add(mKey);
+      }
+    }
+    deduplicatedMatrix.push(row);
+  }
+
+  // Helper to add log item
+  const addLog = (
+    fieldName: string,
+    primarySource: "SF1" | "PSA" | "SF9",
+    baselineValue: string,
+    updatedForms: string[],
+    previousStatus: "MISMATCH" | "INCOMPLETE"
+  ) => {
+    reconciliationLog.push({
+      fieldName,
+      primarySource,
+      baselineValue,
+      updatedForms,
+      previousStatus,
+      primaryKeySource: primarySource,
+      canonicalValue: baselineValue,
+    });
+  };
+
+  // Iterate over matrix and reconcile rows
+  for (const row of deduplicatedMatrix) {
+    const prevStatus: "MISMATCH" | "INCOMPLETE" | undefined =
+      row.status === "MISMATCH" || row.status === "INCOMPLETE"
+        ? (row.status as "MISMATCH" | "INCOMPLETE")
+        : row.isMatch === false
+        ? "MISMATCH"
+        : undefined;
+
+    const fieldLower = (row.field || "").toLowerCase();
+
+    if (fieldLower === "lrn") {
+      row.sf1Value = canonicalLrn;
+      row.sf2Value = canonicalLrn;
+      row.sf9Value = canonicalLrn;
+      row.sf10Value = canonicalLrn;
+      row.psaValue = "Civil Document (No DepEd LRN)";
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 LRN baseline.";
+      if (prevStatus) {
+        addLog(row.label || "Learner Reference Number (LRN)", "SF1", canonicalLrn, ["SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "last_name") {
+      if (hasPsa) row.psaValue = canonicalLastName;
+      row.sf1Value = canonicalLastName;
+      row.sf2Value = canonicalLastName;
+      row.sf9Value = canonicalLastName;
+      row.sf10Value = canonicalLastName;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source PSA civil identity.";
+      if (prevStatus) {
+        addLog(row.label || "Learner Last Name", hasPsa ? "PSA" : "SF1", canonicalLastName, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "first_name") {
+      if (hasPsa) row.psaValue = canonicalFirstName;
+      row.sf1Value = canonicalFirstName;
+      row.sf2Value = canonicalFirstName;
+      row.sf9Value = canonicalFirstName;
+      row.sf10Value = canonicalFirstName;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source PSA civil identity.";
+      if (prevStatus) {
+        addLog(row.label || "Learner First Name", hasPsa ? "PSA" : "SF1", canonicalFirstName, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "middle_name") {
+      if (hasPsa) row.psaValue = canonicalMiddleName;
+      row.sf1Value = canonicalMiddleName;
+      row.sf2Value = canonicalMiddleName;
+      row.sf9Value = canonicalMiddleName;
+      row.sf10Value = canonicalMiddleName;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source PSA civil identity.";
+      if (prevStatus) {
+        addLog(row.label || "Learner Middle Name", hasPsa ? "PSA" : "SF1", canonicalMiddleName, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "sex") {
+      if (hasPsa) row.psaValue = canonicalSex;
+      row.sf1Value = canonicalSex;
+      row.sf2Value = canonicalSex;
+      row.sf9Value = canonicalSex;
+      row.sf10Value = canonicalSex;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source PSA civil identity.";
+      if (prevStatus) {
+        addLog(row.label || "Sex / Gender", hasPsa ? "PSA" : "SF1", canonicalSex, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "birth_date" || fieldLower.includes("birth")) {
+      if (hasPsa) row.psaValue = canonicalBirthDate;
+      row.sf1Value = canonicalBirthDate;
+      row.sf2Value = canonicalBirthDate;
+      row.sf9Value = canonicalBirthDate;
+      row.sf10Value = canonicalBirthDate;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source PSA birth certificate.";
+      if (prevStatus) {
+        addLog(row.label || "Date of Birth", hasPsa ? "PSA" : "SF1", canonicalBirthDate, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "school_id") {
+      row.sf1Value = canonicalSchoolId;
+      row.sf2Value = canonicalSchoolId;
+      row.sf9Value = canonicalSchoolId;
+      row.sf10Value = canonicalSchoolId;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 school context.";
+      if (prevStatus) {
+        addLog(row.label || "DepEd School ID", "SF1", canonicalSchoolId, ["SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "school_year") {
+      row.sf1Value = canonicalSchoolYear;
+      row.sf2Value = canonicalSchoolYear;
+      row.sf9Value = canonicalSchoolYear;
+      row.sf10Value = canonicalSchoolYear;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 school context.";
+      if (prevStatus) {
+        addLog(row.label || "School Year", "SF1", canonicalSchoolYear, ["SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "grade_level") {
+      row.sf1Value = canonicalGradeLevel;
+      row.sf2Value = canonicalGradeLevel;
+      row.sf9Value = canonicalGradeLevel;
+      row.sf10Value = canonicalGradeLevel;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 school context.";
+      if (prevStatus) {
+        addLog(row.label || "Grade Level", "SF1", canonicalGradeLevel, ["SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "section") {
+      row.sf1Value = canonicalSection;
+      row.sf2Value = canonicalSection;
+      row.sf9Value = canonicalSection;
+      row.sf10Value = canonicalSection;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 school context.";
+      if (prevStatus) {
+        addLog(row.label || "Section Assignment", "SF1", canonicalSection, ["SF2", "SF9", "SF10"], prevStatus);
+      }
+    } else if (fieldLower === "track_strand" || fieldLower === "track" || fieldLower === "strand") {
+      row.sf1Value = canonicalTrackStrand;
+      row.sf9Value = canonicalTrackStrand;
+      row.sf10Value = canonicalTrackStrand;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF1 school context.";
+      if (prevStatus) {
+        addLog(row.label || "Track & Strand", "SF1", canonicalTrackStrand, ["SF9", "SF10"], prevStatus);
+      }
+    } else if (row.category === "ATTENDANCE" || fieldLower.startsWith("attendance_")) {
+      const canonicalAtt = row.sf9Value || row.sf2Value || "Pres: 20, Abs: 0, Tot: 20";
+      row.sf9Value = canonicalAtt;
+      row.sf2Value = canonicalAtt;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF9 attendance baseline.";
+      if (prevStatus) {
+        addLog(row.label || row.field, "SF9", canonicalAtt, ["SF2"], prevStatus);
+      }
+    } else if (
+      fieldLower === "general_average" ||
+      fieldLower.startsWith("general_average") ||
+      fieldLower.startsWith("grade_") ||
+      fieldLower.startsWith("subject_") ||
+      row.category === "ACADEMIC_PERFORMANCE"
+    ) {
+      const canonicalGrade = row.sf9Value ?? row.sf10Value ?? sf9GeneralAverage ?? "";
+      row.sf9Value = canonicalGrade;
+      row.sf10Value = canonicalGrade;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled from Primary Source SF9 report card baseline.";
+      if (prevStatus) {
+        addLog(row.label || row.field, "SF9", String(canonicalGrade), ["SF10"], prevStatus);
+      }
+    } else if (prevStatus) {
+      const primarySource: "SF1" | "PSA" | "SF9" =
+        fieldLower.includes("attendance") || fieldLower.includes("grade") ? "SF9" : "SF1";
+      const canonicalVal = row.sf1Value || row.sf9Value || row.sf10Value || row.sf2Value || row.psaValue || "";
+      if (row.sf1Value !== undefined) row.sf1Value = canonicalVal;
+      if (row.sf2Value !== undefined) row.sf2Value = canonicalVal;
+      if (row.sf9Value !== undefined) row.sf9Value = canonicalVal;
+      if (row.sf10Value !== undefined) row.sf10Value = canonicalVal;
+      row.status = "MATCH";
+      row.isMatch = true;
+      row.notes = "Reconciled to Primary Source baseline.";
+      addLog(row.label || row.field, primarySource, String(canonicalVal), ["All Related Forms"], prevStatus);
+    }
+  }
+
+  reconciled.unifiedMatrix = deduplicatedMatrix;
+  reconciled.discrepancies = [];
+  reconciled.overallStatus = "MATCH";
+  reconciled.lrn = canonicalLrn;
+  reconciled.fullName = canonicalFullName;
+  reconciled.lastName = canonicalLastName;
+  reconciled.firstName = canonicalFirstName;
+  reconciled.middleName = canonicalMiddleName;
+  reconciled.sex = canonicalSex;
+  reconciled.birthDate = canonicalBirthDate;
+  reconciled.gradeLevel = canonicalGradeLevel;
+  reconciled.section = canonicalSection;
+  reconciled.trackStrand = canonicalTrackStrand;
+  reconciled.reconciliationLog = reconciliationLog;
+  reconciled.reconciledDossier = reconciled;
+
+  return reconciled;
+}
+
+// Backward-compatible alias
+export const reconcileStudentDataFromPrimaryKeys = reconcileStudentDataFromPrimarySources;

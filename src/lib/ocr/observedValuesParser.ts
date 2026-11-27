@@ -29,6 +29,17 @@ import type {
   GradingScaleItem,
   LearnerProgressAndAchievement,
 } from "@/types/documents";
+import {
+  normalizeObservedValueMarking,
+  sanitizeLearnersObservedValues,
+  type DepEdObservedValueCode,
+} from "@/lib/validation/gradeUtils";
+
+export {
+  normalizeObservedValueMarking,
+  sanitizeLearnersObservedValues,
+  type DepEdObservedValueCode,
+};
 
 // ---------------------------------------------------------------------------
 // Canonical Reference Definitions
@@ -138,36 +149,10 @@ export function normalizeObservedRating(rawMark: string | undefined | null): Nor
     return { originalMark: trimmed, normalized: null, isBlank: true, isUnreadable: false };
   }
 
-  // 2. Exact / OCR-corrected non-numerical ratings (AO, SO, RO, NO)
-  // Handle common OCR confusion: letter O vs digit 0, dots like A.O., trailing spaces
-  const cleanUpper = trimmed.toUpperCase().replace(/\./g, "").trim();
-
-  if (cleanUpper === "AO" || cleanUpper === "A0") {
-    return { originalMark: trimmed, normalized: "AO", isBlank: false, isUnreadable: false };
-  }
-  if (cleanUpper === "SO" || cleanUpper === "S0") {
-    return { originalMark: trimmed, normalized: "SO", isBlank: false, isUnreadable: false };
-  }
-  if (cleanUpper === "RO" || cleanUpper === "R0") {
-    return { originalMark: trimmed, normalized: "RO", isBlank: false, isUnreadable: false };
-  }
-  if (cleanUpper === "NO" || cleanUpper === "N0") {
-    return { originalMark: trimmed, normalized: "NO", isBlank: false, isUnreadable: false };
-  }
-
-  // Also match full legend wording if written out
-  const lower = trimmed.toLowerCase();
-  if (lower.includes("always observed")) {
-    return { originalMark: trimmed, normalized: "AO", isBlank: false, isUnreadable: false };
-  }
-  if (lower.includes("sometimes observed")) {
-    return { originalMark: trimmed, normalized: "SO", isBlank: false, isUnreadable: false };
-  }
-  if (lower.includes("rarely observed")) {
-    return { originalMark: trimmed, normalized: "RO", isBlank: false, isUnreadable: false };
-  }
-  if (lower.includes("not observed")) {
-    return { originalMark: trimmed, normalized: "NO", isBlank: false, isUnreadable: false };
+  // 2. Strict visual homoglyph snapping (AO, SO, RO, NO) - NO DIGITS ALLOWED
+  const snapped = normalizeObservedValueMarking(trimmed);
+  if (snapped) {
+    return { originalMark: trimmed, normalized: snapped, isBlank: false, isUnreadable: false };
   }
 
   // 3. Unreadable / ambiguous mark: must be flagged for teacher verification
@@ -218,6 +203,22 @@ export function buildLearnersObservedValuesStructure(
     const q3 = existing?.quarters.q3;
     const q4 = existing?.quarters.q4;
 
+    const normalizeConfidencePct = (c?: number, fallback: number = 95): number => {
+      if (c === undefined || c === null || isNaN(c)) return fallback;
+      if (c > 0 && c <= 1) return Math.min(100, Math.max(0, Math.round(c * 100)));
+      return Math.min(100, Math.max(0, Math.round(c)));
+    };
+
+    const q1Pct = q1?.confidence !== undefined ? normalizeConfidencePct(q1.confidence) : (q1 ? 95 : undefined);
+    const q2Pct = q2?.confidence !== undefined ? normalizeConfidencePct(q2.confidence) : (q2 ? 95 : undefined);
+    const q3Pct = q3?.confidence !== undefined ? normalizeConfidencePct(q3.confidence) : (q3 ? 95 : undefined);
+    const q4Pct = q4?.confidence !== undefined ? normalizeConfidencePct(q4.confidence) : (q4 ? 95 : undefined);
+
+    if (q1 && q1Pct !== undefined) q1.confidence = q1Pct;
+    if (q2 && q2Pct !== undefined) q2.confidence = q2Pct;
+    if (q3 && q3Pct !== undefined) q3.confidence = q3Pct;
+    if (q4 && q4Pct !== undefined) q4.confidence = q4Pct;
+
     const stmtRec: BehaviorStatementRecord = {
       statement_id: def.id,
       statement: def.statement,
@@ -227,6 +228,10 @@ export function buildLearnersObservedValuesStructure(
       q2,
       q3,
       q4,
+      q1Confidence: q1Pct,
+      q2Confidence: q2Pct,
+      q3Confidence: q3Pct,
+      q4Confidence: q4Pct,
     };
     statements.push(stmtRec);
 
@@ -274,14 +279,14 @@ export function buildLearnersObservedValuesStructure(
     if (group) group.statements.push(stmt);
   }
 
-  return {
+  return sanitizeLearnersObservedValues({
     statements,
     core_values: coreValuesGroups,
     observations,
     marking_legend: { ...CANONICAL_MARKING_LEGEND },
     has_unreadable_marks: hasUnreadable,
     flagged_for_verification: hasUnreadable,
-  };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -668,8 +673,9 @@ export function parseTextObservedValuesAndAchievement(
         if (i + 1 < lines.length) {
           const nextTokens = lines[i + 1].trim().split(/\s+/);
           const validRatings = nextTokens.filter((t) => {
+            if (normalizeObservedValueMarking(t) !== null) return true;
             const u = t.toUpperCase().replace(/\./g, "");
-            return ["AO", "SO", "RO", "NO", "A0", "S0", "R0", "N0", "?", "X"].includes(u);
+            return ["?", "X"].includes(u);
           });
           if (validRatings.length > 0) {
             marksFound = validRatings;

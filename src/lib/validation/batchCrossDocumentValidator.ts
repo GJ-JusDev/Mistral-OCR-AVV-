@@ -33,6 +33,7 @@ import {
   compareSf5AndSf10,
   evaluateUnifiedStudentValidation,
   normalizeAttendanceMonthKey,
+  parseNameParts,
   type PairwiseValidationResult,
   type DiscrepancyItem,
   type UnifiedFieldComparisonRow,
@@ -41,6 +42,7 @@ import {
 } from "./crossDocumentEngine";
 import { normalizeLrn, isValidLrn, normalizeSex } from "./patterns";
 import { normalizeNamePart, normalizeDate } from "./nameComparison";
+import { normalizeStrictSex, validateConsecutiveSchoolYear } from "./gradeUtils";
 import type { DocumentSegment } from "./batchDocumentSegmenter";
 
 export interface BatchDiscrepancyItem {
@@ -214,9 +216,49 @@ export function evaluateBatchCrossDocumentValidation(params: {
       cleanLrn = "";
     }
 
-    // FIX 2: Primary matching key is strictly a valid 12-digit LRN.
-    // Never merge learners using first and last names alone.
-    // When LRN is absent or invalid, create a separate isolated learner record with a unique temporary key.
+    // 1. Direct match by valid 12-digit LRN
+    if (cleanLrn && learnersMap.has(cleanLrn)) {
+      const learner = learnersMap.get(cleanLrn)!;
+      if (!learner.lastName && candidateName?.lastName) learner.lastName = candidateName.lastName;
+      if (!learner.firstName && candidateName?.firstName) learner.firstName = candidateName.firstName;
+      if (!learner.middleName && candidateName?.middleName) learner.middleName = candidateName.middleName;
+      return learner;
+    }
+
+    if (candidateName) {
+      if (!candidateName.firstName && candidateName.lastName) {
+        const p = parseNameParts(candidateName.lastName);
+        if (p.lastName && p.firstName) {
+          candidateName.lastName = p.lastName;
+          candidateName.firstName = p.firstName;
+          if (!candidateName.middleName) candidateName.middleName = p.middleName;
+        }
+      }
+    }
+
+    // 2. Fallback match by exact Last Name and First Name across document segments (e.g. SF2/PSA without LRN or conflicting LRN)
+    const cLast = normalizeNamePart(candidateName?.lastName);
+    const cFirst = normalizeNamePart(candidateName?.firstName);
+    if (cLast && cFirst) {
+      for (const cand of learnersMap.values()) {
+        const candLast = normalizeNamePart(cand.lastName);
+        const candFirst = normalizeNamePart(cand.firstName);
+        if (
+          (candLast === cLast && candFirst === cFirst) ||
+          (candLast === cLast && (candFirst.includes(cFirst) || cFirst.includes(candFirst)))
+        ) {
+          if (cleanLrn && !cand.lrn) {
+            cand.lrn = cleanLrn;
+          }
+          if (!cand.middleName && candidateName?.middleName) {
+            cand.middleName = candidateName.middleName;
+          }
+          return cand;
+        }
+      }
+    }
+
+    // 3. Create a new learner record
     if (!cleanLrn) {
       const tempId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
@@ -256,7 +298,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
   // 2. Ingest extracted records from each segment
   for (const seg of segments) {
     const data = extractedSegmentData[seg.id] || {};
-    const pageNum = seg.pageNumbers[0] ?? 1;
+    const pageNum = seg.pageNumbers?.[0] ?? (seg as any).pageRange?.[0] ?? 1;
     const segFileName = seg.sourceFileName || seg.pages?.[0]?.sourceFileName;
     const segDataUrl = seg.imageUrl || seg.pages?.[0]?.sourceFileDataUrl;
 
@@ -286,14 +328,14 @@ export function evaluateBatchCrossDocumentValidation(params: {
         for (const item of learners) {
           const l = getOrCreateLearner(
             item.lrn,
-            { lastName: item.last_name, firstName: item.first_name, middleName: item.middle_name },
+            { lastName: item.last_name || item.lastName, firstName: item.first_name || item.firstName, middleName: item.middle_name || item.middleName },
             "sf1"
           );
-          l.lastName = item.last_name || l.lastName;
-          l.firstName = item.first_name || l.firstName;
-          l.middleName = item.middle_name || l.middleName;
-          l.sex = item.sex || l.sex;
-          l.birthDate = item.birth_date || l.birthDate;
+          l.lastName = item.last_name || item.lastName || l.lastName;
+          l.firstName = item.first_name || item.firstName || l.firstName;
+          l.middleName = item.middle_name || item.middleName || l.middleName;
+          l.sex = normalizeStrictSex(item.sex) || l.sex;
+          l.birthDate = item.birth_date || item.birthDate || l.birthDate;
           l.section = data.section || item.section || l.section;
           l.gradeLevel = data.grade_level || item.grade_level || l.gradeLevel;
           l.trackStrand = data.track_strand || item.track_strand || l.trackStrand;
@@ -337,9 +379,16 @@ export function evaluateBatchCrossDocumentValidation(params: {
       const records = data.attendance_records || data.attendance || data.learners;
       const segMonth = data.month || data.header?.month || data.attendance_summary?.month || "June";
       for (const item of records) {
+        const rawName = item.learner_name || item.student_name || item.name || "";
+        const parsed = parseNameParts(rawName);
         const l = getOrCreateLearner(
           item.lrn,
-          { lastName: item.last_name || item.learner_name, firstName: item.first_name },
+          {
+            lastName: item.last_name || item.lastName || parsed.lastName,
+            firstName: item.first_name || item.firstName || parsed.firstName,
+            middleName: item.middle_name || item.middleName || parsed.middleName,
+            fullName: rawName,
+          },
           "sf2"
         );
         const itemMonth = item.month || segMonth;
@@ -429,9 +478,10 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
     // SF9 Progress Report Card
     if (seg.documentType === "sf9") {
+      const sf9Learner = data.learner || data;
       const l = getOrCreateLearner(
-        data.lrn,
-        { lastName: data.last_name, firstName: data.first_name, middleName: data.middle_name },
+        sf9Learner.lrn || data.lrn,
+        { lastName: sf9Learner.lastName || sf9Learner.last_name || data.last_name, firstName: sf9Learner.firstName || sf9Learner.first_name || data.first_name, middleName: sf9Learner.middleName || sf9Learner.middle_name || data.middle_name },
         "sf9"
       );
       const newRec = {
@@ -439,7 +489,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
         fileName: data.source_file_name || segFileName,
         dataUrl: data.source_file_data_url || segDataUrl,
         documentId: seg.id,
-        raw: data,
+        raw: sf9Learner,
       };
       if (l.sf9Record) {
         const isIdentical =
@@ -463,9 +513,10 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
     // SF10 Permanent Record
     if (seg.documentType === "sf10") {
+      const sf10Learner = data.learner || data;
       const l = getOrCreateLearner(
-        data.lrn,
-        { lastName: data.last_name, firstName: data.first_name, middleName: data.middle_name },
+        sf10Learner.lrn || data.lrn,
+        { lastName: sf10Learner.lastName || sf10Learner.last_name || data.last_name, firstName: sf10Learner.firstName || sf10Learner.first_name || data.first_name, middleName: sf10Learner.middleName || sf10Learner.middle_name || data.middle_name },
         "sf10"
       );
       const newRec = {
@@ -473,7 +524,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
         fileName: data.source_file_name || segFileName,
         dataUrl: data.source_file_data_url || segDataUrl,
         documentId: seg.id,
-        raw: data,
+        raw: sf10Learner,
       };
       if (l.sf10Record) {
         const isIdentical =
@@ -496,16 +547,16 @@ export function evaluateBatchCrossDocumentValidation(params: {
     }
 
     // PSA Birth Certificate
-    if (seg.documentType === "birth_cert") {
-      const psaId = data.identity || data;
+    if (seg.documentType === "birth_cert" || (seg.documentType as string) === "psa") {
+      const psaId = data.identity || data.candidate || data;
       let l: any = undefined;
       const cleanLrn = normalizeLrn(data.lrn || psaId.lrn);
       if (isValidLrn(cleanLrn) && learnersMap.has(cleanLrn)) {
         l = learnersMap.get(cleanLrn);
       } else {
         // Match civil identity name against existing SF1/academic learners in batch
-        const psaLast = normalizeNamePart(psaId.last_name);
-        const psaFirst = normalizeNamePart(psaId.first_name);
+        const psaLast = normalizeNamePart(psaId.last_name || psaId.lastName);
+        const psaFirst = normalizeNamePart(psaId.first_name || psaId.firstName);
         if (psaLast && psaFirst) {
           for (const cand of learnersMap.values()) {
             if (
@@ -522,7 +573,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
       if (!l) {
         l = getOrCreateLearner(
           data.lrn || psaId.lrn,
-          { lastName: psaId.last_name, firstName: psaId.first_name, middleName: psaId.middle_name },
+          { lastName: psaId.last_name || psaId.lastName, firstName: psaId.first_name || psaId.firstName, middleName: psaId.middle_name || psaId.middleName },
           "birth_cert"
         );
       }
@@ -737,6 +788,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
       const pRes = comparePsaAndSf1(learner.psaRecord.raw, learner.sf1Record.raw);
       pairwiseResults.push(pRes);
       for (const d of pRes.discrepancies) {
+        if (d.field === "mother_maiden_name" || d.field === "mother_name" || (typeof d.field === "string" && d.field.toLowerCase().includes("mother"))) continue;
         const isCritical = d.severity === "CRITICAL";
         const disc: BatchDiscrepancyItem = {
           id: `disc-${learnerDiscrepancies.length + 1}-psa-sf1-${d.field}`,
@@ -804,7 +856,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
         lrn: sf9Data.lrn,
         last_name: sf9Data.last_name,
         first_name: sf9Data.first_name,
-        sex: sf9Data.sex || sf9Data.gender,
+        sex: normalizeStrictSex(sf9Data.sex) || normalizeStrictSex(sf9Data.gender) || undefined,
         school_year: sf9Data.school_year,
         grade_level: sf9Data.grade_level,
         section: sf9Data.section,
@@ -844,7 +896,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
       const pRes = compareSf10AndSf9(
         { ...sf10Data, document_id: learner.sf10Record.documentId || "doc-sf10", school_year: sf10Data.school_year || schoolYear },
-        { ...sf9Data, document_id: learner.sf9Record.documentId || "doc-sf9", school_year: sf9Data.school_year || schoolYear, sex: sf9Data.sex || sf9Data.gender, track_strand: sf9Data.track_strand || sf9Data.strand }
+        { ...sf9Data, document_id: learner.sf9Record.documentId || "doc-sf9", school_year: sf9Data.school_year || schoolYear, sex: normalizeStrictSex(sf9Data.sex) || normalizeStrictSex(sf9Data.gender) || undefined, track_strand: sf9Data.track_strand || sf9Data.strand }
       );
       pairwiseResults.push(pRes);
       for (const d of pRes.discrepancies) {
@@ -1030,6 +1082,50 @@ export function evaluateBatchCrossDocumentValidation(params: {
       allDiscrepancies.push(disc);
     }
 
+    // Comparator 8d: DepEd School Year Consecutive Format Validation (YYYY-(YYYY+1))
+    const syCandidates: { doc: string; sy: string | undefined; page?: number; fileName?: string; dataUrl?: string }[] = [];
+    if (learner.sf9Record?.raw?.school_year) {
+      syCandidates.push({ doc: "SF9-SHS Report Card", sy: learner.sf9Record.raw.school_year, page: learner.sf9Record.pageNumber, fileName: learner.sf9Record.fileName, dataUrl: learner.sf9Record.dataUrl });
+    }
+    if (learner.sf1Record?.raw?.school_year) {
+      syCandidates.push({ doc: "SF1-SHS School Register", sy: learner.sf1Record.raw.school_year, page: learner.sf1Record.pageNumber, fileName: learner.sf1Record.fileName, dataUrl: learner.sf1Record.dataUrl });
+    }
+    if (learner.sf10Record?.raw?.school_year) {
+      syCandidates.push({ doc: "SF10-SHS Permanent Transcript", sy: learner.sf10Record.raw.school_year, page: learner.sf10Record.pageNumber, fileName: learner.sf10Record.fileName, dataUrl: learner.sf10Record.dataUrl });
+    }
+    for (const sf2 of learner.sf2Records) {
+      if (sf2.raw?.school_year) {
+        syCandidates.push({ doc: "SF2-SHS Daily Attendance", sy: sf2.raw.school_year, page: sf2.pageNumber, fileName: sf2.fileName, dataUrl: sf2.dataUrl });
+      }
+    }
+    for (const cand of syCandidates) {
+      const syVal = validateConsecutiveSchoolYear(cand.sy);
+      if (!syVal.isValid) {
+        const disc: BatchDiscrepancyItem = {
+          id: `disc-${learnerDiscrepancies.length + 1}-sy-nonconsecutive-${cand.doc.slice(0, 4)}`,
+          learnerName: fullName,
+          lrn: displayedLrn,
+          field: "School Year Format / Sequence",
+          source1Doc: cand.doc,
+          source1Page: cand.page,
+          source1FileName: cand.fileName,
+          source1DataUrl: cand.dataUrl,
+          source1Value: cand.sy,
+          source2Doc: "DepEd School Year Consecutive Format (YYYY-(YYYY+1))",
+          source2Page: undefined,
+          source2FileName: undefined,
+          source2DataUrl: undefined,
+          source2Value: "Consecutive School Year (e.g. 2025-2026)",
+          severity: "CRITICAL",
+          category: "MISMATCH",
+          reason: syVal.reason || `Non-consecutive School Year "${cand.sy}" detected on ${cand.doc}. DepEd requires consecutive years YYYY-(YYYY+1).`,
+          recommendedAction: "Correct school year to DepEd consecutive year format YYYY-(YYYY+1) (e.g. 2025-2026).",
+        };
+        learnerDiscrepancies.push(disc);
+        allDiscrepancies.push(disc);
+      }
+    }
+
     // UNIFIED VALIDATION: Execute ONE complete student-centered cross-document evaluation
     const unifiedResult = evaluateUnifiedStudentValidation({
       lrn: displayedLrn,
@@ -1050,6 +1146,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
     // Merge unified discrepancies into batch discrepancy lists if not already recorded
     for (const ud of unifiedResult.discrepancies) {
+      if (ud.field === "mother_maiden_name" || ud.field === "mother_name" || (typeof ud.field === "string" && ud.field.toLowerCase().includes("mother"))) continue;
       // Skip duplicate scan warnings here; they are registered with rich file-level metadata below
       if (ud.field.startsWith("duplicate_")) continue;
 
@@ -1144,7 +1241,21 @@ export function evaluateBatchCrossDocumentValidation(params: {
       allSf10Records: learner.allSf10Records,
       pairwiseResults,
       discrepancies: learnerDiscrepancies,
-      unifiedMatrix: unifiedResult.fieldsMatrix,
+      unifiedMatrix: (() => {
+        const seenMonths = new Set<string>();
+        return (unifiedResult.fieldsMatrix || [])
+          .filter((row) => row.field !== "mother_maiden_name" && row.label !== "Mother's Maiden Name")
+          .filter((row) => {
+            if (row.category === "ATTENDANCE" || row.field.startsWith("attendance_")) {
+              const mKey = normalizeAttendanceMonthKey(row.field.replace(/^attendance_/, "") || row.label || "");
+              if (mKey && mKey !== "total" && mKey !== "annual_summary") {
+                if (seenMonths.has(mKey)) return false;
+                seenMonths.add(mKey);
+              }
+            }
+            return true;
+          });
+      })(),
       duplicateWarnings: learner.duplicateWarnings,
     });
   }

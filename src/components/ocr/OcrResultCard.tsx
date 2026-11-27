@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/Card";
 import FieldEditor from "./FieldEditor";
 import { ExtractedFields, GradeRecord, AttendanceRecord } from "@/types/documents";
 import { AlertTriangle, FileText, Users, Award, ShieldCheck, ChevronDown, ChevronRight, Heart } from "lucide-react";
-import { normalizeObservedRating } from "@/lib/ocr/observedValuesParser";
+import { normalizeObservedRating, normalizeObservedValueMarking } from "@/lib/ocr/observedValuesParser";
 import {
   recalculateSubjectGradeStatus,
   computeSemesterGeneralAverage,
@@ -13,6 +13,7 @@ import {
   normalizeSemesterContext,
   parseQuarterNumeric,
   isBlankOrMissingFinal,
+  evaluateDynamicGradeStatus,
 } from "@/lib/validation/gradeUtils";
 
 export interface OcrResultCardProps {
@@ -1043,19 +1044,27 @@ export default function OcrResultCard({
                                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold text-amber-800 bg-amber-100 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
                                           Discrepancy (Review)
                                         </span>
-                                      ) : (
-                                        <span
-                                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                            item.status === "Passed"
-                                              ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                              : item.status === "Failed"
-                                              ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
-                                              : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
-                                          }`}
-                                        >
-                                          {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
-                                        </span>
-                                      )}
+                                      ) : (() => {
+                                        const itemEval = evaluateDynamicGradeStatus({
+                                          grade: item.final ?? item.final_grade,
+                                          rawRemark: item.remarks || item.remark,
+                                          confidencePercent: item.confidence,
+                                        });
+                                        const pillColor = itemEval.status === "blank"
+                                          ? "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
+                                          : itemEval.isLowConfidence || itemEval.status === "not_recognized"
+                                          ? "text-orange-700 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-400 border border-orange-200 dark:border-orange-800"
+                                          : itemEval.status === "passed"
+                                          ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                          : "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400";
+                                        return (
+                                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${pillColor}`}>
+                                            {itemEval.status === "blank"
+                                              ? (item.status || "Missing")
+                                              : itemEval.remarkDisplay}
+                                          </span>
+                                        );
+                                      })()}
                                     </td>
                                   </tr>
                                   {item.has_calculation_discrepancy && (
@@ -1112,11 +1121,11 @@ export default function OcrResultCard({
                                           {item.recomputed_final_grade !== undefined && (
                                             <div className="flex items-center gap-1">
                                               <span className="text-zinc-600 dark:text-zinc-400">Recomputed Final:</span>
-                                              <span className={`font-mono font-bold ${Number(item.recomputed_final_grade) >= 75 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                                              <span className={`font-mono font-bold ${evaluateDynamicGradeStatus({ grade: item.recomputed_final_grade }).status === "passed" ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
                                                 {item.recomputed_final_grade}
                                               </span>
                                               <span className="text-[10px] text-zinc-500 italic">
-                                                ({Number(item.recomputed_final_grade) >= 75 ? "Passed" : "Failed"} via round((orig+mark)/2))
+                                                ({evaluateDynamicGradeStatus({ grade: item.recomputed_final_grade }).officialRemark === "PASSED" ? "Passed" : "Failed"} via round((orig+mark)/2))
                                               </span>
                                             </div>
                                           )}
@@ -1173,9 +1182,17 @@ export default function OcrResultCard({
                             <span className="font-mono font-bold text-base text-zinc-900 dark:text-zinc-100">
                               {sem1AvgResult.officialAverage?.toFixed(2)}
                             </span>
-                            <span className={`text-xs font-semibold ${Number(sem1AvgResult.officialAverage) >= 75 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
-                              ({Number(sem1AvgResult.officialAverage) >= 75 ? "Passed" : "Failed"})
-                            </span>
+                            {(() => {
+                              const avgEval = evaluateDynamicGradeStatus({
+                                grade: sem1AvgResult.officialAverage,
+                                confidencePercent: sem1AvgResult.confidence,
+                              });
+                              return (
+                                <span className={`text-xs font-semibold ${avgEval.status === "passed" ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                                  ({avgEval.remarkDisplay})
+                                </span>
+                              );
+                            })()}
                           </div>
                         ) : (
                           <div className="px-3 py-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs font-medium text-zinc-500 italic">
@@ -1339,19 +1356,27 @@ export default function OcrResultCard({
                                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold text-amber-800 bg-amber-100 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
                                           Discrepancy (Review)
                                         </span>
-                                      ) : (
-                                        <span
-                                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                            item.status === "Passed"
-                                              ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                              : item.status === "Failed"
-                                              ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
-                                              : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
-                                          }`}
-                                        >
-                                          {item.status || (item.needsVerification ? "Needs Verification" : "Missing")}
-                                        </span>
-                                      )}
+                                      ) : (() => {
+                                        const itemEval = evaluateDynamicGradeStatus({
+                                          grade: item.final ?? item.final_grade,
+                                          rawRemark: item.remarks || item.remark,
+                                          confidencePercent: item.confidence,
+                                        });
+                                        const pillColor = itemEval.status === "blank"
+                                          ? "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
+                                          : itemEval.isLowConfidence || itemEval.status === "not_recognized"
+                                          ? "text-orange-700 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-400 border border-orange-200 dark:border-orange-800"
+                                          : itemEval.status === "passed"
+                                          ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                          : "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400";
+                                        return (
+                                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${pillColor}`}>
+                                            {itemEval.status === "blank"
+                                              ? (item.status || "Missing")
+                                              : itemEval.remarkDisplay}
+                                          </span>
+                                        );
+                                      })()}
                                     </td>
                                   </tr>
                                   {item.has_calculation_discrepancy && (
@@ -1408,11 +1433,11 @@ export default function OcrResultCard({
                                           {item.recomputed_final_grade !== undefined && (
                                             <div className="flex items-center gap-1">
                                               <span className="text-zinc-600 dark:text-zinc-400">Recomputed Final:</span>
-                                              <span className={`font-mono font-bold ${Number(item.recomputed_final_grade) >= 75 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
+                                              <span className={`font-mono font-bold ${evaluateDynamicGradeStatus({ grade: item.recomputed_final_grade }).status === "passed" ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400"}`}>
                                                 {item.recomputed_final_grade}
                                               </span>
                                               <span className="text-[10px] text-zinc-500 italic">
-                                                ({Number(item.recomputed_final_grade) >= 75 ? "Passed" : "Failed"} via round((orig+mark)/2))
+                                                ({evaluateDynamicGradeStatus({ grade: item.recomputed_final_grade }).officialRemark === "PASSED" ? "Passed" : "Failed"} via round((orig+mark)/2))
                                               </span>
                                             </div>
                                           )}
@@ -1470,9 +1495,17 @@ export default function OcrResultCard({
                               <span className="font-mono font-bold text-base text-zinc-900 dark:text-zinc-100">
                                 {sem2AvgResult.officialAverage?.toFixed(2)}
                               </span>
-                              <span className={`text-xs font-semibold ${Number(sem2AvgResult.officialAverage) >= 75 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
-                                ({Number(sem2AvgResult.officialAverage) >= 75 ? "Passed" : "Failed"})
-                              </span>
+                            {(() => {
+                              const avgEval = evaluateDynamicGradeStatus({
+                                grade: sem2AvgResult.officialAverage,
+                                confidencePercent: sem2AvgResult.confidence,
+                              });
+                              return (
+                                <span className={`text-xs font-semibold ${avgEval.status === "passed" ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                                  ({avgEval.remarkDisplay})
+                                </span>
+                              );
+                            })()}
                             </div>
                           ) : (
                             <div className="px-3 py-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs font-medium text-zinc-500 italic">
@@ -1584,17 +1617,27 @@ export default function OcrResultCard({
                             )}
                           </td>
                           <td className="py-2 px-3 text-right">
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${
-                                g.status === "Passed"
-                                  ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                  : g.status === "Failed"
-                                  ? "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400"
-                                  : "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
-                              }`}
-                            >
-                              {g.status || (g.needsVerification ? "Needs Verification" : "Missing")}
-                            </span>
+                            {(() => {
+                              const gEval = evaluateDynamicGradeStatus({
+                                grade: g.final ?? g.final_grade,
+                                rawRemark: g.remarks || g.remark,
+                                confidencePercent: g.confidence,
+                              });
+                              const pillColor = gEval.status === "blank"
+                                ? "text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-400"
+                                : gEval.isLowConfidence || gEval.status === "not_recognized"
+                                ? "text-orange-700 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-400 border border-orange-200 dark:border-orange-800"
+                                : gEval.status === "passed"
+                                ? "text-emerald-700 bg-emerald-50 dark:bg-emerald-900/30 dark:text-emerald-400"
+                                : "text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-400";
+                              return (
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold ${pillColor}`}>
+                                  {gEval.status === "blank"
+                                    ? (g.status || "Missing")
+                                    : gEval.remarkDisplay}
+                                </span>
+                              );
+                            })()}
                           </td>
                         </tr>
                       ))}
@@ -1863,9 +1906,10 @@ export default function OcrResultCard({
                                   </td>
                                   {(["q1", "q2", "q3", "q4"] as const).map((qKey) => {
                                     const qRec = stmt[qKey];
-                                    const currentMark = qRec?.normalized_rating ?? (qRec?.original_mark || "");
-                                    const isBlank = !qRec?.original_mark && !qRec?.normalized_rating;
-                                    const isFlagged = qRec?.needs_verification;
+                                    const normalized = normalizeObservedValueMarking(qRec?.normalized_rating ?? qRec?.original_mark);
+                                    const currentMark = normalized ?? "";
+                                    const isBlank = !currentMark;
+                                    const isFlagged = qRec?.needs_verification && !normalized;
 
                                     return (
                                       <td key={qKey} className="py-2 px-2 text-center align-middle">
@@ -1890,7 +1934,7 @@ export default function OcrResultCard({
                                                 ? "bg-blue-50 text-blue-800 border-blue-300 dark:bg-blue-950/50 dark:text-blue-300 dark:border-blue-800"
                                                 : currentMark === "RO"
                                                 ? "bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800"
-                                                : "bg-purple-50 text-purple-800 border-purple-300 dark:bg-purple-950/50 dark:text-purple-300 dark:border-purple-800"
+                                                : "bg-rose-50 text-rose-800 border-rose-300 dark:bg-rose-950/50 dark:text-rose-300 dark:border-rose-800"
                                             }`}
                                           >
                                             <option value="">— (Blank)</option>

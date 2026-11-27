@@ -2,7 +2,10 @@ import type { IOcrProvider, OcrInput, OcrProviderResult } from "./types";
 import { OcrProviderError } from "./types";
 import { parseRetryAfterHeader } from "../mistral";
 import { compressServerImageBuffer } from "../serverImageCompressor";
-import { extractEmbeddedPdfText, getPdfPageCount } from "../pdfTextExtractor";
+import { extractEmbeddedPdfText, getPdfPageCount, extractCoordinateAwarePdf, type CoordinateAwarePdfResult } from "../pdfTextExtractor";
+import { normalizeObservedValueMarking } from "../../validation/gradeUtils";
+
+export { normalizeObservedValueMarking };
 
 export interface AzureProviderConfig {
   endpoint?: string;
@@ -284,9 +287,14 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
       );
     }
 
+    const docTypeLower = input.documentType?.toLowerCase() || "";
     const isStructuredTableDoc =
-      input.documentType?.toLowerCase() === "sf9" ||
-      input.documentType?.toLowerCase() === "sf10" ||
+      docTypeLower === "sf1" ||
+      docTypeLower === "sf2" ||
+      docTypeLower === "sf9" ||
+      docTypeLower === "sf10" ||
+      docTypeLower === "psa" ||
+      docTypeLower === "birth_cert" ||
       input.documentSide === "back";
     let effectiveModelId = (
       input.modelId ||
@@ -351,9 +359,11 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
 
       // Handle multi-page PDFs: extract embedded text and constrain F0 requests to pages=1-2 if > 2 pages
       let embeddedPdfText = "";
+      let pdfReaderResult: CoordinateAwarePdfResult | null = null;
       if (effectiveContentType === "application/pdf") {
-        embeddedPdfText = extractEmbeddedPdfText(binaryBody);
-        const pageCount = getPdfPageCount(binaryBody);
+        pdfReaderResult = extractCoordinateAwarePdf(binaryBody);
+        embeddedPdfText = pdfReaderResult.fullRawText;
+        const pageCount = pdfReaderResult.pageCount || getPdfPageCount(binaryBody);
         if (pageCount > 2 && !analyzeUrl.includes("pages=")) {
           analyzeUrl += (analyzeUrl.includes("?") ? "&" : "?") + "pages=1-2";
         }
@@ -433,7 +443,7 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
 
           if (opStatus === "succeeded") {
             clearTimeout(timeoutId);
-            const res = this.processAnalyzeResult(pollData.analyzeResult, effectiveModelId);
+            const res = this.processAnalyzeResult(pollData.analyzeResult, effectiveModelId, binaryBody, pdfReaderResult);
             if (embeddedPdfText && embeddedPdfText.trim().length > 0) {
               if (!res.text.includes(embeddedPdfText.trim().slice(0, 30))) {
                 res.text = res.text ? `${res.text}\n\n${embeddedPdfText}` : embeddedPdfText;
@@ -617,7 +627,12 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
    * Maps `isHandwritten` and style confidence to words and lines based on character spans.
    * Preserves bounding polygons, page numbers, and word-level coordinates for full traceability.
    */
-  private processAnalyzeResult(analyzeResult?: any, usedModelId?: string): OcrProviderResult {
+  private processAnalyzeResult(
+    analyzeResult?: any,
+    usedModelId?: string,
+    imageBuffer?: Buffer,
+    pdfReaderResult?: CoordinateAwarePdfResult | null
+  ): OcrProviderResult {
     const effectiveModel = usedModelId || this.modelId;
     if (!analyzeResult) {
       return {
@@ -730,6 +745,7 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
         angle: p.angle,
         lines,
         words,
+        selectionMarks: Array.isArray(p.selectionMarks) ? p.selectionMarks : [],
       };
     });
 
@@ -767,6 +783,9 @@ export class AzureDocumentIntelligenceProvider implements IOcrProvider {
       handwritingConfidence,
       printedConfidence,
       words: allWords,
+      imageBuffer,
+      pdfReaderPages: pdfReaderResult?.pages,
+      reconstructedRows: pdfReaderResult?.allReconstructedRows,
     };
 
     return {

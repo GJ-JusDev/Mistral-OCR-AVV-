@@ -14,7 +14,7 @@
 import type { ExtractedFields, GradeRecord } from "@/types/documents";
 import { cleanSubjectName } from "./documentComparator";
 import { validateSf9CrossSideCompatibility } from "./documentClassifier";
-import { getAuthoritativeSemesterFinalGrade, updateExtractedFieldsAverages } from "./gradeUtils";
+import { getAuthoritativeSemesterFinalGrade, updateExtractedFieldsAverages, sanitizeLearnersObservedValues, normalizeStrictSex } from "./gradeUtils";
 
 export interface MergedSf9Result {
   unifiedFields: ExtractedFields;
@@ -136,7 +136,9 @@ export function mergeSf9FrontAndBack(
             sem1_final_grade: existing.grade.sem1_final_grade ?? g.sem1_final_grade,
             sem2_final_grade: existing.grade.sem2_final_grade ?? g.sem2_final_grade,
             final: existing.grade.final ?? g.final,
+            final_grade: existing.grade.final_grade ?? g.final_grade ?? existing.grade.final ?? g.final,
             remark: existing.grade.remark || g.remark,
+            remarks: existing.grade.remarks || g.remarks || existing.grade.remark || g.remark,
             source_side: "both",
           };
           existing.sourceSide = "both";
@@ -149,6 +151,14 @@ export function mergeSf9FrontAndBack(
   processGrades(back.grades, "back");
 
   for (const [, entry] of subjectKeyMap.entries()) {
+    const finalVal = getAuthoritativeSemesterFinalGrade(entry.grade);
+    if (finalVal === undefined || finalVal === null || String(finalVal).trim() === "") {
+      entry.grade.final = null;
+      entry.grade.final_grade = null;
+      entry.grade.remarks = "Blank / Incomplete";
+      entry.grade.remark = "Blank / Incomplete";
+      entry.grade.status = "Missing";
+    }
     mergedGrades.push(entry.grade);
   }
 
@@ -168,8 +178,8 @@ export function mergeSf9FrontAndBack(
   const attendanceDiscrepancyDetails = front.attendance_discrepancy_details || back.attendance_discrepancy_details;
   const attendanceConfidence = front.attendance_confidence ?? back.attendance_confidence;
 
-  // 5. General Average
-  const generalAverage = back.general_average ?? front.general_average;
+  // 5. General Average (Keep null if not explicitly printed on either side)
+  const generalAverage = back.general_average ?? front.general_average ?? null;
 
   // 6. Overall Compatibility Determination
   const hasIdentityConflict = identityConflicts.length > 0;
@@ -185,6 +195,12 @@ export function mergeSf9FrontAndBack(
     summaryMessage = "Single-sided SF9 record processed.";
   }
 
+  // Strict Sex resolution: Front SF9 has the official Learner Information block (Sex: Male/Female)
+  // NEVER let an empty sex: null/undefined from Back SF9 overwrite a valid sex from Front SF9
+  const rawFrontSex = normalizeStrictSex(front.sex);
+  const rawBackSex = normalizeStrictSex(back.sex);
+  const resolvedSex = rawFrontSex || rawBackSex || null;
+
   const unifiedFields: ExtractedFields = {
     ...front,
     ...back,
@@ -193,6 +209,7 @@ export function mergeSf9FrontAndBack(
     first_name: firstName,
     last_name: lastName,
     middle_name: middleName,
+    sex: resolvedSex || undefined,
     grade_level: gradeLevel,
     school_year: schoolYear,
     section,
@@ -211,7 +228,14 @@ export function mergeSf9FrontAndBack(
     attendance_risk_status: attendanceRiskStatus,
     attendance_discrepancy_details: attendanceDiscrepancyDetails,
     general_average: generalAverage,
-    observed_values: back.observed_values || front.observed_values,
+    general_average_confidence: back.general_average_confidence ?? front.general_average_confidence,
+    sem1_general_average: back.sem1_general_average ?? front.sem1_general_average,
+    sem1_printed_general_average: back.sem1_printed_general_average ?? front.sem1_printed_general_average,
+    sem1_confidence: back.sem1_confidence ?? front.sem1_confidence ?? back.general_average_confidence ?? front.general_average_confidence,
+    sem2_general_average: back.sem2_general_average ?? front.sem2_general_average,
+    sem2_printed_general_average: back.sem2_printed_general_average ?? front.sem2_printed_general_average,
+    sem2_confidence: back.sem2_confidence ?? front.sem2_confidence ?? back.general_average_confidence ?? front.general_average_confidence,
+    observed_values: sanitizeLearnersObservedValues(back.observed_values || front.observed_values),
     learner_progress_achievement: back.learner_progress_achievement || front.learner_progress_achievement,
     grading_scale: back.grading_scale || front.grading_scale || back.learner_progress_achievement || front.learner_progress_achievement,
     ocr_provider: front.ocr_provider || back.ocr_provider || "azure",
@@ -344,7 +368,7 @@ export function mergeSf10Pages(
     attendance_risk_status: attendanceRiskStatus,
     attendance_discrepancy_details: attendanceDiscrepancyDetails,
     general_average: generalAverage,
-    observed_values: observedValues,
+    observed_values: sanitizeLearnersObservedValues(observedValues),
     learner_progress_achievement: learnerProgressAchievement,
     grading_scale: gradingScale,
   };

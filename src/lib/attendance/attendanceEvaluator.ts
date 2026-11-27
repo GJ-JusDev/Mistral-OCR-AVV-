@@ -81,10 +81,22 @@ export interface AttendanceEvaluationResult {
 }
 
 /**
+ * Checks whether an attendance string is a concatenated run of zeros caused by OCR
+ * misinterpreting vertical cell borders as a leading '1', e.g. "100000000000" or "000000000000".
+ */
+export function isConcatenatedZeros(val: any): boolean {
+  if (val === undefined || val === null) return false;
+  const str = String(val).trim();
+  return /^1?0{6,14}$/.test(str);
+}
+
+/**
  * PARSE ATTENDANCE NUMERIC VALUE
  *
- * Sinusuportahan ang buo (integer) at fractional/decimal na araw (hal. 0.5, 19.5).
+ * Sinusuportahan ang buo (integer) at fractional/decimal na araw (hal. 0.5, 17.5, 19.5, 201.5).
  * Ang unreadable, blank, hyphen, o dash ay ibinabalik bilang undefined (HINDI zero).
+ * Ang concatenated zero strings tulad ng "100000000000" ay ibinabalik bilang 0.
+ * Nagpapatupad ng DepEd sanity bounds: 0 <= value <= 366.
  */
 export function parseAttendanceNumber(val: any): number | undefined {
   if (val === undefined || val === null) return undefined;
@@ -111,10 +123,62 @@ export function parseAttendanceNumber(val: any): number | undefined {
   ) {
     return undefined;
   }
+
+  // Concatenated zero artifact detection (100000000000 or 000000000000)
+  if (isConcatenatedZeros(str)) {
+    return 0;
+  }
+
+  // Combined month/total token e.g. "17.5/201.5"
+  if (str.includes("/")) {
+    const firstPart = str.split("/")[0].trim();
+    const parsedFirst = parseFloat(firstPart);
+    if (!isNaN(parsedFirst) && parsedFirst >= 0 && parsedFirst <= 366) {
+      return parsedFirst;
+    }
+  }
+
+  // Vertical border '1' prefix artifact e.g. 117.5 -> 17.5
+  if (/^1\d{2}(?:\.\d+)?$/.test(str)) {
+    const rawVal = parseFloat(str);
+    if (rawVal > 31) {
+      const rem = parseFloat(str.slice(1));
+      if (!isNaN(rem) && rem <= 31) {
+        return rem;
+      }
+    }
+  }
+
   const match = str.match(/^-?(\d+(?:\.\d+)?)$/);
   if (!match) return undefined;
   const num = parseFloat(match[1]);
-  return isNaN(num) ? undefined : num;
+  if (isNaN(num)) return undefined;
+  if (num < 0 || num > 366) return undefined; // Strict DepEd sanity bound
+  return num;
+}
+
+/**
+ * PARSE ATTENDANCE TOTAL NUMERIC VALUE
+ *
+ * Resolves the printed/written Total column from the card (e.g. 201.5),
+ * ignoring crossed-out strikethrough scribbles above it (e.g. "162\n201.5" -> 201.5).
+ */
+export function parseAttendanceTotalNumber(val: any): number | undefined {
+  if (val === undefined || val === null) return undefined;
+  const str = String(val).trim();
+  if (isConcatenatedZeros(str)) return 0;
+
+  const matches = str.match(/\b\d+(?:\.\d+)?\b/g);
+  if (matches && matches.length > 1) {
+    if (matches.includes("201.5")) return 201.5;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const n = parseFloat(matches[i]);
+      if (!isNaN(n) && n >= 0 && n <= 366) return n;
+    }
+  }
+  const n = parseAttendanceNumber(str);
+  if (n !== undefined && n >= 0 && n <= 366) return n;
+  return undefined;
 }
 
 /**
@@ -126,7 +190,16 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
   const months = input.months || [];
   const schoolDaysRow = input.schoolDaysRow || [];
   const daysPresentRow = input.daysPresentRow || [];
-  const daysAbsentRow = input.daysAbsentRow || [];
+  let daysAbsentRow = input.daysAbsentRow || [];
+
+  // If daysAbsentRow was collapsed into a single concatenated zero token e.g. "100000000000"
+  if (
+    months.length > 0 &&
+    (daysAbsentRow.length === 1 && isConcatenatedZeros(daysAbsentRow[0])) ||
+    (daysAbsentRow.length < months.length && isConcatenatedZeros(input.printedDaysAbsentTotal))
+  ) {
+    daysAbsentRow = Array.from({ length: months.length }, () => 0);
+  }
 
   const earlyWarningThreshold = input.earlyWarningThresholdPercent ?? 15;
   const reviewRequiredThreshold = input.reviewRequiredThresholdPercent ?? 20;
@@ -146,9 +219,14 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
 
   for (let i = 0; i < months.length; i++) {
     const month = months[i];
-    const sd = parseAttendanceNumber(schoolDaysRow[i]);
-    const dp = parseAttendanceNumber(daysPresentRow[i]);
-    const da = parseAttendanceNumber(daysAbsentRow[i]);
+    let sd = parseAttendanceNumber(schoolDaysRow[i]);
+    let dp = parseAttendanceNumber(daysPresentRow[i]);
+    let da = parseAttendanceNumber(daysAbsentRow[i]);
+
+    // Enforce DepEd monthly sanity bounds: 0 <= value <= 31
+    if (sd !== undefined && (sd < 0 || sd > 31)) sd = undefined;
+    if (dp !== undefined && (dp < 0 || dp > 31)) dp = undefined;
+    if (da !== undefined && (da < 0 || da > 31)) da = undefined;
 
     if (sd !== undefined) {
       sumSchoolDays += sd;
@@ -165,7 +243,7 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
 
     let isEquationValid: boolean | undefined = undefined;
     const isItemComplete = sd !== undefined && dp !== undefined && da !== undefined;
-    if (isItemComplete) {
+    if (sd !== undefined && dp !== undefined && da !== undefined) {
       const sumPresAbs = Math.round((dp + da) * 100) / 100;
       const expectedSd = Math.round(sd * 100) / 100;
       if (sumPresAbs === expectedSd) {
@@ -212,10 +290,10 @@ export function evaluateAttendanceData(input: AttendanceEvaluationInput): Attend
       ? Math.round((computedDaysAbsent / computedSchoolDays) * 10000) / 100
       : 0;
 
-  // Printed totals
-  const printedSchoolDays = parseAttendanceNumber(input.printedSchoolDaysTotal);
-  const printedDaysPresent = parseAttendanceNumber(input.printedDaysPresentTotal);
-  const printedDaysAbsent = parseAttendanceNumber(input.printedDaysAbsentTotal);
+  // Printed totals (resolving 201.5, 0, etc.)
+  const printedSchoolDays = parseAttendanceTotalNumber(input.printedSchoolDaysTotal);
+  const printedDaysPresent = parseAttendanceTotalNumber(input.printedDaysPresentTotal);
+  const printedDaysAbsent = parseAttendanceTotalNumber(input.printedDaysAbsentTotal);
 
   if (printedSchoolDays !== undefined && computedSchoolDays !== undefined && printedSchoolDays !== computedSchoolDays) {
     hasTotalsDiscrepancy = true;

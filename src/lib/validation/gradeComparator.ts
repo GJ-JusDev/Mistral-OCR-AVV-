@@ -3,6 +3,7 @@ import {
   computeRawSemesterFinalGrade,
   computeOfficialSemesterFinalGrade,
   getAuthoritativeSemesterFinalGrade,
+  evaluateDynamicGradeStatus,
 } from "./gradeUtils";
 import type { GradeRecord } from "@/types/documents";
 
@@ -159,7 +160,12 @@ export function compareScannedGradesWithExisting(params: {
         ? computeSemesterFinalGrade(scanQ1, scanQ2)
         : computeSemesterFinalGrade(scanQ3, scanQ4);
       const effectiveFinal = scanFinal ?? computedFinal;
-      const proposedStatus = effectiveFinal !== undefined ? (effectiveFinal >= 75 ? "Passed" : "Failed") : "Needs Verification";
+      const evalProp = evaluateDynamicGradeStatus({ grade: effectiveFinal, confidencePercent: scan.confidence });
+      const proposedStatus: "Passed" | "Failed" | "Needs Verification" =
+        evalProp.status === "passed" ? "Passed" : evalProp.status === "failed" ? "Failed" : "Needs Verification";
+
+      const evalScan = evaluateDynamicGradeStatus({ grade: scanFinal, confidencePercent: scan.confidence });
+      const scanStatus = scan.status || (evalScan.status === "passed" ? "Passed" : evalScan.status === "failed" ? "Failed" : null);
 
       subjects.push({
         subject: rawSubject,
@@ -174,7 +180,7 @@ export function compareScannedGradesWithExisting(params: {
           q3: scanQ3,
           q4: scanQ4,
           final: scanFinal,
-          status: scan.status || (effectiveFinal ? (effectiveFinal >= 75 ? "Passed" : "Failed") : null),
+          status: scanStatus,
         },
         quarterDiffs: [],
         proposedFinalGrade: effectiveFinal,
@@ -260,9 +266,15 @@ export function compareScannedGradesWithExisting(params: {
       : computeOfficialSemesterFinalGrade(effectiveQ3, effectiveQ4);
 
     const proposedFinal = computedFinal ?? scanFinal ?? exFinal;
-    const proposedStatus = (proposedFinal !== undefined && proposedFinal !== null)
-      ? (proposedFinal >= 75 ? "Passed" : "Failed")
-      : "Needs Verification";
+    const evalProp2 = evaluateDynamicGradeStatus({ grade: proposedFinal, confidencePercent: scan.confidence });
+    const proposedStatus: "Passed" | "Failed" | "Needs Verification" =
+      evalProp2.status === "passed" ? "Passed" : evalProp2.status === "failed" ? "Failed" : "Needs Verification";
+
+    const evalEx = evaluateDynamicGradeStatus({ grade: exFinal });
+    const exStatus = match.status || (evalEx.status === "passed" ? "Passed" : evalEx.status === "failed" ? "Failed" : null);
+
+    const evalScan2 = evaluateDynamicGradeStatus({ grade: scanFinal, confidencePercent: scan.confidence });
+    const scanStatus = scan.status || (evalScan2.status === "passed" ? "Passed" : evalScan2.status === "failed" ? "Failed" : null);
 
     if (hasSubjectChange) {
       proposedUpdateCount++;
@@ -284,7 +296,7 @@ export function compareScannedGradesWithExisting(params: {
           q3: exQ3,
           q4: exQ4,
           final: exFinal,
-          status: match.status || (exFinal ? (exFinal >= 75 ? "Passed" : "Failed") : null),
+          status: exStatus,
         },
         scannedGrades: {
           q1: scanQ1,
@@ -292,7 +304,7 @@ export function compareScannedGradesWithExisting(params: {
           q3: scanQ3,
           q4: scanQ4,
           final: scanFinal,
-          status: scan.status || (scanFinal ? (scanFinal >= 75 ? "Passed" : "Failed") : null),
+          status: scanStatus,
         },
         quarterDiffs,
         proposedFinalGrade: proposedFinal,
@@ -315,7 +327,7 @@ export function compareScannedGradesWithExisting(params: {
           q3: exQ3,
           q4: exQ4,
           final: exFinal,
-          status: match.status || (exFinal ? (exFinal >= 75 ? "Passed" : "Failed") : null),
+          status: exStatus,
         },
         scannedGrades: {
           q1: scanQ1,
@@ -323,11 +335,11 @@ export function compareScannedGradesWithExisting(params: {
           q3: scanQ3,
           q4: scanQ4,
           final: scanFinal,
-          status: scan.status || (scanFinal ? (scanFinal >= 75 ? "Passed" : "Failed") : null),
+          status: scanStatus,
         },
         quarterDiffs,
         proposedFinalGrade: exFinal,
-        proposedStatus: exFinal !== null ? (exFinal >= 75 ? "Passed" : "Failed") : "Needs Verification",
+        proposedStatus: exStatus === "Passed" ? "Passed" : exStatus === "Failed" ? "Failed" : "Needs Verification",
         hasProposedChanges: false,
         notes: "Scanned grades match active database records. Zero changes needed.",
       });

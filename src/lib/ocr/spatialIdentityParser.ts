@@ -1099,6 +1099,20 @@ export function isValidSchoolCandidate(
 
   const lower = trimmed.toLowerCase();
 
+  // Reject administrative and national DepEd headers
+  if (
+    /\b(?:republic|republika)\b/i.test(trimmed) &&
+    /\b(?:philippines|pilipinas|department|kagawaran|education|edukasyon)\b/i.test(trimmed)
+  ) {
+    return false;
+  }
+  if (/\b(?:department\s+of\s+.*education|kagawaran\s+ng\s+.*edukasyon)\b/i.test(trimmed)) {
+    return false;
+  }
+  if (/^w\s+ng\s+/i.test(trimmed) || /\bw\s+ng\s+republic\b/i.test(trimmed)) {
+    return false;
+  }
+
   // Reject boilerplate phrases and administrative headers
   for (const kw of SCHOOL_EXCLUSION_KEYWORDS) {
     if (

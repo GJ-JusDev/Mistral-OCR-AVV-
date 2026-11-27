@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
 
 describe("AVV System — Standalone PSA Scanner & OCR Verification Suite", async () => {
-  const { parsePsaBirthCert } = await import("../src/lib/ocr/psaParser.ts");
+  const { parsePsaBirthCert, extractPsaSexFromMarkPlacement } = await import("../src/lib/ocr/psaParser.ts");
   const { comparePsaAndSf1 } = await import("../src/lib/validation/crossDocumentEngine.ts");
 
   test("1. PSA-only page loads without requiring other documents", () => {
@@ -594,5 +594,64 @@ MENDOZA
     assert.ok(resMissing.field_statuses.first_name.confidence >= 85);
     assert.strictEqual(resMissing.field_statuses.last_name.status, "extracted");
     assert.ok(resMissing.field_statuses.last_name.confidence >= 85);
+  });
+
+  test("21. PSA Item 2. SEX multi-line above-underline and bounding-box spatial mark extraction", () => {
+    // Multi-line text: '2. SEX X' on line 1, '1 Male 2 Female' on line 2
+    const multiLineMale = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+1. NAME: JUSTIN GOMEZ
+2. SEX X
+1 Male    2 Female
+3. DATE OF BIRTH: 15 MARCH 2008
+`;
+    const resMale = parsePsaBirthCert(multiLineMale);
+    assert.strictEqual(resMale.identity.sex, "M");
+    assert.strictEqual(resMale.identity.sex_label, "Male");
+    assert.ok(resMale.field_statuses.sex.confidence >= 85);
+
+    // Multi-line text with standalone mark on its own line: 'X'
+    const standaloneMark = `
+2. SEX
+X
+1 Male    2 Female
+`;
+    const resStandalone = parsePsaBirthCert(standaloneMark);
+    assert.strictEqual(resStandalone.identity.sex, "M");
+    assert.strictEqual(resStandalone.identity.sex_label, "Male");
+    assert.ok(resStandalone.field_statuses.sex.confidence >= 85);
+
+    // Markdown table cells: | 2. SEX | X 1 Male 2 Female |
+    const tableCell = `
+| 2. SEX | X 1 Male 2 Female |
+`;
+    const resTableCell = parsePsaBirthCert(tableCell);
+    assert.strictEqual(resTableCell.identity.sex, "M");
+    assert.strictEqual(resTableCell.identity.sex_label, "Male");
+    assert.ok(resTableCell.field_statuses.sex.confidence >= 85);
+
+    // Bounding-box spatial offset: mark sits above 1 Male vs 2 Female
+    const wordsMale = [
+      { text: "2. SEX", polygon: [100, 200, 200, 200, 200, 220, 100, 220] },
+      { text: "X", polygon: [80, 250, 95, 250, 95, 270, 80, 270] },
+      { text: "1 Male", polygon: [100, 290, 160, 290, 160, 310, 100, 310] },
+      { text: "2 Female", polygon: [200, 290, 280, 290, 280, 310, 200, 310] },
+    ];
+    const spatialMale = extractPsaSexFromMarkPlacement("2. SEX\n1 Male 2 Female", wordsMale);
+    assert.strictEqual(spatialMale.sex, "M");
+    assert.strictEqual(spatialMale.sexLabel, "Male");
+    assert.ok(spatialMale.confidence >= 85);
+
+    const wordsFemale = [
+      { text: "2. SEX", polygon: [100, 200, 200, 200, 200, 220, 100, 220] },
+      { text: "X", polygon: [210, 250, 225, 250, 225, 270, 210, 270] },
+      { text: "1 Male", polygon: [100, 290, 160, 290, 160, 310, 100, 310] },
+      { text: "2 Female", polygon: [200, 290, 280, 290, 280, 310, 200, 310] },
+    ];
+    const spatialFemale = extractPsaSexFromMarkPlacement("2. SEX\n1 Male 2 Female", wordsFemale);
+    assert.strictEqual(spatialFemale.sex, "F");
+    assert.strictEqual(spatialFemale.sexLabel, "Female");
+    assert.ok(spatialFemale.confidence >= 85);
   });
 });

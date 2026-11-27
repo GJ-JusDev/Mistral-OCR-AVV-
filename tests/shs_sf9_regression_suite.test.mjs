@@ -6,6 +6,7 @@ import {
   recalculateSubjectGradeStatus,
   normalizeGradeRecords,
   computeSemesterGeneralAverage,
+  updateExtractedFieldsAverages,
   formatDisplayedGrade,
   getConfidencePercentage,
 } from "../src/lib/validation/gradeUtils.ts";
@@ -147,7 +148,7 @@ test("Grade Norm 2: Second-semester final grade present populates sem2_final_gra
   assert.equal(normalized.needsVerification, false);
 });
 
-test("Grade Norm 3: Blank final grade with valid quarterly marks auto-computes candidate grade with provenance", () => {
+test("Grade Norm 3: Blank final grade with valid quarterly marks keeps final_grade: null and sets remarks to Blank / Incomplete", () => {
   const blankDocRecord = {
     subject: "General Mathematics",
     semester: "1st Semester",
@@ -160,13 +161,12 @@ test("Grade Norm 3: Blank final grade with valid quarterly marks auto-computes c
 
   const normalized = recalculateSubjectGradeStatus(blankDocRecord);
 
-  assert.equal(normalized.sem1_final_grade, 81, "Auto-calculates candidate 81 from (80+82)/2");
-  assert.equal(normalized.final, 81, "Sets final candidate to 81");
-  assert.equal(normalized.official_computed_final, 81);
-  assert.equal(normalized.raw_calculated_final, 81);
-  assert.equal(normalized.is_auto_computed, true, "Candidate flagged as auto-computed");
-  assert.equal(normalized.grade_source, "auto_computed");
-  assert.equal(normalized.status, "Passed");
+  assert.equal(normalized.final_grade, null, "Must keep final_grade null without auto-calculating 81");
+  assert.equal(normalized.sem1_final_grade, null, "Must keep sem1_final_grade null");
+  assert.equal(normalized.final, null, "Must keep final null");
+  assert.equal(normalized.remarks, "Blank / Incomplete", "Remarks must be Blank / Incomplete");
+  assert.equal(normalized.status, "Missing");
+  assert.equal(normalized.is_auto_computed, false, "Must NOT be auto-computed");
   assert.equal(normalized.needsVerification, true, "Requires human verification");
 });
 
@@ -232,7 +232,7 @@ test("Grade Norm 6: No cross-semester grade contamination", () => {
   assert.equal(norm2.sem1_final_grade, undefined, "2nd semester must NEVER contaminate 1st semester field");
 });
 
-test("Grade Norm 7: 2nd Semester table with Q3 & Q4 populated and blank Semester Final Grade auto-computes whole-number (no decimal) Final Grades and General Average with valid 0–100% confidence scores", () => {
+test("Grade Norm 7: 2nd Semester table with Q3 & Q4 populated and blank Semester Final Grade keeps final_grade: null and general_average: null", () => {
   const sem2Records = [
     {
       subject: "Physical Science",
@@ -261,39 +261,22 @@ test("Grade Norm 7: 2nd Semester table with Q3 & Q4 populated and blank Semester
 
   const [s1, s2] = normalized;
 
-  // Subject 1: (85+88)/2 = 86.5 -> 87
-  assert.equal(s1.is_auto_computed, true);
-  assert.equal(s1.displayed_final_grade, 87);
-  assert.equal(Number.isInteger(s1.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
-  assert.equal(formatDisplayedGrade(s1.displayed_final_grade), "87");
-  assert.ok(!formatDisplayedGrade(s1.displayed_final_grade).includes("."));
-  assert.equal(s1.status, "Passed");
-  assert.ok(typeof s1.confidence === "number" && s1.confidence >= 0 && s1.confidence <= 100);
-  const conf1 = getConfidencePercentage(s1.confidence);
-  assert.ok(conf1 >= 0 && conf1 <= 100);
+  // Subject 1: Blank final grade cell -> final_grade: null, remarks: "Blank / Incomplete"
+  assert.equal(s1.final_grade, null, "Must keep final_grade null without auto-calculating 87");
+  assert.equal(s1.sem2_final_grade, null, "Must keep sem2_final_grade null");
+  assert.equal(s1.remarks, "Blank / Incomplete");
+  assert.equal(s1.is_auto_computed, false);
 
-  // Subject 2: (89+92)/2 = 90.5 -> 91
-  assert.equal(s2.is_auto_computed, true);
-  assert.equal(s2.displayed_final_grade, 91);
-  assert.equal(Number.isInteger(s2.displayed_final_grade), true, "Strictly NO decimals in displayed_final_grade");
-  assert.equal(formatDisplayedGrade(s2.displayed_final_grade), "91");
-  assert.ok(!formatDisplayedGrade(s2.displayed_final_grade).includes("."));
-  assert.equal(s2.status, "Passed");
-  assert.ok(typeof s2.confidence === "number" && s2.confidence >= 0 && s2.confidence <= 100);
-  const conf2 = getConfidencePercentage(s2.confidence);
-  assert.ok(conf2 >= 0 && conf2 <= 100);
+  // Subject 2: Blank final grade cell -> final_grade: null, remarks: "Blank / Incomplete"
+  assert.equal(s2.final_grade, null, "Must keep final_grade null without auto-calculating 91");
+  assert.equal(s2.sem2_final_grade, null, "Must keep sem2_final_grade null");
+  assert.equal(s2.remarks, "Blank / Incomplete");
+  assert.equal(s2.is_auto_computed, false);
 
-  // General Average calculation:
-  // Raw: (86.5 + 90.5) / 2 = 88.5 -> Math.round(88.5) = 89
-  const avgResult = computeSemesterGeneralAverage(normalized, "2nd Semester");
-  assert.equal(avgResult.completeness, "COMPLETE");
-  assert.equal(avgResult.displayedAverage, 89);
-  assert.equal(Number.isInteger(avgResult.displayedAverage), true, "Strictly NO decimals in displayedAverage");
-  assert.equal(formatDisplayedGrade(avgResult.displayedAverage), "89");
-  assert.ok(!formatDisplayedGrade(avgResult.displayedAverage).includes("."));
-  assert.ok(typeof avgResult.confidence === "number" && avgResult.confidence >= 0 && avgResult.confidence <= 100);
-  const avgConf = getConfidencePercentage(avgResult.confidence);
-  assert.ok(avgConf >= 0 && avgConf <= 100);
+  // General Average: Must remain null when blank on card (NEVER auto-averaged)
+  const updatedFields = updateExtractedFieldsAverages({ grades: normalized, semester: "2nd Semester" });
+  assert.equal(updatedFields.general_average, null, "General average must remain null when blank on card");
+  assert.equal(updatedFields.has_blank_grade_error, true, "Must flag has_blank_grade_error as true");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,7 +390,7 @@ test("Review Queue 5: Server-side normalizeGradeRecords prevents contradictory s
   assert.equal(cleaned[1].final, 70);
 
   assert.equal(cleaned[2].status, "Missing", "Subj C (empty) must be normalized to Missing");
-  assert.equal(cleaned[2].final, undefined);
+  assert.ok(cleaned[2].final === null || cleaned[2].final === undefined);
   assert.equal(cleaned[2].needsVerification, true);
 });
 

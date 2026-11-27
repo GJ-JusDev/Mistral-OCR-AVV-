@@ -23,6 +23,7 @@ import {
   recalculateSubjectGradeStatus,
   normalizeSemesterContext,
   parseQuarterNumeric,
+  evaluateDynamicGradeStatus,
 } from "@/lib/validation/gradeUtils";
 
 interface StudentGradeReviewSectionProps {
@@ -74,13 +75,17 @@ export default function StudentGradeReviewSection({
         return s.includes("1st") || s.includes("first") || (!g.semester && (parseQuarterNumeric(g.q1) !== undefined || parseQuarterNumeric(g.q2) !== undefined));
       }).map((g: any) => {
         const norm = recalculateSubjectGradeStatus(g, "1st Semester");
-        const finVal = Number(norm.final ?? norm.sem1_final_grade);
+        const finalVal = norm.sem1_final_grade ?? norm.final;
+        const evalRes = evaluateDynamicGradeStatus({
+          grade: finalVal,
+          rawRemark: norm.status || norm.remarks || norm.remark,
+        });
         return {
           subject: norm.subject,
           q1: norm.q1,
           q2: norm.q2,
-          final_grade: norm.sem1_final_grade ?? norm.final,
-          status: norm.status || (!isNaN(finVal) ? (finVal >= 75 ? "Passed" : "Failed") : "Needs Verification"),
+          final_grade: finalVal,
+          status: norm.status || (evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Needs Verification"),
           raw_calculated_final: norm.raw_calculated_final,
         };
       });
@@ -118,13 +123,17 @@ export default function StudentGradeReviewSection({
         return s.includes("2nd") || s.includes("second") || (!g.semester && (parseQuarterNumeric(g.q3) !== undefined || parseQuarterNumeric(g.q4) !== undefined));
       }).map((g: any) => {
         const norm = recalculateSubjectGradeStatus(g, "2nd Semester");
-        const finVal = Number(norm.final ?? norm.sem2_final_grade);
+        const finalVal = norm.sem2_final_grade ?? norm.final;
+        const evalRes = evaluateDynamicGradeStatus({
+          grade: finalVal,
+          rawRemark: norm.status || norm.remarks || norm.remark,
+        });
         return {
           subject: norm.subject,
           q3: norm.q3,
           q4: norm.q4,
-          final_grade: norm.sem2_final_grade ?? norm.final,
-          status: norm.status || (!isNaN(finVal) ? (finVal >= 75 ? "Passed" : "Failed") : "Needs Verification"),
+          final_grade: finalVal,
+          status: norm.status || (evalRes.status === "passed" ? "Passed" : evalRes.status === "failed" ? "Failed" : "Needs Verification"),
           raw_calculated_final: norm.raw_calculated_final,
         };
       });

@@ -13,6 +13,7 @@ export interface DataTableContainerProps {
   filters?: React.ReactNode;
   itemCount?: number;
   totalCount?: number;
+  itemLabel?: string;
   children: React.ReactNode;
   className?: string;
 }
@@ -27,6 +28,7 @@ export function DataTableContainer({
   filters,
   itemCount,
   totalCount,
+  itemLabel,
   children,
   className = "",
 }: DataTableContainerProps) {
@@ -85,8 +87,8 @@ export function DataTableContainer({
           <span>
             Showing <strong className="text-slate-700">{itemCount}</strong>
             {typeof totalCount === "number" && totalCount !== itemCount
-              ? ` of ${totalCount} total`
-              : " records"}
+              ? ` of ${totalCount} total ${itemLabel || "records"}`
+              : ` ${itemLabel || "records"}`}
           </span>
         </div>
       )}

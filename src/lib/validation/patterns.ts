@@ -61,14 +61,15 @@ export function looksLikeDate(value: string): boolean {
   return DATE_PATTERNS.some((p) => p.test(value.trim()));
 }
 
+import { normalizeStrictSex } from "./gradeUtils";
+
 /**
  * Normalize sex value to single letter M or F.
  */
 export function normalizeSex(raw: string | null | undefined): "M" | "F" | "" {
-  if (!raw) return "";
-  const trimmed = String(raw).trim().toUpperCase();
-  if (trimmed === "M" || trimmed === "MALE") return "M";
-  if (trimmed === "F" || trimmed === "FEMALE") return "F";
+  const strict = normalizeStrictSex(raw);
+  if (strict === "Male") return "M";
+  if (strict === "Female") return "F";
   return "";
 }
 

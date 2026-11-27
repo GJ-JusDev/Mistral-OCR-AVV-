@@ -20,6 +20,7 @@
  */
 
 import { splitLearnerName } from "./shsSf1Parser";
+import { normalizeStrictSex } from "../validation/gradeUtils";
 import {
   classifyFieldRecognition,
   buildDocumentRecognitionSummary,
@@ -60,6 +61,7 @@ export interface PsaIdentityFields {
   formatted_name?: string;
   suffix?: string;
   sex?: "M" | "F";
+  sex_label?: "Male" | "Female" | null;
   birth_date?: string;
   birth_place?: {
     hospital?: string;
@@ -833,6 +835,395 @@ function extractParentNameFromSection(
   return undefined;
 }
 
+export interface PsaSexExtractionResult {
+  sex: "M" | "F" | undefined;
+  sexLabel: "Male" | "Female" | null;
+  confidence: number;
+  source: string | null;
+}
+
+/**
+ * PSA Form 102 Item 2. SEX resolver based on mark placement ('X', '/', '\', '✓', '+', '*', ':selected:')
+ * placed before '1 Male' vs '2 Female' on the horizontal line, with spatial bounding-box fallback and confidence.
+ */
+export function extractPsaSexFromMarkPlacement(
+  text: string,
+  rawLayout?: any,
+  options?: {
+    upperSectionText?: string;
+    childSectionText?: string;
+    ocrConfidence?: number;
+  }
+): PsaSexExtractionResult {
+  const baseConfidence = typeof options?.ocrConfidence === "number"
+    ? Math.round(options.ocrConfidence > 1 ? options.ocrConfidence : options.ocrConfidence * 100)
+    : 95;
+
+  const getBBox = (poly?: number[]) => {
+    if (!Array.isArray(poly) || poly.length < 4) return null;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i < poly.length; i += 2) {
+      xs.push(poly[i]);
+      if (i + 1 < poly.length) ys.push(poly[i + 1]);
+    }
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      centerX: (minX + maxX) / 2,
+      centerY: (minY + maxY) / 2,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+  };
+
+  const maleWordPattern = /\b(?:male|malo|mal|ma[il]e|lalaki)\b/i;
+  const femaleWordPattern = /\b(?:female|femalo|fem|fema[il]e|babae)\b/i;
+
+  // 1. Text Pattern Detection
+  const textCandidates = [
+    options?.upperSectionText,
+    options?.childSectionText,
+    text,
+  ].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
+
+  for (const candidate of textCandidates) {
+    let targetBlock = candidate;
+    const anchorMatch = candidate.match(/(?:\b2\.\s*sex\b|\bkasarian\b)/i);
+    if (anchorMatch && anchorMatch.index !== undefined) {
+      const afterAnchor = candidate.slice(anchorMatch.index);
+      const nextAnchor = afterAnchor.match(/(?:\b3\.\s*date\b|\bdate\s*of\s*birth\b|\bpetsa\b|\b4\.\s*place\b|\bplace\s*of\s*birth\b)/i);
+      targetBlock = nextAnchor && nextAnchor.index !== undefined
+        ? afterAnchor.slice(0, nextAnchor.index)
+        : afterAnchor.slice(0, 350);
+    }
+
+    const lines = targetBlock.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const blockHasMale = maleWordPattern.test(targetBlock);
+    const blockHasFemale = femaleWordPattern.test(targetBlock);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // A1. Table cells or pipe lines (e.g. "| 2. SEX | X 1 Male 2 Female |" or "| X | 1 Male | 2 Female |")
+      if (line.includes("|")) {
+        const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
+        for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+          const cell = cells[cIdx];
+          const hasMarkInCell = /[xX×*+/\\✓✔kKvVyY#]|:selected:/.test(cell);
+          if (hasMarkInCell) {
+            if (maleWordPattern.test(cell) && !femaleWordPattern.test(cell)) {
+              return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "table_cell_male" };
+            }
+            if (femaleWordPattern.test(cell) && !maleWordPattern.test(cell)) {
+              return { sex: "F", sexLabel: "Female", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "table_cell_female" };
+            }
+            if (cIdx + 1 < cells.length && maleWordPattern.test(cells[cIdx + 1]) && !femaleWordPattern.test(cells[cIdx + 1])) {
+              return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "table_adjacent_cell_male" };
+            }
+            if (cIdx + 1 < cells.length && femaleWordPattern.test(cells[cIdx + 1]) && !maleWordPattern.test(cells[cIdx + 1])) {
+              return { sex: "F", sexLabel: "Female", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "table_adjacent_cell_female" };
+            }
+          }
+        }
+      }
+
+      // A2. Multi-line above-underline: Line i has "2. SEX" followed by a mark symbol,
+      // and does NOT itself contain "Male" or "Female" (the options appear on line i+1 or i+2)
+      const hasMaleOrFemaleOnLine = maleWordPattern.test(line) || femaleWordPattern.test(line);
+      const sexLineMarkMatch = !hasMaleOrFemaleOnLine && line.match(
+        /(?:2\.\s*sex|sex|kasarian)\b[\s:\-_]*?(\[[xX×*+/\\✓✔kKvVyY#]\]|:selected:|[xX×*+/\\✓✔kKvVyY#])(?:\s*|$|_)/i
+      );
+      if (sexLineMarkMatch) {
+        // Look ahead for the options line (1 Male 2 Female)
+        const nextLine = i + 1 < lines.length ? lines[i + 1] : "";
+        const nextNextLine = i + 2 < lines.length ? lines[i + 2] : "";
+        const targetOptionLine = maleWordPattern.test(nextLine) || femaleWordPattern.test(nextLine) ? nextLine : nextNextLine;
+
+        if (maleWordPattern.test(targetOptionLine) && femaleWordPattern.test(targetOptionLine)) {
+          const markToken = sexLineMarkMatch[1];
+          const markPos = line.lastIndexOf(markToken);
+          const malePos = targetOptionLine.search(maleWordPattern);
+          const femalePos = targetOptionLine.search(femaleWordPattern);
+          if (femalePos !== -1 && malePos !== -1) {
+            const midPoint = (malePos + femalePos) / 2;
+            if (markPos <= midPoint + 4) {
+              return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "text_sex_line_mark_male" };
+            } else {
+              return { sex: "F", sexLabel: "Female", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "text_sex_line_mark_female" };
+            }
+          }
+        } else if (maleWordPattern.test(targetOptionLine) && !femaleWordPattern.test(targetOptionLine)) {
+          return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "text_sex_line_mark_male" };
+        } else {
+          return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "text_sex_line_mark_male" };
+        }
+      }
+
+      // A3. Check for single-line both options: e.g. "_______ 1 Male _______ 2 Female"
+      // or "X 1 Male 2 Female", "___X___ 1 Male _______ 2 Female", "1 Male X 2 Female"
+      const normalizedLine = line.replace(/\|/g, " ");
+      const maleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:1\s*[-.]?\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i);
+      const femaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:2\s*[-.]?\s*)?(?:female|femalo|fem|fema[il]e|babae)\b/i);
+
+      if (maleMatch && femaleMatch && maleMatch.index !== undefined && femaleMatch.index !== undefined && maleMatch.index < femaleMatch.index) {
+        const beforeMale = normalizedLine.slice(0, maleMatch.index);
+        const between = normalizedLine.slice(maleMatch.index + maleMatch[0].length, femaleMatch.index);
+        const afterFemale = normalizedLine.slice(femaleMatch.index + femaleMatch[0].length);
+
+        // Strip item numbers, underscores, punctuation and spacing
+        const cleanBefore = beforeMale
+          .replace(/(?:2\.\s*)?sex\b/gi, "")
+          .replace(/\bkasarian\b/gi, "")
+          .replace(/1\s*[-.]?/g, "")
+          .replace(/[_\s|.:\-_()\[\]{}]/g, "");
+
+        const cleanBetween = between
+          .replace(/1\s*(?:male|malo|mal|ma[il]e|lalaki)/gi, "")
+          .replace(/2\s*[-.]?/g, "")
+          .replace(/[_\s|.:\-_()\[\]{}]/g, "");
+
+        const cleanAfter = afterFemale
+          .replace(/2\s*(?:female|femalo|fem|fema[il]e|babae)/gi, "")
+          .replace(/[_\s|.:\-_()\[\]{}]/g, "");
+
+        const markRegex = /[xX×*+/\\✓✔kKvVyY#]|:selected:/;
+        const markBefore = markRegex.test(cleanBefore) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(beforeMale) || /:selected:/.test(beforeMale);
+        const markBetween = markRegex.test(cleanBetween) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(between) || /:selected:/.test(between);
+        const markAfter = markRegex.test(cleanAfter) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(afterFemale) || /:selected:/.test(afterFemale);
+
+        if (markBefore && !markBetween && !markAfter) {
+          return {
+            sex: "M",
+            sexLabel: "Male",
+            confidence: Math.max(85, Math.min(100, baseConfidence)),
+            source: "text_mark_before_male",
+          };
+        }
+        if ((markBetween || markAfter) && !markBefore) {
+          return {
+            sex: "F",
+            sexLabel: "Female",
+            confidence: Math.max(85, Math.min(100, baseConfidence)),
+            source: "text_mark_before_female",
+          };
+        }
+      }
+
+      // B. Check for mark token preceding "1 Male" or "2 Female" on line
+      const markBeforeMaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*+/\\✓✔kKvVyY#]|:selected:|\[[xX×*+/\\✓✔kKvVyY#]\])\s*[\r\n\s]*_?\s*(?:1\s*[-.]?\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i);
+      const markBeforeFemaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*+/\\✓✔kKvVyY#]|:selected:|\[[xX×*+/\\✓✔kKvVyY#]\])\s*[\r\n\s]*_?\s*(?:2\s*[-.]?\s*)?(?:female|femalo|fem|fema[il]e|babae)\b/i);
+
+      if (markBeforeMaleMatch && !markBeforeFemaleMatch) {
+        return {
+          sex: "M",
+          sexLabel: "Male",
+          confidence: Math.max(85, Math.min(100, baseConfidence)),
+          source: "text_line_mark_male",
+        };
+      }
+      if (markBeforeFemaleMatch && !markBeforeMaleMatch) {
+        return {
+          sex: "F",
+          sexLabel: "Female",
+          confidence: Math.max(85, Math.min(100, baseConfidence)),
+          source: "text_line_mark_female",
+        };
+      }
+
+      // C. Consecutive lines: mark symbol alone on line i, and line i+1 has "1 Male" or "2 Female"
+      const isStandaloneMark =
+        /^\[?[xX×*+/\\✓✔kKvVyY#]\]?$/.test(line) ||
+        /^_+[xX×*+/\\✓✔kKvVyY#]_+$/.test(line) ||
+        line === ":selected:";
+      if (isStandaloneMark && i + 1 < lines.length) {
+        const next = lines[i + 1];
+        if (maleWordPattern.test(next) && femaleWordPattern.test(next)) {
+          const markCol = line.search(/[xX×*+/\\✓✔kKvVyY#]|:selected:/);
+          const maleCol = next.search(maleWordPattern);
+          const femaleCol = next.search(femaleWordPattern);
+          if (maleCol !== -1 && femaleCol !== -1) {
+            const midCol = (maleCol + femaleCol) / 2;
+            if (markCol <= midCol + 4) {
+              return {
+                sex: "M",
+                sexLabel: "Male",
+                confidence: Math.max(85, Math.min(100, baseConfidence)),
+                source: "text_multiline_mark_male",
+              };
+            } else {
+              return {
+                sex: "F",
+                sexLabel: "Female",
+                confidence: Math.max(85, Math.min(100, baseConfidence)),
+                source: "text_multiline_mark_female",
+              };
+            }
+          }
+        }
+        if (maleWordPattern.test(next) && !femaleWordPattern.test(next)) {
+          return {
+            sex: "M",
+            sexLabel: "Male",
+            confidence: Math.max(85, Math.min(100, baseConfidence)),
+            source: "text_multiline_mark_male",
+          };
+        }
+        if (femaleWordPattern.test(next) && !maleWordPattern.test(next)) {
+          return {
+            sex: "F",
+            sexLabel: "Female",
+            confidence: Math.max(85, Math.min(100, baseConfidence)),
+            source: "text_multiline_mark_female",
+          };
+        }
+      }
+
+      // D. Explicit value following "2. SEX:" or "SEX:" or "KASARIAN:"
+      const explicitMatch = line.match(/(?:2\.\s*sex|sex|kasarian)[:\s\-_]+(.*)$/i);
+      if (explicitMatch) {
+        const val = explicitMatch[1].trim();
+        const hasBoth = maleWordPattern.test(val) && femaleWordPattern.test(val);
+        if (!hasBoth) {
+          const norm = normalizeStrictSex(val);
+          if (norm === "Male") {
+            return {
+              sex: "M",
+              sexLabel: "Male",
+              confidence: Math.max(85, Math.min(100, baseConfidence)),
+              source: "text_explicit_male",
+            };
+          } else if (norm === "Female") {
+            return {
+              sex: "F",
+              sexLabel: "Female",
+              confidence: Math.max(85, Math.min(100, baseConfidence)),
+              source: "text_explicit_female",
+            };
+          }
+        }
+      }
+    }
+
+    // E. If the target block only contains one of the options (e.g. only "1 Male" or only "2 Female" without the other)
+    if (blockHasMale && !blockHasFemale) {
+      return {
+        sex: "M",
+        sexLabel: "Male",
+        confidence: Math.max(85, Math.min(100, baseConfidence)),
+        source: "text_single_option_male",
+      };
+    }
+    if (blockHasFemale && !blockHasMale) {
+      return {
+        sex: "F",
+        sexLabel: "Female",
+        confidence: Math.max(85, Math.min(100, baseConfidence)),
+        source: "text_single_option_female",
+      };
+    }
+  }
+
+  // 2. Spatial / Bounding-box Fallback (Azure Document Intelligence)
+  const pages = Array.isArray(rawLayout?.pages)
+    ? rawLayout.pages
+    : Array.isArray(rawLayout)
+    ? [{ words: rawLayout, selectionMarks: [] }]
+    : rawLayout?.words
+    ? [{ words: rawLayout.words, selectionMarks: rawLayout.selectionMarks || [] }]
+    : [];
+
+  if (pages.length > 0) {
+    for (const page of pages) {
+      const words = Array.isArray(page.words) ? page.words : [];
+      const selMarks = Array.isArray(page.selectionMarks) ? page.selectionMarks : [];
+
+      const getWordText = (w: any) => ((w.content || w.text || "") as string).trim();
+
+      const maleWord = words.find((w: any) => /^(?:1\s*[-.]?\s*)?(?:male|malo|mal|ma[il]e|lalaki)$/i.test(getWordText(w)));
+      const femaleWord = words.find((w: any) => /^(?:2\s*[-.]?\s*)?(?:female|femalo|fem|fema[il]e|babae)$/i.test(getWordText(w)));
+
+      if (maleWord && femaleWord && Array.isArray(maleWord.polygon) && Array.isArray(femaleWord.polygon)) {
+        const maleBox = getBBox(maleWord.polygon);
+        const femaleBox = getBBox(femaleWord.polygon);
+
+        if (maleBox && femaleBox && maleBox.centerX < femaleBox.centerX) {
+          const lineHeight = Math.max(maleBox.height, femaleBox.height);
+          // Allow up to 3.5 lines above (where X is typed above the underline or on 2. SEX line)
+          const verticalBandMin = Math.min(maleBox.minY, femaleBox.minY) - lineHeight * 3.5;
+          const verticalBandMax = Math.max(maleBox.maxY, femaleBox.maxY) + lineHeight * 1.8;
+          const midPointX = (maleBox.centerX + femaleBox.centerX) / 2;
+
+          // Candidate marks from words (including lookalikes: X, x, ×, *, +, /, \, ✓, ✔, K, V, Y)
+          for (const w of words) {
+            const content = getWordText(w);
+            const isMark = /^[xX×*+/\\✓✔kKvVyY#]$/.test(content) || /^\[[xX×*+/\\✓✔kKvVyY#]\]$/.test(content) || /^_?[xX×*+/\\✓✔kKvVyY#]_?$/.test(content);
+            if (isMark && Array.isArray(w.polygon)) {
+              const markBox = getBBox(w.polygon);
+              if (markBox && markBox.centerY >= verticalBandMin && markBox.centerY <= verticalBandMax) {
+                const conf = typeof w.confidence === "number" ? Math.round(w.confidence > 1 ? w.confidence : w.confidence * 100) : baseConfidence;
+                if (markBox.centerX <= maleBox.maxX || markBox.centerX < midPointX) {
+                  return {
+                    sex: "M",
+                    sexLabel: "Male",
+                    confidence: Math.max(85, Math.min(100, conf)),
+                    source: "spatial_word_mark_male",
+                  };
+                } else {
+                  return {
+                    sex: "F",
+                    sexLabel: "Female",
+                    confidence: Math.max(85, Math.min(100, conf)),
+                    source: "spatial_word_mark_female",
+                  };
+                }
+              }
+            }
+          }
+
+          // Candidate marks from selectionMarks
+          for (const sm of selMarks) {
+            if (sm.state === "selected" && Array.isArray(sm.polygon)) {
+              const markBox = getBBox(sm.polygon);
+              if (markBox && markBox.centerY >= verticalBandMin && markBox.centerY <= verticalBandMax) {
+                const conf = typeof sm.confidence === "number" ? Math.round(sm.confidence > 1 ? sm.confidence : sm.confidence * 100) : baseConfidence;
+                if (markBox.centerX <= maleBox.maxX || markBox.centerX < midPointX) {
+                  return {
+                    sex: "M",
+                    sexLabel: "Male",
+                    confidence: Math.max(85, Math.min(100, conf)),
+                    source: "spatial_selection_mark_male",
+                  };
+                } else {
+                  return {
+                    sex: "F",
+                    sexLabel: "Female",
+                    confidence: Math.max(85, Math.min(100, conf)),
+                    source: "spatial_selection_mark_female",
+                  };
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    sex: undefined,
+    sexLabel: null,
+    confidence: 0,
+    source: null,
+  };
+}
+
 export function parsePsaBirthCert(
   rawText: string,
   rawLayout?: any,
@@ -970,89 +1361,12 @@ export function parsePsaBirthCert(
     : undefined;
 
   // 3. Sex
-  let sex: "M" | "F" | undefined;
-
-  const extractSexFromBlock = (textToSearch: string): "M" | "F" | undefined => {
-    if (!textToSearch) return undefined;
-    let sexSectionText = textToSearch;
-    const sexAnchorMatch = textToSearch.match(/(?:\b2\.\s*sex\b|\bkasarian\b)/i);
-    if (sexAnchorMatch && sexAnchorMatch.index !== undefined) {
-      const afterSex = textToSearch.slice(sexAnchorMatch.index);
-      const dobAnchorMatch = afterSex.match(/(?:\b3\.\s*date\b|\bdate\s*of\s*birth\b|\bpetsa\b|\b4\.\s*place\b|\bplace\s*of\s*birth\b)/i);
-      sexSectionText = dobAnchorMatch && dobAnchorMatch.index !== undefined
-        ? afterSex.slice(0, dobAnchorMatch.index)
-        : afterSex.slice(0, 300);
-    }
-
-    // Step 1: Multiline line-by-line inspection of sexSectionText for checkmark preceding Male/Female
-    const sexLines = sexSectionText
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    for (let i = 0; i < sexLines.length; i++) {
-      const curr = sexLines[i];
-      const isCheck = /^\[?[xX✓vV\/\*]\]?$/.test(curr);
-      if (isCheck && i + 1 < sexLines.length) {
-        const nextLine = sexLines[i + 1];
-        const nextNextLine = i + 2 < sexLines.length ? sexLines[i + 2] : "";
-        if (
-          /^(?:1\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(nextLine) ||
-          (nextLine === "1" && /^(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(nextNextLine))
-        ) {
-          return "M";
-        }
-        if (
-          /^(?:2\s*)?(?:female|femalo|fem|fema[il]e|babae)\b/i.test(nextLine) ||
-          (nextLine === "2" && /^(?:female|femalo|fem|fema[il]e|babae)\b/i.test(nextNextLine))
-        ) {
-          return "F";
-        }
-      }
-    }
-
-    // Step 2: Proximity regex detection for checkmark/X and 1 Male/Malo vs 2 Female/Femalo
-    const maleChecked =
-      /(?:(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*[\r\n\s]*_?\s*(?:1\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b|1\s*[\r\n\s]*_?\s*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*(?:male|malo|mal|ma[il]e|lalaki)\b|1\s*(?:male|malo|mal|ma[il]e|lalaki)\b\s*[\r\n\s]*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])|\bx_?1\s*(?:male|malo|mal|ma[il]e|lalaki)\b|\b(?:male|malo|mal|ma[il]e|lalaki)\s*[xX✓vV]|\b1\s*(?:male|malo|mal|ma[il]e|lalaki)\s+(?:2\s*(?:female|femalo|fem|fema[il]e|babae)\s*)?\[\s*\]|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:male|malo|mal|ma[il]e|lalaki)\b)/i.test(
-        sexSectionText
-      );
-    const femaleChecked =
-      /(?:(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*[\r\n\s]*_?\s*(?:2\s*)?(?:female|femalo|fem|fema[il]e|babae)\b|2\s*[\r\n\s]*_?\s*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])\s*(?:female|femalo|fem|fema[il]e|babae)\b|2\s*(?:female|femalo|fem|fema[il]e|babae)\b\s*[\r\n\s]*(?:\[[xX✓vV\/\*]\]|\([xX✓vV\/\*]\)|[xX✓vV])|\bx_?2\s*(?:female|femalo|fem|fema[il]e|babae)\b|\b(?:female|femalo|fem|fema[il]e|babae)\s*[xX✓vV]|\b2\s*(?:female|femalo|fem|fema[il]e|babae)\s*\[[xX✓vV\/\*]\]|\b(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:female|femalo|fem|fema[il]e|babae)\b)/i.test(
-        sexSectionText
-      );
-
-    if (maleChecked && !femaleChecked) {
-      return "M";
-    } else if (femaleChecked && !maleChecked) {
-      return "F";
-    }
-
-    // Look for explicit word following "2. SEX" or "SEX:"
-    const sexMatch = sexSectionText.match(
-      /(?:2\.\s*sex|sex|kasarian)[:\s\-_]*(?:1\s*|2\s*|\[[xX✓vV\/\*\s]*\]|\([xX✓vV\/\*\s]*\))*\s*(male|malo|female|femalo|mal|fem|maie|lalaki|babae)\b/i
-    );
-    if (sexMatch) {
-      const s = sexMatch[1].toUpperCase();
-      if (s.startsWith("M") || s === "LALAKI") return "M";
-      else if (s.startsWith("F") || s === "BABAE") return "F";
-    }
-
-    return undefined;
-  };
-
-  // Extract sex preferring upperSectionText, then childSectionText, docChildSection, and finally fullText
-  if (options?.upperSectionText) {
-    sex = extractSexFromBlock(options.upperSectionText);
-  }
-  if (!sex && options?.childSectionText) {
-    sex = extractSexFromBlock(options.childSectionText);
-  }
-  if (!sex && sections.childSectionText) {
-    sex = extractSexFromBlock(sections.childSectionText);
-  }
-  if (!sex && rawText) {
-    sex = extractSexFromBlock(rawText);
-  }
+  const sexExtraction = extractPsaSexFromMarkPlacement(rawText, rawLayout, {
+    upperSectionText: options?.upperSectionText,
+    childSectionText: options?.childSectionText || sections.childSectionText,
+    ocrConfidence,
+  });
+  let sex: "M" | "F" | undefined = sexExtraction.sex;
   if (!sex) {
     warnings.push("Sex could not be reliably extracted from PSA birth certificate.");
   }
@@ -1182,7 +1496,7 @@ export function parsePsaBirthCert(
         .toLowerCase()
         .split(/\s+/)
         .map((t) => t.replace(/[^a-z0-9]/g, ""))
-        .filter((t) => t.length >= 2);
+        .filter((t) => t === "m" || t === "f" || t.length >= 2);
 
       for (const page of rawLayout.pages) {
         if (Array.isArray(page.words)) {
@@ -1311,7 +1625,7 @@ export function parsePsaBirthCert(
     sex: {
       status: sexStatus,
       value: sex,
-      confidence: computeFieldConfidence(sex, sexStatus),
+      confidence: sex ? (sexExtraction.confidence || computeFieldConfidence(sex, sexStatus)) : 0,
     },
     birth_place: {
       status: birthPlaceStatus,
@@ -1343,6 +1657,7 @@ export function parsePsaBirthCert(
       formatted_name: formattedName,
       suffix,
       sex: sex,
+      sex_label: sexExtraction.sexLabel,
       birth_date: birthDate || "",
       birth_place: birthPlace,
       mother_maiden_name: motherMaidenName,

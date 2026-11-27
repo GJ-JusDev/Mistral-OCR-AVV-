@@ -83,6 +83,8 @@ export interface NormalizedBirthDate {
   day: number;
   monthName: MonthFullName;
   monthAbbr: MonthAbbreviation;
+  /** Canonical YYYY/MM/DD notation, e.g. "2004/06/23". */
+  slashYyyyMmDd: string;
   /** The original raw value that was parsed. */
   raw: string;
 }
@@ -183,6 +185,7 @@ function build(year: number | null, month: number | null, day: number | null, ra
   const monthName = MONTH_FULL_NAMES[month - 1];
   const numeric = `${mm}/${dd}/${year}`;
   const textual = `${monthName} ${day}, ${year}`;
+  const slashYyyyMmDd = `${year}/${mm}/${dd}`;
   return {
     iso: `${year}-${mm}-${dd}`,
     numeric,
@@ -193,6 +196,7 @@ function build(year: number | null, month: number | null, day: number | null, ra
     day,
     monthName,
     monthAbbr: MONTH_ABBREVIATIONS[month - 1],
+    slashYyyyMmDd,
     raw,
   };
 }
@@ -304,6 +308,7 @@ export type BirthDateComparisonOutcome = "MATCH" | "MISMATCH" | "UNVERIFIABLE";
 
 export interface BirthDateComparison {
   outcome: BirthDateComparisonOutcome;
+  matches: boolean;
   left: NormalizedBirthDate | null;
   right: NormalizedBirthDate | null;
   leftDisplay: string;
@@ -327,6 +332,7 @@ export function compareBirthDates(
   if (!l || !r) {
     return {
       outcome: "UNVERIFIABLE",
+      matches: false,
       left: l,
       right: r,
       leftDisplay,
@@ -339,6 +345,7 @@ export function compareBirthDates(
   const isMatch = l.iso === r.iso;
   return {
     outcome: isMatch ? "MATCH" : "MISMATCH",
+    matches: isMatch,
     left: l,
     right: r,
     leftDisplay,
@@ -347,4 +354,53 @@ export function compareBirthDates(
       ? `Birth date verified (${l.display}).`
       : `Birth date mismatch: ${l.display} vs ${r.display}.`,
   };
+}
+
+/**
+ * Explicitly shuffle PSA YYYY/MM/DD & DepEd MM/DD/YYYY birthdates into standard MM/DD/YYYY and YYYY/MM/DD notations.
+ */
+export function shuffleBirthDate(
+  input: string | SplitBirthDateFields | null | undefined
+): {
+  mmDdYyyy: string;
+  yyyyMmDd: string;
+  iso: string;
+  year: number;
+  month: number;
+  day: number;
+  raw: string;
+} | null {
+  const norm = normalizeBirthDate(input);
+  if (!norm) return null;
+  const mm = String(norm.month).padStart(2, "0");
+  const dd = String(norm.day).padStart(2, "0");
+  return {
+    mmDdYyyy: `${mm}/${dd}/${norm.year}`,
+    yyyyMmDd: `${norm.year}/${mm}/${dd}`,
+    iso: norm.iso,
+    year: norm.year,
+    month: norm.month,
+    day: norm.day,
+    raw: norm.raw,
+  };
+}
+
+/**
+ * Renders the shuffled canonical MM/DD/YYYY date together with the original document format
+ * e.g. "06/23/2004 (PSA: 2004/06/23)" | "06/23/2004 (SF1: 6/23/04)" | "06/23/2004 (SF9)" | "06/23/2004 (SF10)"
+ */
+export function formatBirthDateWithDocLabel(rawVal: any, docLabel: string): string {
+  if (rawVal === undefined || rawVal === null) return "";
+  const str = String(rawVal).trim();
+  if (!str || str === "—" || str === "-" || str.toLowerCase() === "null" || str.toLowerCase() === "undefined" || str.toLowerCase() === "n/a") {
+    return "";
+  }
+  const norm = normalizeBirthDate(str);
+  if (!norm) return str;
+
+  // If raw format differs from standard MM/DD/YYYY (e.g. 2004/06/23, 2004-06-23, 6/23/04, June 23, 2004)
+  if (str !== norm.numeric) {
+    return `${norm.numeric} (${docLabel}: ${str})`;
+  }
+  return `${norm.numeric} (${docLabel})`;
 }

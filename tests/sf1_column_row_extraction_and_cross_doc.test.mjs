@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { parseShsSf1 } from "../src/lib/ocr/shsSf1Parser.ts";
+import {
+  clusterAndReconstructRows,
+  parseContentStreamTextItems,
+  extractCoordinateAwarePdf,
+} from "../src/lib/ocr/pdfTextExtractor.ts";
 import { evaluateBatchCrossDocumentValidation } from "../src/lib/validation/batchCrossDocumentValidator.ts";
 import {
   resolveDocumentStudentNameDisplay,
@@ -287,6 +292,182 @@ School ID: 500169 Grade Level: Grade 11 Section: Diamond
     assert.equal(res.learners[0].full_name, "Gomez, Justin Loquillano");
     assert.equal(res.learners[0].sex, "M");
     assert.ok(res.learners[0].birth_date === "2004-06-23" || res.learners[0].birth_date === "6/23/04");
+  });
+
+  await t.test("1g. Multi-page SF1 aggregation preserves Page 1 student across blank continuation pages with full header metadata", () => {
+    const page1Text = `
+School ID: 500619  School Name: Taysan Resettlement Integrated School
+Grade Level: 11  Section: CSS 1  School Year: 2025-2026
+111500619123 | Gomez, Justin Loquillano | M | 6/23/04
+`;
+    const page2Text = `
+School ID: 500619  School Name: Taysan Resettlement Integrated School
+Grade Level: 11  Section: CSS 1  School Year: 2025-2026
+Page 2 of 3 Continuation Sheet - No students
+`;
+    const page3Text = `
+School ID: 500619  School Name: Taysan Resettlement Integrated School
+Page 3 of 3 Table Legend & Notes
+`;
+
+    const res1 = parseShsSf1(page1Text);
+    const res2 = parseShsSf1(page2Text);
+    const res3 = parseShsSf1(page3Text);
+
+    // Multi-page aggregation
+    const allLearners = [...res1.learners, ...res2.learners, ...res3.learners];
+    const seen = new Set();
+    const aggregatedLearners = [];
+    for (const l of allLearners) {
+      if (!seen.has(l.lrn)) {
+        seen.add(l.lrn);
+        aggregatedLearners.push(l);
+      }
+    }
+    const noStudentFound = aggregatedLearners.length === 0;
+
+    assert.equal(noStudentFound, false, "Must be false after aggregating all pages");
+    assert.equal(aggregatedLearners.length, 1);
+    assert.equal(aggregatedLearners[0].lrn, "111500619123");
+    assert.equal(aggregatedLearners[0].full_name, "Gomez, Justin Loquillano");
+    assert.equal(res1.header.school_id, "500619");
+    assert.equal(res1.header.school_name, "Taysan Resettlement Integrated School");
+    assert.equal(res1.header.school_year, "2025-2026");
+    assert.equal(res1.header.grade_level, "Grade 11");
+    assert.equal(res1.header.section, "CSS 1");
+  });
+
+  await t.test("1h. Coordinate-aware PDF Reader row reconstruction + Microsoft Azure fusion on a 3-page SF1 PDF", () => {
+    // 1. Digital PDF Stream for Page 1 with coordinate-positioned text items
+    const page1Stream = `
+BT
+1 0 0 1 50 750 Tm (School ID: 500619) Tj
+1 0 0 1 180 750 Tm (School Name: Taysan Resettlement Integrated School) Tj
+1 0 0 1 450 750 Tm (Grade Level: 11) Tj
+1 0 0 1 550 750 Tm (Section: CSS 1) Tj
+1 0 0 1 650 750 Tm (School Year: 2025-2026) Tj
+1 0 0 1 50 700 Tm (111500619123) Tj
+1 0 0 1 150 701 Tm (Gomez, Justin Loquillano) Tj
+1 0 0 1 320 699 Tm (M) Tj
+1 0 0 1 350 700 Tm (6/23/04) Tj
+1 0 0 1 410 700 Tm (16) Tj
+1 0 0 1 440 700 Tm (Albayano) Tj
+1 0 0 1 510 700 Tm (Catholic) Tj
+1 0 0 1 570 700 Tm (126 P2B) Tj
+1 0 0 1 630 700 Tm (Gapo) Tj
+1 0 0 1 670 700 Tm (Daraga) Tj
+1 0 0 1 720 700 Tm (Albay) Tj
+1 0 0 1 760 700 Tm (Gomez, Tito Capangpangan) Tj
+1 0 0 1 890 700 Tm (Loquillano, Jeanne Mejillano) Tj
+1 0 0 1 1020 700 Tm (CSS 1) Tj
+ET
+`;
+    // Page 2 & 3 streams with only headers and legends
+    const page2Stream = `
+BT
+1 0 0 1 50 750 Tm (School ID: 500619) Tj
+1 0 0 1 180 750 Tm (School Name: Taysan Resettlement Integrated School) Tj
+1 0 0 1 450 750 Tm (Grade Level: 11) Tj
+1 0 0 1 550 750 Tm (Section: CSS 1) Tj
+1 0 0 1 650 750 Tm (School Year: 2025-2026) Tj
+1 0 0 1 50 700 Tm (LRN) Tj
+1 0 0 1 150 700 Tm (NAME) Tj
+1 0 0 1 320 700 Tm (Sex) Tj
+1 0 0 1 350 700 Tm (BIRTH DATE) Tj
+ET
+`;
+    const page3Stream = `
+BT
+1 0 0 1 50 750 Tm (REMARKS / INDICATORS: Transferred in (T/I) | Transferred out (T/O) | Dropped out (DRP)) Tj
+1 0 0 1 50 700 Tm (LEGEND AND SUMMARY OF ENROLMENT) Tj
+ET
+`;
+
+    const page1Items = parseContentStreamTextItems(page1Stream);
+    const page2Items = parseContentStreamTextItems(page2Stream);
+    const page3Items = parseContentStreamTextItems(page3Stream);
+
+    const rowsPage1 = clusterAndReconstructRows(page1Items);
+    const rowsPage2 = clusterAndReconstructRows(page2Items);
+    const rowsPage3 = clusterAndReconstructRows(page3Items);
+
+    // Verify row reconstruction joins columns with " | "
+    assert.ok(
+      rowsPage1.some((r) => r.startsWith("111500619123 | Gomez, Justin Loquillano | M | 6/23/04")),
+      "Row must reconstruct with ' | ' column separators"
+    );
+
+    const allReconstructedRows = [...rowsPage1, ...rowsPage2, ...rowsPage3];
+
+    // Azure Document Intelligence prebuilt-layout table mock
+    const mockAzureLayout = {
+      pages: [
+        {
+          pageNumber: 1,
+          tables: [
+            {
+              _pageNumber: 1,
+              cells: [
+                { rowIndex: 0, columnIndex: 0, content: "LRN" },
+                { rowIndex: 0, columnIndex: 1, content: "NAME (Last Name, First Name, Middle Name)" },
+                { rowIndex: 0, columnIndex: 2, content: "Sex (M/F)" },
+                { rowIndex: 0, columnIndex: 3, content: "BIRTH DATE" },
+                { rowIndex: 1, columnIndex: 0, content: "111500619123" },
+                { rowIndex: 1, columnIndex: 1, content: "Gomez, Justin Loquillano" },
+                { rowIndex: 1, columnIndex: 2, content: "M" },
+                { rowIndex: 1, columnIndex: 3, content: "6/23/04" },
+              ],
+            },
+          ],
+        },
+        {
+          pageNumber: 2,
+          tables: [
+            {
+              _pageNumber: 2,
+              cells: [
+                { rowIndex: 0, columnIndex: 0, content: "LRN" },
+                { rowIndex: 0, columnIndex: 1, content: "NAME" },
+                { rowIndex: 0, columnIndex: 2, content: "Sex" },
+                { rowIndex: 0, columnIndex: 3, content: "BIRTH DATE" },
+                { rowIndex: 1, columnIndex: 0, content: "" },
+                { rowIndex: 1, columnIndex: 1, content: "" },
+              ],
+            },
+          ],
+        },
+        {
+          pageNumber: 3,
+          tables: [
+            {
+              _pageNumber: 3,
+              cells: [
+                { rowIndex: 0, columnIndex: 0, content: "REMARKS / INDICATORS" },
+                { rowIndex: 0, columnIndex: 1, content: "LEGEND" },
+              ],
+            },
+          ],
+        },
+      ],
+      reconstructedRows: allReconstructedRows,
+    };
+
+    const rawFusedText = allReconstructedRows.join("\n");
+    const result = parseShsSf1(rawFusedText, mockAzureLayout);
+
+    assert.equal(result.learners.length, 1, "learners.length === 1");
+    assert.equal(result.no_student_found, false, "no_student_found === false");
+    const l = result.learners[0];
+    assert.equal(l.lrn, "111500619123", 'lrn === "111500619123"');
+    assert.equal(l.name, "Gomez, Justin Loquillano", 'name === "Gomez, Justin Loquillano"');
+    assert.equal(l.sex, "M", 'sex === "M"');
+    assert.equal(l.birth_date, "6/23/04", 'birth_date === "6/23/04"');
+    assert.equal(l.section, "CSS 1", 'section === "CSS 1"');
+    assert.equal(result.header.school_id, "500619", 'school_id === "500619"');
+    assert.equal(result.header.school_name, "Taysan Resettlement Integrated School", 'school_name === "Taysan Resettlement Integrated School"');
+    assert.equal(result.header.school_year, "2025-2026", 'school_year === "2025-2026"');
+    assert.equal(result.header.grade_level, "Grade 11", 'grade_level === "Grade 11"');
+    assert.equal(result.header.section, "CSS 1", 'header.section === "CSS 1"');
   });
 
   // ===========================================================================
@@ -576,5 +757,26 @@ School ID: 500169 Grade Level: Grade 11 Section: Diamond
     const renderedGeneric = resolveDocumentStudentNameDisplay(genericDoc);
     assert.notEqual(renderedGeneric, "Incomplete Name (LEARNER'S — Needs Review)");
     assert.equal(renderedGeneric, "-");
+  });
+
+  await t.test("5. Target student name prioritization in SF1 extraction from SF9 anchor", () => {
+    const multiLearnerText = `
+School ID: 500169  School Name: Tagum City National High School
+Grade Level: Grade 11  Section: Diamond  School Year: 2026-2027
+
+MALE
+1 | 111304501972 | Latonero, Kenneth Abad | M | 05/12/2005
+2 | 111500619123 | Gomez, Justin Loquillano | M | 06/23/2004
+`;
+    // Prioritize Gomez from SF9
+    const res = parseShsSf1(multiLearnerText, undefined, 0.95, {
+      targetStudentName: "Gomez, Justin Loquillano",
+      targetLrn: "111500619123",
+    });
+
+    assert.equal(res.learners.length, 2);
+    assert.equal(res.learners[0].full_name, "Gomez, Justin Loquillano", "Target student must be moved to index 0");
+    assert.equal(res.learners[0].lrn, "111500619123");
+    assert.equal(res.target_matched, true);
   });
 });
