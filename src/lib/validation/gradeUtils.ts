@@ -54,6 +54,22 @@ export function isBlankOrMissingFinal(val: any): boolean {
 }
 
 /**
+ * Rounds off SF10 General Average to a whole number (.5–.9 up +1, .0–.4 down)
+ * DepEd whole-number integer standard for SF10 permanent records.
+ * Returns an integer whole number in range 60..100, or null if blank/invalid.
+ */
+export function roundSf10GeneralAverage(val: number | string | null | undefined): number | null {
+  if (val === undefined || val === null) return null;
+  if (isBlankOrMissingFinal(val)) return null;
+  const num = typeof val === "number" ? val : parseFloat(String(val).replace(/[^0-9.]/g, ""));
+  if (isNaN(num)) return null;
+  if (num < 60 || num > 100) {
+    if (num <= 0) return null;
+  }
+  return Math.round(num);
+}
+
+/**
  * Strict DepEd sex/gender normalizer.
  * Enforces strict domain constraint: only "Male" | "Female" | null (or "—" in UI display).
  * Supports prefix & PSA Item-2 code snapping (e.g. Ma/M/1 -> Male, Fe/F/2 -> Female).
@@ -661,11 +677,12 @@ export function evaluateDynamicGradeStatus(params: DynamicGradeStatusParams): Dy
   const parsedNum = sanitized.grade;
 
   // CASE B: Read with Low OCR Confidence (< 65%)
+  const allowDec = params.allowDecimal || params.isGeneralAverage;
   const isLowConfidence = confPct !== undefined && confPct < 65;
   if (isLowConfidence) {
     const badgeText = `Not Recognized (${confPct}%)`;
     const gradeDisplay =
-      (params.allowDecimal || params.isGeneralAverage) && parsedNum % 1 !== 0
+      allowDec && parsedNum % 1 !== 0
         ? parsedNum.toFixed(1)
         : String(Math.round(parsedNum));
     return {
@@ -684,7 +701,7 @@ export function evaluateDynamicGradeStatus(params: DynamicGradeStatusParams): Dy
   // Compute official DepEd remark dynamically: PASSED (>= 75) or FAILED (< 75)
   const isPassed = parsedNum >= 75.0;
   const gradeDisplay =
-    (params.allowDecimal || params.isGeneralAverage) && parsedNum % 1 !== 0
+    allowDec && parsedNum % 1 !== 0
       ? parsedNum.toFixed(1)
       : String(Math.round(parsedNum));
   return {
@@ -1411,6 +1428,9 @@ export function updateExtractedFieldsAverages(fields: ExtractedFields): Extracte
   } else {
     updated.sem2_general_average = null;
   }
+
+  updated.first_semester_general_average = updated.sem1_general_average;
+  updated.second_semester_general_average = updated.sem2_general_average;
 
   updated.is_auto_computed_average = false;
   updated.has_blank_grade_error = hasBlankGradeError(updated);

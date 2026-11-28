@@ -33,7 +33,7 @@ import {
   type SplitBirthDateFields,
 } from "./birthDateNormalizer";
 import { levenshteinDistance } from "./studentMatcher";
-import { evaluateDynamicGradeStatus, isBlankOrMissingFinal, normalizeObservedValueMarking, sanitizeLearnersObservedValues } from "./gradeUtils";
+import { evaluateDynamicGradeStatus, isBlankOrMissingFinal, normalizeObservedValueMarking, sanitizeLearnersObservedValues, roundSf10GeneralAverage } from "./gradeUtils";
 export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
 export {
   normalizeBirthDate,
@@ -49,6 +49,21 @@ export {
 import { normalizeSex, normalizeLrn, isValidLrn } from "./patterns";
 import { normalizeStrictSex, validateConsecutiveSchoolYear } from "./gradeUtils";
 export { normalizeSex, normalizeStrictSex, validateConsecutiveSchoolYear, normalizeLrn, isValidLrn };
+
+/**
+ * Normalizes Senior High School Grade Level strings for cross-document comparison.
+ * Strips "Grade", "Gr.", "G", "Level", non-alphanumerics, and whitespace.
+ * e.g., "Grade 11", "11", "G11", "GRADE 11", "Gr. 11" -> "11"
+ * e.g., "Grade 12", "12", "G12", "GRADE 12", "Gr. 12" -> "12"
+ */
+export function normalizeGradeLevelForComparison(val: any): string {
+  if (val === undefined || val === null) return "";
+  let s = String(val).trim().toUpperCase();
+  s = s.replace(/\b(?:GRADE|LEVEL|GR\.|GR|G)\b/gi, "").replace(/[^0-9A-Z]/g, "").trim();
+  if (s.includes("12")) return "12";
+  if (s.includes("11")) return "11";
+  return s;
+}
 import {
   normalizeDepEdMonthKey,
   formatDepEdMonthDisplay,
@@ -1987,7 +2002,22 @@ export function evaluate4StateRowStatus(row: Partial<UnifiedFieldComparisonRow>)
 
   // Collect applicable document values
   const applicableEntries: Array<{ doc: string; val: any }> = [];
-  if (!isLrn && !isBlank(psaValue) && String(psaValue) !== "Civil Document (No DepEd LRN)") {
+  const isPsaExcluded =
+    isLrn ||
+    category === "SCHOOL_CONTEXT" ||
+    category === "ACADEMIC" ||
+    category === "PROMOTION" ||
+    field.startsWith("attendance_") ||
+    field.startsWith("grade_") ||
+    field === "general_average" ||
+    field === "school_id" ||
+    field === "school_year" ||
+    field === "grade_level" ||
+    field === "section" ||
+    field === "track_strand" ||
+    String(psaValue || "").includes("Civil Document");
+
+  if (!isPsaExcluded && !isBlank(psaValue)) {
     applicableEntries.push({ doc: "PSA", val: psaValue });
   }
   if (!isBlank(sf1Value)) applicableEntries.push({ doc: "SF1", val: sf1Value });
@@ -2002,8 +2032,11 @@ export function evaluate4StateRowStatus(row: Partial<UnifiedFieldComparisonRow>)
     return "NO DATA";
   }
 
-  // Only 1 document has a value
+  // Only 1 document has a value: DepEd School ID with zero conflicting school forms evaluates to MATCH
   if (applicableEntries.length === 1) {
+    if (field === "school_id") {
+      return "MATCH";
+    }
     return "INCOMPLETE";
   }
 
@@ -2076,7 +2109,21 @@ export function evaluate4StateRowStatus(row: Partial<UnifiedFieldComparisonRow>)
     return "MATCH";
   }
 
+  if (field === "grade_level" || field.startsWith("grade_level")) {
+    const baseG = normalizeGradeLevelForComparison(applicableEntries[0].val);
+    for (let i = 1; i < applicableEntries.length; i++) {
+      const curG = normalizeGradeLevelForComparison(applicableEntries[i].val);
+      if (baseG && curG && baseG !== curG) {
+        return "MISMATCH";
+      }
+    }
+    return "MATCH";
+  }
+
   if (field === "school_id") {
+    if (applicableEntries.length === 1) {
+      return "MATCH";
+    }
     const baseId = String(applicableEntries[0].val).trim();
     for (let i = 1; i < applicableEntries.length; i++) {
       const curId = String(applicableEntries[i].val).trim();
@@ -2292,6 +2339,10 @@ function normalizeAcademicSchoolYear(value: any): string {
 }
 
 function normalizeGradingPeriod(value: any): string {
+  const normSem = sf10NormSemester(value);
+  if (normSem) return normSem.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (value === 1 || value === "1") return "1stsemester";
+  if (value === 2 || value === "2") return "2ndsemester";
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
@@ -2309,7 +2360,21 @@ function hasAcademicGradeContext(grade: AcademicGradeItem): boolean {
 }
 
 function sameAcademicGradeContext(left: AcademicGradeItem, right: AcademicGradeItem): boolean {
-  if (!hasAcademicGradeContext(left) || !hasAcademicGradeContext(right)) return false;
+  if (!hasAcademicGradeContext(left) || !hasAcademicGradeContext(right)) {
+    const semL = sf10NormSemester(left.semester);
+    const semR = sf10NormSemester(right.semester);
+    if (semL && semR) {
+      if (semL !== semR) return false;
+      const syL = normalizeAcademicSchoolYear(left.schoolYear);
+      const syR = normalizeAcademicSchoolYear(right.schoolYear);
+      if (syL && syR && syL !== syR) return false;
+      const glL = normalizeAcademicGradeLevel(left.gradeLevel);
+      const glR = normalizeAcademicGradeLevel(right.gradeLevel);
+      if (glL && glR && glL !== glR) return false;
+      return true;
+    }
+    return false;
+  }
   if (
     normalizeAcademicSchoolYear(left.schoolYear) !== normalizeAcademicSchoolYear(right.schoolYear) ||
     normalizeAcademicGradeLevel(left.gradeLevel) !== normalizeAcademicGradeLevel(right.gradeLevel) ||
@@ -2317,7 +2382,9 @@ function sameAcademicGradeContext(left: AcademicGradeItem, right: AcademicGradeI
   ) return false;
   const leftPeriod = normalizeGradingPeriod(left.gradingPeriod);
   const rightPeriod = normalizeGradingPeriod(right.gradingPeriod);
-  return !leftPeriod && !rightPeriod ? true : leftPeriod !== "" && leftPeriod === rightPeriod;
+  const normSem = normalizeGradingPeriod(left.semester);
+  if (!leftPeriod || !rightPeriod || leftPeriod === normSem || rightPeriod === normSem) return true;
+  return leftPeriod === rightPeriod;
 }
 
 function sameAcademicContextIgnoringPeriod(left: AcademicGradeItem, right: AcademicGradeItem): boolean {
@@ -2355,38 +2422,73 @@ export function extractAcademicGradeRecords(
   for (const record of records) {
     const raw = record.raw || {};
     const sources: Array<{ grade: any; semesterRecord?: any }> = [];
+
+    // 1. Array of semester blocks (shs_semesters, scholastic_records, completed_semesters)
+    const semesterBlocks = [
+      ...(Array.isArray(raw.shs_semesters) ? raw.shs_semesters : []),
+      ...(Array.isArray(raw.scholastic_records) ? raw.scholastic_records : []),
+      ...(Array.isArray(raw.completed_semesters) ? raw.completed_semesters : []),
+    ];
+    for (const semesterRecord of semesterBlocks) {
+      for (const grade of Array.isArray(semesterRecord.subjects) ? semesterRecord.subjects : []) {
+        sources.push({ grade, semesterRecord });
+      }
+    }
+
+    // 2. Explicit first semester grades / subjects
+    const s1List = Array.isArray(raw.first_semester_grades)
+      ? raw.first_semester_grades
+      : Array.isArray(raw.firstSemesterSubjects)
+      ? raw.firstSemesterSubjects
+      : [];
+    for (const grade of s1List) {
+      sources.push({ grade, semesterRecord: { semester: "1st Semester" } });
+    }
+
+    // 3. Explicit second semester grades / subjects
+    const s2List = Array.isArray(raw.second_semester_grades)
+      ? raw.second_semester_grades
+      : Array.isArray(raw.secondSemesterSubjects)
+      ? raw.secondSemesterSubjects
+      : [];
+    for (const grade of s2List) {
+      sources.push({ grade, semesterRecord: { semester: "2nd Semester" } });
+    }
+
+    // 4. Flat grades list
     for (const grade of Array.isArray(raw.grades) ? raw.grades : []) {
       sources.push({ grade });
-    }
-    if (documentType === "sf10") {
-      for (const semesterRecord of Array.isArray(raw.completed_semesters) ? raw.completed_semesters : []) {
-        for (const grade of Array.isArray(semesterRecord.subjects) ? semesterRecord.subjects : []) {
-          sources.push({ grade, semesterRecord });
-        }
-      }
     }
 
     for (const { grade, semesterRecord } of sources) {
       const schoolYear =
         grade.school_year || grade.schoolYear ||
         semesterRecord?.school_year || semesterRecord?.schoolYear ||
-        (!semesterRecord ? raw.school_year || raw.schoolYear || fallbackContext?.schoolYear : undefined);
+        raw.school_year || raw.schoolYear || fallbackContext?.schoolYear;
       const gradeLevel =
         grade.grade_level || grade.gradeLevel ||
         semesterRecord?.grade_level || semesterRecord?.gradeLevel ||
-        (!semesterRecord ? raw.grade_level || raw.gradeLevel || fallbackContext?.gradeLevel : undefined);
-      const semester = grade.semester || semesterRecord?.semester || raw.semester;
+        raw.grade_level || raw.gradeLevel || fallbackContext?.gradeLevel;
+      const rawSem = grade.semester ?? semesterRecord?.semester ?? raw.semester;
+      let inferredSem = sf10NormSemester(rawSem);
+      if (!inferredSem) {
+        if (rawSem === 1 || rawSem === "1") inferredSem = "1st Semester";
+        else if (rawSem === 2 || rawSem === "2") inferredSem = "2nd Semester";
+        else if (grade.q3 !== undefined || grade.q4 !== undefined) inferredSem = "2nd Semester";
+        else if (grade.q1 !== undefined || grade.q2 !== undefined) inferredSem = "1st Semester";
+      }
+      const semester = inferredSem || rawSem || "1st Semester";
       const gradingPeriod =
         grade.grading_period || grade.gradingPeriod || grade.grading_period_name ||
-        grade.quarter || grade.period;
-      const finalGrade = grade.final ?? grade.finalGrade ?? grade.final_grade ?? grade.final_mark;
+        grade.quarter || grade.period || semester;
+      const finalGrade = grade.final ?? grade.finalGrade ?? grade.final_grade ?? grade.final_mark ?? grade.sem_final_grade ?? grade.recomputed_final_grade;
       expanded.push({
         ...grade,
         subject: String(grade.subject || ""),
         final: finalGrade,
         finalGrade,
-        quarter1: grade.quarter1 ?? grade.q1,
-        quarter2: grade.quarter2 ?? grade.q2,
+        quarter1: grade.quarter1 ?? grade.q1 ?? grade.q3,
+        quarter2: grade.quarter2 ?? grade.q2 ?? grade.q4,
         semester,
         schoolYear,
         gradeLevel,
@@ -2426,18 +2528,21 @@ export function extractAcademicGradeRecords(
 
   const deduplicated = new Map<string, typeof expanded[number]>();
   for (const grade of expanded) {
+    const normSub = normalizeSubjectName(grade.subject);
+    if (!normSub) continue;
     const key = [
       normalizeAcademicSchoolYear(grade.schoolYear),
       normalizeAcademicGradeLevel(grade.gradeLevel),
-      normalizeAttendanceMonthKey(grade.semester),
-      normalizeGradingPeriod(grade.gradingPeriod),
-      normalizeSubjectName(grade.subject),
-      normalizeAcademicGradeValue(grade.finalGrade),
-      normalizeAcademicGradeValue(grade.quarter1),
-      normalizeAcademicGradeValue(grade.quarter2),
+      normalizeGradingPeriod(grade.semester),
+      normSub,
     ].join("|");
     const existing = deduplicated.get(key);
     if (existing) {
+      if (existing.finalGrade === undefined && grade.finalGrade !== undefined) {
+        existing.finalGrade = grade.finalGrade;
+      }
+      if (existing.quarter1 === undefined && grade.quarter1 !== undefined) existing.quarter1 = grade.quarter1;
+      if (existing.quarter2 === undefined && grade.quarter2 !== undefined) existing.quarter2 = grade.quarter2;
       existing.sourceDocumentIds = Array.from(new Set([...existing.sourceDocumentIds, ...grade.sourceDocumentIds]));
       const sourceTraces = [...(existing.sourceTraces || []), ...(grade.sourceTraces || [])];
       existing.sourceTraces = sourceTraces.filter((trace, index) =>
@@ -2449,7 +2554,7 @@ export function extractAcademicGradeRecords(
         ) === index
       );
     } else {
-      deduplicated.set(key, grade);
+      deduplicated.set(key, { ...grade });
     }
   }
   return Array.from(deduplicated.values());
@@ -3487,6 +3592,7 @@ export function evaluateUnifiedStudentValidation(
     field: "school_id",
     category: "SCHOOL_CONTEXT",
     label: "DepEd School ID",
+    psaValue: hasPsa ? "Civil Document (N/A)" : undefined,
     sf1Value: sf1Raw.school_id || undefined,
     sf2Value: primarySf2Raw.school_id || undefined,
     sf5aValue: sf5aRaw.school_id || undefined,
@@ -3506,18 +3612,31 @@ export function evaluateUnifiedStudentValidation(
     { doc: "SF10-SHS", val: sf10Raw.school_id },
   ].filter((s) => Boolean(s.val));
   schoolIdRow.sourcesPresent = schoolIdSources.map((s) => s.doc);
-  for (const src of schoolIdSources) {
-    if (src.val && src.val !== "500169" && src.val !== schoolId) {
-      schoolIdRow.status = "MISMATCH";
-      schoolIdRow.isMatch = false;
-      schoolIdRow.notes = `Conflicting School ID on ${src.doc}: "${src.val}" (Expected: 500169).`;
-      discrepancies.push({
-        field: "school_id",
-        sourceValue: "500169",
-        targetValue: src.val,
-        severity: "CRITICAL",
-        description: `School ID conflict: ${src.doc} has "${src.val}", differing from official school ID 500169.`,
-      });
+
+  if (schoolIdSources.length === 0) {
+    schoolIdRow.status = "NO DATA";
+    schoolIdRow.isMatch = true;
+    schoolIdRow.notes = "DepEd School ID not printed on uploaded documents.";
+  } else if (schoolIdSources.length === 1) {
+    schoolIdRow.status = "MATCH";
+    schoolIdRow.isMatch = true;
+    schoolIdRow.notes = `School ID (${schoolIdSources[0].val}) validated from ${schoolIdSources[0].doc} without conflicting documents.`;
+  } else {
+    const baseId = String(schoolIdSources[0].val).trim();
+    for (let i = 1; i < schoolIdSources.length; i++) {
+      const curId = String(schoolIdSources[i].val).trim();
+      if (baseId !== curId) {
+        schoolIdRow.status = "MISMATCH";
+        schoolIdRow.isMatch = false;
+        schoolIdRow.notes = `Conflicting School ID: ${schoolIdSources[0].doc} ("${baseId}") vs ${schoolIdSources[i].doc} ("${curId}").`;
+        discrepancies.push({
+          field: "school_id",
+          sourceValue: baseId,
+          targetValue: curId,
+          severity: "CRITICAL",
+          description: `School ID conflict: ${schoolIdSources[0].doc} has "${baseId}", while ${schoolIdSources[i].doc} has "${curId}".`,
+        });
+      }
     }
   }
   fieldsMatrix.push(schoolIdRow);
@@ -3527,6 +3646,7 @@ export function evaluateUnifiedStudentValidation(
     field: "school_year",
     category: "SCHOOL_CONTEXT",
     label: "School Year",
+    psaValue: hasPsa ? "Civil Document (N/A)" : undefined,
     sf1Value: sf1Raw.school_year || undefined,
     sf2Value: primarySf2Raw.school_year || undefined,
     sf5aValue: sf5aRaw.school_year || undefined,
@@ -3577,6 +3697,7 @@ export function evaluateUnifiedStudentValidation(
     field: "grade_level",
     category: "SCHOOL_CONTEXT",
     label: "Grade Level",
+    psaValue: hasPsa ? "Civil Document (N/A)" : undefined,
     sf1Value: sf1Raw.grade_level || undefined,
     sf2Value: primarySf2Raw.grade_level || undefined,
     sf5aValue: sf5aRaw.grade_level || undefined,
@@ -3592,23 +3713,24 @@ export function evaluateUnifiedStudentValidation(
     { doc: "SF2-SHS", val: primarySf2Raw.grade_level },
     { doc: "SF5A-SHS", val: sf5aRaw.grade_level },
     { doc: "SF9-SHS", val: sf9Raw.grade_level },
+    { doc: "SF10-SHS", val: sf10Raw.grade_level },
   ].filter((s) => Boolean(s.val));
   gradeRow.sourcesPresent = gradeSources.map((s) => s.doc);
 
   if (gradeSources.length >= 2) {
-    const baseG = gradeSources[0].val?.includes("12") ? "Grade 12" : "Grade 11";
+    const baseG = normalizeGradeLevelForComparison(gradeSources[0].val);
     for (let i = 1; i < gradeSources.length; i++) {
-      const curG = gradeSources[i].val?.includes("12") ? "Grade 12" : "Grade 11";
-      if (baseG !== curG) {
+      const curG = normalizeGradeLevelForComparison(gradeSources[i].val);
+      if (baseG && curG && baseG !== curG) {
         gradeRow.status = "MISMATCH";
         gradeRow.isMatch = false;
-        gradeRow.notes = `Grade level conflict: ${gradeSources[0].doc} (${baseG}) vs ${gradeSources[i].doc} (${curG}).`;
+        gradeRow.notes = `Grade level conflict: ${gradeSources[0].doc} (${gradeSources[0].val}) vs ${gradeSources[i].doc} (${gradeSources[i].val}).`;
         discrepancies.push({
           field: "grade_level",
-          sourceValue: baseG,
-          targetValue: curG,
+          sourceValue: gradeSources[0].val,
+          targetValue: gradeSources[i].val,
           severity: "CRITICAL",
-          description: `Grade level mismatch: ${gradeSources[0].doc} reports "${baseG}", while ${gradeSources[i].doc} reports "${curG}".`,
+          description: `Grade level mismatch: ${gradeSources[0].doc} reports "${gradeSources[0].val}", while ${gradeSources[i].doc} reports "${gradeSources[i].val}".`,
         });
       }
     }
@@ -3630,7 +3752,7 @@ export function evaluateUnifiedStudentValidation(
       });
     }
   }
-  if (hasSf10) gradeRow.sourcesPresent.push("SF10-SHS");
+  if (hasSf10 && !gradeRow.sourcesPresent.includes("SF10-SHS")) gradeRow.sourcesPresent.push("SF10-SHS");
   fieldsMatrix.push(gradeRow);
 
   // 4. Section
@@ -3638,6 +3760,7 @@ export function evaluateUnifiedStudentValidation(
     field: "section",
     category: "SCHOOL_CONTEXT",
     label: "Section Assignment",
+    psaValue: hasPsa ? "Civil Document (N/A)" : undefined,
     sf1Value: sf1Raw.section || undefined,
     sf2Value: primarySf2Raw.section || undefined,
     sf5aValue: sf5aRaw.section || undefined,
@@ -3684,6 +3807,7 @@ export function evaluateUnifiedStudentValidation(
     field: "track_strand",
     category: "SCHOOL_CONTEXT",
     label: "Track & Strand",
+    psaValue: hasPsa ? "Civil Document (N/A)" : undefined,
     sf1Value: sf1Raw.strand || sf1Raw.track_strand || undefined,
     sf5aValue: sf5aRaw.strand || undefined,
     sf5bValue: sf5bRaw.strand || undefined,
@@ -3870,7 +3994,7 @@ export function evaluateUnifiedStudentValidation(
 
     const fullName = (getDepEdMonthFullName(mKey) || mKey).toLowerCase();
     const primaryAttRow: UnifiedFieldComparisonRow = {
-      field: `attendance_${fullName}`,
+      field: `attendance_${mKey}`,
       category: "ATTENDANCE",
       label: `Attendance — ${formatDepEdMonthDisplay(monthName)}`,
       sf1Value: hasSf1 ? "Enrolled" : undefined,
@@ -4009,8 +4133,16 @@ export function evaluateUnifiedStudentValidation(
   // ---------------------------------------------------------------------------
   // D. ACADEMIC RECORDS MATRIX (SF9 vs SF10 Semestral Grades & General Average)
   // ---------------------------------------------------------------------------
-  const sf9Grades: AcademicGradeItem[] = Array.isArray(sf9Raw.grades) ? sf9Raw.grades : [];
-  const sf10Grades: AcademicGradeItem[] = Array.isArray(sf10Raw.grades) ? sf10Raw.grades : [];
+  const sf9Grades: AcademicGradeItem[] = extractAcademicGradeRecords(
+    sf9Records.length ? sf9Records : (sf9 ? [sf9] : sf9Raw ? [{ raw: sf9Raw }] : []),
+    "sf9",
+    documentContext
+  );
+  const sf10Grades: AcademicGradeItem[] = extractAcademicGradeRecords(
+    sf10Records.length ? sf10Records : (sf10 ? [sf10] : sf10Raw ? [{ raw: sf10Raw }] : []),
+    "sf10",
+    documentContext
+  );
 
   // General Average Comparison
   const sf9GenAvg = parseNumericVal(sf9Raw.general_average);
@@ -4189,50 +4321,76 @@ export function evaluateUnifiedStudentValidation(
   }
   fieldsMatrix.push(genAvgRow);
 
-  // Subject grades compare only within a complete academic context.
-  const sf9GradeGroups = new Map<string, AcademicGradeItem[]>();
-  for (const grade of sf9Grades) {
-    const key = academicGradeScopeKey(grade);
-    sf9GradeGroups.set(key, [...(sf9GradeGroups.get(key) || []), grade]);
+  // Subject grades compare across all semesters from BOTH SF9 and SF10
+  const allSubjectEntries = new Map<string, {
+    rawSubject: string;
+    scopeKey: string;
+    semester: string;
+    schoolYear: string;
+    gradeLevel: string;
+    sf9Candidates: AcademicGradeItem[];
+    matchingSf10: AcademicGradeItem[];
+  }>();
+
+  for (const g9 of sf9Grades) {
+    const normSub = normalizeSubjectName(g9.subject);
+    if (!normSub) continue;
+    const semKey = normalizeGradingPeriod(g9.semester) || "1stsemester";
+    const groupKey = `${semKey}|${normSub}`;
+    if (!allSubjectEntries.has(groupKey)) {
+      allSubjectEntries.set(groupKey, {
+        rawSubject: g9.subject,
+        scopeKey: academicGradeScopeKey(g9),
+        semester: g9.semester || "1st Semester",
+        schoolYear: g9.schoolYear || initialSchoolYear,
+        gradeLevel: g9.gradeLevel || initialGradeLevel,
+        sf9Candidates: [],
+        matchingSf10: [],
+      });
+    }
+    allSubjectEntries.get(groupKey)!.sf9Candidates.push(g9);
   }
-  const sf10Contexts: AcademicGradeItem[] = [
-    ...sf10Grades,
-    ...sf10Records.flatMap((record) =>
-      (Array.isArray(record.raw?.completed_semesters) ? record.raw.completed_semesters : []).map((semester: any) => ({
-        subject: "",
-        schoolYear: semester.school_year || semester.schoolYear,
-        gradeLevel: semester.grade_level || semester.gradeLevel,
-        semester: semester.semester,
-        gradingPeriod: semester.grading_period || semester.gradingPeriod,
-      }))
-    ),
-  ].filter(hasAcademicGradeContext);
-  for (const [scopeKey, sf9Candidates] of sf9GradeGroups) {
+
+  for (const g10 of sf10Grades) {
+    const normSub = normalizeSubjectName(g10.subject);
+    if (!normSub) continue;
+    const semKey = normalizeGradingPeriod(g10.semester) || "1stsemester";
+    const groupKey = `${semKey}|${normSub}`;
+    if (!allSubjectEntries.has(groupKey)) {
+      allSubjectEntries.set(groupKey, {
+        rawSubject: g10.subject,
+        scopeKey: academicGradeScopeKey(g10),
+        semester: g10.semester || "1st Semester",
+        schoolYear: g10.schoolYear || initialSchoolYear,
+        gradeLevel: g10.gradeLevel || initialGradeLevel,
+        sf9Candidates: [],
+        matchingSf10: [],
+      });
+    }
+    allSubjectEntries.get(groupKey)!.matchingSf10.push(g10);
+  }
+
+  for (const entry of allSubjectEntries.values()) {
+    const { rawSubject, scopeKey, semester, schoolYear, gradeLevel, sf9Candidates, matchingSf10 } = entry;
     const g9 = sf9Candidates[0];
-    const rawSubject = g9.subject || "Subject";
+    const g10 = matchingSf10[0];
     const sf9Conflicting = new Set(sf9Candidates.map(academicGradeValueSignature)).size > 1;
-    const matchingSf10 = sf10Grades.filter(
-      (grade) =>
-        normalizeSubjectName(grade.subject) === normalizeSubjectName(g9.subject) &&
-        sameAcademicGradeContext(g9, grade)
-    );
-    const sameSubjectDifferentPeriod = sf10Grades.some(
-      (grade) =>
-        normalizeSubjectName(grade.subject) === normalizeSubjectName(g9.subject) &&
-        sameAcademicContextIgnoringPeriod(g9, grade) &&
-        !sameAcademicGradeContext(g9, grade)
-    );
     const sf10Conflicting = new Set(matchingSf10.map(academicGradeValueSignature)).size > 1;
-    const sf9Final = parseNumericVal(g9.finalGrade);
-    const sf10Final = matchingSf10[0] ? parseNumericVal(matchingSf10[0].finalGrade) : undefined;
+    const sf9Final = g9 ? parseNumericVal(g9.finalGrade) : undefined;
+    const sf10Final = g10 ? parseNumericVal(g10.finalGrade) : undefined;
     const field = `grade_${scopeKey.replace(/\|/g, "_")}`;
     const sourceDocumentIds = Array.from(new Set([
       ...sf9Candidates.flatMap((grade) => grade.sourceDocumentIds || []),
       ...matchingSf10.flatMap((grade) => grade.sourceDocumentIds || []),
     ]));
     let status: UnifiedFieldComparisonRow["status"] = "MATCH";
-    let notes = `Final grade verified in ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}.`;
-    let sf10Value = sf10Final !== undefined ? `Final: ${sf10Final}` : undefined;
+    let notes = `Final grade verified in ${gradeLevel}, ${schoolYear}, ${semester}.`;
+    let sf9Value: string | undefined = sf9Conflicting
+      ? sf9Candidates.map((grade) => `${grade.finalGrade ?? "-"} [${(grade.sourceDocumentIds || []).join(", ")}]`).join("; ")
+      : sf9Final !== undefined ? `Final: ${sf9Final}` : (g9?.finalGrade !== undefined ? String(g9.finalGrade) : undefined);
+    let sf10Value: string | undefined = sf10Conflicting
+      ? matchingSf10.map((grade) => `${grade.finalGrade ?? "-"} [${(grade.sourceDocumentIds || []).join(", ")}]`).join("; ")
+      : sf10Final !== undefined ? `Final: ${sf10Final}` : (g10?.finalGrade !== undefined ? String(g10.finalGrade) : undefined);
 
     if (sf9Conflicting || sf10Conflicting) {
       status = "NEEDS_VERIFICATION";
@@ -4252,11 +4410,11 @@ export function evaluateUnifiedStudentValidation(
         })),
         severity: "WARNING",
         category: "NEEDS_VERIFICATION",
-        description: `Conflicting SF9/SF10 grades for "${rawSubject}" in ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester} require review.`,
+        description: `Conflicting SF9/SF10 grades for "${rawSubject}" in ${gradeLevel}, ${schoolYear}, ${semester} require review.`,
       });
-    } else if (matchingSf10.length > 0) {
+    } else if (sf9Candidates.length > 0 && matchingSf10.length > 0) {
       const e9 = evaluateDynamicGradeStatus({ grade: g9.finalGrade, confidencePercent: (g9 as any).confidence });
-      const e10 = evaluateDynamicGradeStatus({ grade: matchingSf10[0].finalGrade, confidencePercent: (matchingSf10[0] as any).confidence });
+      const e10 = evaluateDynamicGradeStatus({ grade: g10.finalGrade, confidencePercent: (g10 as any).confidence });
 
       if (e9.isLowConfidence || e10.isLowConfidence || e9.status === "not_recognized" || e10.status === "not_recognized") {
         status = "NEEDS_VERIFICATION";
@@ -4277,46 +4435,50 @@ export function evaluateUnifiedStudentValidation(
           sourceValue: sf9Final,
           targetValue: sf10Final,
           severity: "CRITICAL",
-          description: `Final grade discrepancy in "${rawSubject}" for ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}: SF9 has ${sf9Final}, while SF10 has ${sf10Final}.`,
+          description: `Final grade discrepancy in "${rawSubject}" for ${gradeLevel}, ${schoolYear}, ${semester}: SF9 has ${sf9Final}, while SF10 has ${sf10Final}.`,
         });
       }
-    } else if (sameSubjectDifferentPeriod) {
-      status = "NEEDS_VERIFICATION";
-      notes = "The SF10 subject exists in this semester but has a different grading-period context.";
-      sf10Value = sf10Grades
-        .filter((grade) =>
-          normalizeSubjectName(grade.subject) === normalizeSubjectName(g9.subject) &&
-          sameAcademicContextIgnoringPeriod(g9, grade)
-        )
-        .map((grade) => `${grade.gradingPeriod || "period unspecified"}: ${grade.finalGrade ?? "-"}`)
-        .join("; ");
-    } else if (hasSf10 && sf10Contexts.some((grade) => sameAcademicContextIgnoringPeriod(g9, grade))) {
-      status = "MISSING_SOURCE";
-      notes = "Subject is absent from the applicable SF10 academic context.";
-      discrepancies.push({
-        field,
-        sourceValue: { finalGrade: g9.finalGrade, sourceDocumentIds: sf9Candidates.flatMap((grade) => grade.sourceDocumentIds || []) },
-        targetValue: null,
-        severity: "CRITICAL",
-        description: `Subject "${rawSubject}" is missing from SF10 for ${g9.gradeLevel}, ${g9.schoolYear}, ${g9.semester}.`,
-      });
-    } else if (hasSf10) {
-      status = "NOT_APPLICABLE";
-      notes = "No SF10 grades were available for this academic context; no cross-context mismatch was reported.";
-      sf10Value = undefined;
-    } else {
-      status = "NOT_APPLICABLE";
-      notes = "No SF10 source record was available; the comparison remains incomplete.";
-      sf10Value = undefined;
+    } else if (sf9Candidates.length > 0 && matchingSf10.length === 0) {
+      if (hasSf10) {
+        status = "MISSING_SOURCE";
+        notes = "Subject is absent from the applicable SF10 academic context.";
+        discrepancies.push({
+          field,
+          sourceValue: { finalGrade: g9.finalGrade, sourceDocumentIds: sf9Candidates.flatMap((grade) => grade.sourceDocumentIds || []) },
+          targetValue: null,
+          severity: "CRITICAL",
+          description: `Subject "${rawSubject}" is missing from SF10 for ${gradeLevel}, ${schoolYear}, ${semester}.`,
+        });
+      } else {
+        status = "NOT_APPLICABLE";
+        notes = "No SF10 source record was available; the comparison remains incomplete.";
+      }
+    } else if (sf9Candidates.length === 0 && matchingSf10.length > 0) {
+      if (hasSf9) {
+        status = "MISSING_SOURCE";
+        notes = "Subject is recorded on SF10 permanent record but absent from SF9 report card.";
+        discrepancies.push({
+          field,
+          sourceValue: null,
+          targetValue: { finalGrade: g10.finalGrade, sourceDocumentIds: matchingSf10.flatMap((grade) => grade.sourceDocumentIds || []) },
+          severity: "CRITICAL",
+          description: `Subject "${rawSubject}" on SF10 is missing from SF9 for ${gradeLevel}, ${schoolYear}, ${semester}.`,
+        });
+      } else {
+        status = "NOT_APPLICABLE";
+        notes = "No SF9 source record was available; the comparison remains incomplete.";
+      }
     }
+
+    const sourcesPresent: string[] = [];
+    if (sf9Candidates.length > 0) sourcesPresent.push("SF9-SHS");
+    if (matchingSf10.length > 0) sourcesPresent.push("SF10-SHS");
 
     fieldsMatrix.push({
       field,
       category: "ACADEMIC",
       label: `Subject: ${rawSubject}`,
-      sf9Value: sf9Conflicting
-        ? sf9Candidates.map((grade) => `${grade.finalGrade ?? "-"} [${(grade.sourceDocumentIds || []).join(", ")}]`).join("; ")
-        : sf9Final !== undefined ? `Final: ${sf9Final}` : undefined,
+      sf9Value,
       sf10Value,
       status,
       isMatch: status === "MATCH",
@@ -4326,7 +4488,7 @@ export function evaluateUnifiedStudentValidation(
         ...sf9Candidates.flatMap((grade) => grade.sourceTraces || []),
         ...matchingSf10.flatMap((grade) => grade.sourceTraces || []),
       ].map((trace) => ({ ...trace, fieldName: field })),
-      sourcesPresent: ["SF9-SHS", ...(matchingSf10.length ? ["SF10-SHS"] : [])],
+      sourcesPresent,
     });
   }
 
@@ -4647,6 +4809,19 @@ export function evaluateUnifiedStudentValidation(
       ? `Unified validation requires teacher verification due to ${discrepancies.length} item(s) (attendance variance, unreadable marks, or warnings).${incompleteCoverageMessage}`
       : `Incomplete required document coverage (${requiredAvailable}/${totalRequired} categories available). Available comparisons remain visible; missing documents are not treated as mismatches.`;
 
+  // Label PSA as "Civil Document (N/A)" on All DepEd School-Only Rows when PSA is present
+  if (hasPsa) {
+    const isCivilIdentityField = (f: string) =>
+      f === "last_name" || f === "first_name" || f === "middle_name" || f === "sex" || f === "birth_date" || f === "date_of_birth";
+    for (const row of fieldsMatrix) {
+      if (row.field === "lrn") {
+        row.psaValue = "Civil Document (No DepEd LRN)";
+      } else if (!isCivilIdentityField((row.field || "").toLowerCase()) && !row.psaValue) {
+        row.psaValue = "Civil Document (N/A)";
+      }
+    }
+  }
+
   // Enforce strict 4-state row evaluation across all matrix rows
   for (const row of fieldsMatrix) {
     row.status = evaluate4StateRowStatus(row);
@@ -4962,9 +5137,11 @@ function sf10NumOrNull(v: any): number | null {
   return isNaN(n) ? null : n;
 }
 
-/** Resolve SF10 semester blocks from scholastic_records, completed_semesters, or flat grades. */
+/** Resolve SF10 semester blocks from shs_semesters, scholastic_records, completed_semesters, or flat grades. */
 export function resolveSf10SemesterBlocks(sf10: Sf10IdentityDocLike): Sf10SemesterBlockLike[] {
-  const fromRecords: any[] = Array.isArray(sf10.scholastic_records) && sf10.scholastic_records.length > 0
+  const fromRecords: any[] = Array.isArray(sf10.shs_semesters) && sf10.shs_semesters.length > 0
+    ? sf10.shs_semesters
+    : Array.isArray(sf10.scholastic_records) && sf10.scholastic_records.length > 0
     ? sf10.scholastic_records
     : Array.isArray(sf10.completed_semesters) ? sf10.completed_semesters : [];
   if (fromRecords.length > 0) {
@@ -4972,20 +5149,51 @@ export function resolveSf10SemesterBlocks(sf10: Sf10IdentityDocLike): Sf10Semest
       school_id: r.school_id,
       school_year: r.school_year || r.schoolYear || sf10.school_year || undefined,
       grade_level: r.grade_level || r.gradeLevel || sf10.grade_level || undefined,
-      semester: r.semester,
+      semester: sf10NormSemester(r.semester) || r.semester,
       section: r.section || sf10.section || undefined,
       track_strand: r.track_strand || sf10.track_strand || sf10.strand || undefined,
-      general_average: sf10NumOrNull(r.general_average),
+      general_average: sf10NumOrNull(r.general_average ?? r.generalAverage),
       subjects: (r.subjects || []).map((s: any) => ({
         subject: s.subject,
         q1: s.q1,
         q2: s.q2,
         q3: s.q3,
         q4: s.q4,
-        final: s.sem_final_grade ?? s.final_grade ?? s.final,
+        final: s.sem_final_grade ?? s.finalGrade ?? s.final_grade ?? s.final,
       })),
     }));
   }
+
+  // Fallback: Check if sf10 has first_semester_grades and/or second_semester_grades
+  const sf10S1 = Array.isArray(sf10.first_semester_grades) ? sf10.first_semester_grades : (Array.isArray(sf10.firstSemesterSubjects) ? sf10.firstSemesterSubjects : []);
+  const sf10S2 = Array.isArray(sf10.second_semester_grades) ? sf10.second_semester_grades : (Array.isArray(sf10.secondSemesterSubjects) ? sf10.secondSemesterSubjects : []);
+  if (sf10S1.length > 0 || sf10S2.length > 0) {
+    const res: Sf10SemesterBlockLike[] = [];
+    if (sf10S1.length > 0) {
+      res.push({
+        school_year: sf10.school_year || undefined,
+        grade_level: sf10.grade_level || undefined,
+        semester: "1st Semester",
+        section: sf10.section || undefined,
+        track_strand: sf10.track_strand || sf10.strand || undefined,
+        general_average: sf10NumOrNull(sf10.sem1_printed_general_average ?? sf10.sem1_general_average ?? sf10.general_average),
+        subjects: sf10S1,
+      });
+    }
+    if (sf10S2.length > 0) {
+      res.push({
+        school_year: sf10.school_year || undefined,
+        grade_level: sf10.grade_level || undefined,
+        semester: "2nd Semester",
+        section: sf10.section || undefined,
+        track_strand: sf10.track_strand || sf10.strand || undefined,
+        general_average: sf10NumOrNull(sf10.sem2_printed_general_average ?? sf10.sem2_general_average),
+        subjects: sf10S2,
+      });
+    }
+    return res;
+  }
+
   const groups = new Map<string, Sf10SemesterBlockLike>();
   for (const g of Array.isArray(sf10.grades) ? sf10.grades : []) {
     const sem = sf10NormSemester(g.semester || sf10.semester) || "1st Semester";
@@ -5044,15 +5252,29 @@ export function compareSf10AndSf9(sf10: Sf10IdentityDocLike, sf9: Sf10IdentityDo
   sf10CompareContextField(acc, "section", "Section", ctx.section, sf9.section, sf10NormText, la, lb);
   sf10CompareContextField(acc, "track_strand", "Track/Strand", ctx.track_strand, sf9.track_strand || sf9.strand, sf10NormText, la, lb, true);
 
-  // Per-semester subject grades & general averages
-  const sf9Grades: any[] = Array.isArray(sf9.grades) ? sf9.grades : [];
+  // Per-semester subject grades & general averages across all SF9 sources
+  const sf9Grades: any[] = [
+    ...(Array.isArray(sf9.grades) ? sf9.grades : []),
+    ...(Array.isArray(sf9.first_semester_grades) ? sf9.first_semester_grades.map((g: any) => ({ ...g, semester: g.semester || "1st Semester" })) : []),
+    ...(Array.isArray(sf9.firstSemesterSubjects) ? sf9.firstSemesterSubjects.map((g: any) => ({ ...g, semester: g.semester || "1st Semester" })) : []),
+    ...(Array.isArray(sf9.second_semester_grades) ? sf9.second_semester_grades.map((g: any) => ({ ...g, semester: g.semester || "2nd Semester" })) : []),
+    ...(Array.isArray(sf9.secondSemesterSubjects) ? sf9.secondSemesterSubjects.map((g: any) => ({ ...g, semester: g.semester || "2nd Semester" })) : []),
+    ...((Array.isArray(sf9.shs_semesters) ? sf9.shs_semesters : []).flatMap((b: any) => (b.subjects || []).map((s: any) => ({ ...s, semester: s.semester || b.semester })))),
+    ...((Array.isArray(sf9.scholastic_records) ? sf9.scholastic_records : []).flatMap((b: any) => (b.subjects || []).map((s: any) => ({ ...s, semester: s.semester || b.semester })))),
+  ];
   const sf9DefaultSem = sf10NormSemester(sf9.semester) || "1st Semester";
   const sf9Ctx = { schoolYear: sf9.school_year || ctx.school_year, gradeLevel: sf9.grade_level || ctx.grade_level };
   const semesters: Array<"1st Semester" | "2nd Semester"> = ["1st Semester", "2nd Semester"];
   const semesterSummaries: string[] = [];
 
   for (const sem of semesters) {
-    const sf9SemGrades = sf9Grades.filter((g) => (sf10NormSemester(g.semester) || sf9DefaultSem) === sem);
+    const sf9SemGrades = sf9Grades.filter((g) => {
+      const gSem = sf10NormSemester(g.semester);
+      if (gSem) return gSem === sem;
+      if (sem === "2nd Semester" && (g.q3 !== undefined || g.q4 !== undefined)) return true;
+      if (sem === "1st Semester" && (g.q1 !== undefined || g.q2 !== undefined)) return true;
+      return sf9DefaultSem === sem;
+    });
     const sf9Ga = sf10NumOrNull(
       sem === "1st Semester"
         ? sf9.sem1_general_average ?? sf9.sem1_displayed_general_average ?? (sf9DefaultSem === sem && !sf9.sem2_general_average ? sf9.general_average : null)
@@ -5087,7 +5309,8 @@ export function compareSf10AndSf9(sf10: Sf10IdentityDocLike, sf9: Sf10IdentityDo
     acc.discrepancies.push(...semRes.discrepancies);
 
     // Per-semester General Average (printed SF10 "General Ave." vs SF9 semester average)
-    const sf10Ga = sf10NumOrNull(block.general_average);
+    const rawSf10Ga = sf10NumOrNull(block.general_average);
+    const sf10Ga = roundSf10GeneralAverage(rawSf10Ga) ?? rawSf10Ga;
     if (sf9Ga !== null && sf10Ga !== null) {
       const isGaMatch = Math.round(sf9Ga) === Math.round(sf10Ga);
       acc.rows.push({ field: `general_average_${sem}`, doc1Value: sf10Ga, doc2Value: sf9Ga, isMatch: isGaMatch, notes: isGaMatch ? `${sem} general average verified` : `${sem} general average mismatch` });
@@ -5138,7 +5361,26 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
   reconciledDossier: T;
   reconciliationLog: ReconciliationLogItem[];
 } {
-  const reconciled: any = JSON.parse(JSON.stringify(dossier));
+  // Acyclic clone helper that drops recursive or circular references
+  const cleanClone = (obj: any): any => {
+    if (!obj || typeof obj !== "object") return obj;
+    const seen = new WeakSet();
+    const deep = (item: any): any => {
+      if (!item || typeof item !== "object") return item;
+      if (seen.has(item)) return undefined;
+      seen.add(item);
+      if (Array.isArray(item)) return item.map(deep);
+      const res: Record<string, any> = {};
+      for (const [k, v] of Object.entries(item)) {
+        if (k === "reconciledDossier" || k === "previousDossier" || k.startsWith("_react")) continue;
+        res[k] = deep(v);
+      }
+      return res;
+    };
+    return deep(obj);
+  };
+
+  const reconciled: any = cleanClone(dossier);
   const reconciliationLog: ReconciliationLogItem[] = [];
 
   const sf1Raw = reconciled.matchedSources?.sf1?.raw || reconciled.sf1Raw || {};
@@ -5205,6 +5447,56 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
 
   // 3. Primary Source 3 — SF9 for Grades & Attendance Baseline
   const sf9GeneralAverage = sf9Raw.general_average ?? sf9Raw.generalAverage;
+
+  // Build lookup map of authentic SF9 primary source extracted subject grades (60 <= grade <= 100)
+  const sf9SubjectGradeMap = new Map<string, number>();
+  const registerSf9Grade = (subj: any, gradeVal: any) => {
+    if (!subj) return;
+    const n = normalizeSubjectName(String(subj));
+    if (!n) return;
+    const num = parseNumericVal(gradeVal);
+    if (num !== undefined && num >= 60 && num <= 100) {
+      sf9SubjectGradeMap.set(n, num);
+    }
+  };
+
+  const scanRawForSf9Grades = (raw: any) => {
+    if (!raw || typeof raw !== "object") return;
+    for (const g of Array.isArray(raw.grades) ? raw.grades : []) {
+      registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+    }
+    for (const g of Array.isArray(raw.first_semester_grades) ? raw.first_semester_grades : []) {
+      registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+    }
+    for (const g of Array.isArray(raw.firstSemesterSubjects) ? raw.firstSemesterSubjects : []) {
+      registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+    }
+    for (const g of Array.isArray(raw.second_semester_grades) ? raw.second_semester_grades : []) {
+      registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+    }
+    for (const g of Array.isArray(raw.secondSemesterSubjects) ? raw.secondSemesterSubjects : []) {
+      registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+    }
+    for (const block of [
+      ...(Array.isArray(raw.shs_semesters) ? raw.shs_semesters : []),
+      ...(Array.isArray(raw.scholastic_records) ? raw.scholastic_records : []),
+      ...(Array.isArray(raw.completed_semesters) ? raw.completed_semesters : []),
+    ]) {
+      for (const g of Array.isArray(block.subjects) ? block.subjects : []) {
+        registerSf9Grade(g.subject, g.sem_final_grade ?? g.finalGrade ?? g.final ?? g.final_grade ?? g.final_mark);
+      }
+    }
+  };
+
+  scanRawForSf9Grades(sf9Raw);
+  if (reconciled.matchedSources?.sf9?.raw && reconciled.matchedSources.sf9.raw !== sf9Raw) {
+    scanRawForSf9Grades(reconciled.matchedSources.sf9.raw);
+  }
+  if (Array.isArray(reconciled.allSf9Records)) {
+    for (const rec of reconciled.allSf9Records) {
+      scanRawForSf9Grades(rec?.raw);
+    }
+  }
 
   // Propagate to matchedSources raw objects
   if (reconciled.matchedSources?.sf1?.raw) {
@@ -5391,7 +5683,7 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
       row.isMatch = true;
       row.notes = "Reconciled from Primary Source PSA civil identity.";
       if (prevStatus) {
-        addLog(row.label || "Sex / Gender", hasPsa ? "PSA" : "SF1", canonicalSex, ["SF1", "SF2", "SF9", "SF10"], prevStatus);
+        addLog(row.label || "Sex / Gender", hasPsa ? "PSA" : "SF1", canonicalSex || "Male", ["SF1", "SF2", "SF9", "SF10"], prevStatus);
       }
     } else if (fieldLower === "birth_date" || fieldLower.includes("birth")) {
       if (hasPsa) row.psaValue = canonicalBirthDate;
@@ -5472,22 +5764,59 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
     } else if (
       fieldLower === "general_average" ||
       fieldLower.startsWith("general_average") ||
+      (row.category as any) === "ACADEMIC_PERFORMANCE"
+    ) {
+      const canonicalGa = sf9GeneralAverage ?? row.sf9Value ?? row.sf10Value ?? "";
+      if (canonicalGa !== "" && canonicalGa !== undefined && canonicalGa !== null) {
+        row.sf9Value = canonicalGa;
+        row.sf10Value = canonicalGa;
+        row.status = "MATCH";
+        row.isMatch = true;
+        row.notes = "Reconciled from Primary Source SF9 report card baseline.";
+        if (prevStatus) {
+          addLog(row.label || row.field, "SF9", String(canonicalGa), ["SF10"], prevStatus);
+        }
+      }
+    } else if (
       fieldLower.startsWith("grade_") ||
       fieldLower.startsWith("subject_") ||
-      row.category === "ACADEMIC_PERFORMANCE"
+      (row.category as any) === "ACADEMIC"
     ) {
-      const canonicalGrade = row.sf9Value ?? row.sf10Value ?? sf9GeneralAverage ?? "";
-      row.sf9Value = canonicalGrade;
-      row.sf10Value = canonicalGrade;
-      row.status = "MATCH";
-      row.isMatch = true;
-      row.notes = "Reconciled from Primary Source SF9 report card baseline.";
-      if (prevStatus) {
-        addLog(row.label || row.field, "SF9", String(canonicalGrade), ["SF10"], prevStatus);
+      const rawSub = (row.label || "").replace(/^Subject:\s*/i, "").trim() || row.field.replace(/^grade_/, "").replace(/^subject_/, "");
+      const normSub = normalizeSubjectName(rawSub);
+      let authenticGrade = sf9SubjectGradeMap.get(normSub);
+      if (authenticGrade === undefined && row.sf9Value) {
+        const p = parseNumericVal(row.sf9Value);
+        if (p !== undefined && p >= 60 && p <= 100) {
+          authenticGrade = p;
+        }
       }
-    } else if (prevStatus) {
+
+      // STRICT RULE: If SF9 has an authentic extracted numeric grade (60 <= grade <= 100), use that exact SF9 grade as baselineValue and reconcile SF10.
+      // If SF9 genuinely has NO extracted grade (null / undefined / -), SKIP reconciling that row (leave untouched — NEVER invent 88 or mark MATCH with fabricated value).
+      if (authenticGrade !== undefined && authenticGrade >= 60 && authenticGrade <= 100) {
+        const formattedVal = (typeof row.sf9Value === "string" && row.sf9Value.includes("Final:")) ||
+                             (typeof row.sf10Value === "string" && row.sf10Value.includes("Final:"))
+          ? `Final: ${authenticGrade}`
+          : authenticGrade;
+        row.sf9Value = formattedVal;
+        row.sf10Value = formattedVal;
+        row.status = "MATCH";
+        row.isMatch = true;
+        row.notes = "Reconciled from Primary Source SF9 report card baseline.";
+        if (prevStatus) {
+          addLog(row.label || `Subject: ${rawSub}`, "SF9", String(authenticGrade), ["SF10"], prevStatus);
+        }
+      } else {
+        // Skip reconciling this row — leave untouched! NEVER invent 88 or synthetic fallback!
+      }
+    } else if (
+      prevStatus &&
+      !fieldLower.startsWith("grade_") &&
+      !fieldLower.startsWith("subject_")
+    ) {
       const primarySource: "SF1" | "PSA" | "SF9" =
-        fieldLower.includes("attendance") || fieldLower.includes("grade") ? "SF9" : "SF1";
+        fieldLower.includes("attendance") ? "SF9" : "SF1";
       const canonicalVal = row.sf1Value || row.sf9Value || row.sf10Value || row.sf2Value || row.psaValue || "";
       if (row.sf1Value !== undefined) row.sf1Value = canonicalVal;
       if (row.sf2Value !== undefined) row.sf2Value = canonicalVal;
@@ -5500,9 +5829,30 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
     }
   }
 
+  // Label PSA as "Civil Document (N/A)" on All DepEd School-Only Rows when PSA is present
+  if (hasPsa) {
+    const isCivilIdentityField = (f: string) =>
+      f === "last_name" || f === "first_name" || f === "middle_name" || f === "sex" || f === "birth_date" || f === "date_of_birth";
+    for (const row of deduplicatedMatrix) {
+      if (row.field === "lrn") {
+        row.psaValue = "Civil Document (No DepEd LRN)";
+      } else if (!isCivilIdentityField((row.field || "").toLowerCase()) && (!row.psaValue || String(row.psaValue).includes("Civil Document"))) {
+        row.psaValue = "Civil Document (N/A)";
+      }
+    }
+  }
+
   reconciled.unifiedMatrix = deduplicatedMatrix;
-  reconciled.discrepancies = [];
-  reconciled.overallStatus = "MATCH";
+  const remainingIssues = deduplicatedMatrix.filter(
+    (r) => r.status === "MISMATCH" || r.status === "INCOMPLETE" || r.isMatch === false
+  );
+  reconciled.discrepancies = remainingIssues.map((r) => ({
+    field: r.field,
+    severity: "CRITICAL",
+    category: "MISMATCH",
+    description: `Unreconciled discrepancy in ${r.label || r.field}`,
+  }));
+  reconciled.overallStatus = remainingIssues.length > 0 ? "MISMATCH" : "MATCH";
   reconciled.lrn = canonicalLrn;
   reconciled.fullName = canonicalFullName;
   reconciled.lastName = canonicalLastName;
@@ -5514,7 +5864,13 @@ export function reconcileStudentDataFromPrimarySources<T extends Record<string, 
   reconciled.section = canonicalSection;
   reconciled.trackStrand = canonicalTrackStrand;
   reconciled.reconciliationLog = reconciliationLog;
-  reconciled.reconciledDossier = reconciled;
+
+  // Clean acyclic snapshot for .reconciledDossier without circular self-reference
+  const cleanDossierSnapshot = cleanClone(reconciled);
+  delete cleanDossierSnapshot.reconciledDossier;
+  delete cleanDossierSnapshot.previousDossier;
+
+  reconciled.reconciledDossier = cleanDossierSnapshot;
 
   return reconciled;
 }

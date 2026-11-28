@@ -50,7 +50,8 @@ export async function middleware(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname;
   const isAuthRoute = pathname.startsWith('/login') || pathname.startsWith('/register');
-  const isPublicRoute = pathname === '/' || pathname.startsWith('/landing') || pathname.startsWith('/terms') || isAuthRoute;
+  const isApiRoute = pathname.startsWith('/api/');
+  const isPublicRoute = pathname === '/' || pathname.startsWith('/landing') || pathname.startsWith('/terms') || isAuthRoute || isApiRoute;
   
   // 1. Kung walang active session at hindi public page, pabalikin sa /login
   if (!user && !isPublicRoute) {

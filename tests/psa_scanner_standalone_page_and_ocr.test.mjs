@@ -654,4 +654,441 @@ X
     assert.strictEqual(spatialFemale.sexLabel, "Female");
     assert.ok(spatialFemale.confidence >= 85);
   });
+
+  test("22. PSA Item 2. SEX pixel ink density comparison (Left '1 Male' box vs Right '2 Female' box) via sharp", async () => {
+    const sharp = (await import("sharp")).default;
+    const { detectPsaSexFromMarkBoxInk, parsePsaCertificate } = await import("../src/lib/ocr/psaParser.ts");
+
+    // Standard Municipal Form No. 102 Upper Section (1-17) dimensions: 1000 x 1400 px
+    const imgWidth = 1000;
+    const imgHeight = 1400;
+
+    // Word-polygon layout representing Azure OCR output with NO 'X' text token
+    // (Simulates high-contrast B&W scan where typed X touched underline and was dropped by OCR)
+    const azureRawLayoutNoX = {
+      pages: [
+        {
+          width: imgWidth,
+          height: imgHeight,
+          words: [
+            { content: "OFFICE", polygon: [350, 50, 450, 50, 450, 70, 350, 70] },
+            { content: "CERTIFICATE", polygon: [300, 80, 500, 80, 500, 105, 300, 105] },
+            { content: "1.", polygon: [50, 150, 65, 150, 65, 170, 50, 170] },
+            { content: "NAME", polygon: [75, 150, 130, 150, 130, 170, 75, 170] },
+            { content: "JUSTIN", polygon: [150, 150, 240, 150, 240, 170, 150, 170] },
+            { content: "LOQUILLANO", polygon: [260, 150, 390, 150, 390, 170, 260, 170] },
+            { content: "GOMEZ", polygon: [410, 150, 480, 150, 480, 170, 410, 170] },
+            { content: "2.", polygon: [50, 220, 65, 220, 65, 240, 50, 240] },
+            { content: "SEX", polygon: [70, 220, 110, 220, 110, 240, 70, 240] },
+            { content: "1", polygon: [160, 220, 170, 220, 170, 240, 160, 240] },
+            { content: "Male", polygon: [175, 220, 220, 220, 220, 240, 175, 240] },
+            { content: "2", polygon: [280, 220, 290, 220, 290, 240, 280, 240] },
+            { content: "Female", polygon: [295, 220, 360, 220, 360, 240, 295, 240] },
+            { content: "3.", polygon: [450, 220, 465, 220, 465, 240, 450, 240] },
+            { content: "DATE", polygon: [470, 220, 510, 220, 510, 240, 470, 240] },
+            { content: "23", polygon: [550, 220, 570, 220, 570, 240, 550, 240] },
+            { content: "JUNE", polygon: [580, 220, 620, 220, 620, 240, 580, 240] },
+            { content: "2004", polygon: [630, 220, 670, 220, 670, 240, 630, 240] },
+          ],
+        },
+      ],
+    };
+
+    const docTextWithoutX = `
+Republic of the Philippines
+OFFICE OF THE CIVIL REGISTRAR GENERAL
+CERTIFICATE OF LIVE BIRTH
+1. NAME: JUSTIN LOQUILLANO GOMEZ
+2. SEX: 1 Male 2 Female
+3. DATE OF BIRTH: 23 JUNE 2004
+`;
+
+    // ── Test A: Mark 'X' drawn inside the Left (Male) underline box ──
+    // Left mark ROI spans: sexLabel.right (110) to maleAnchorLeft (160) - 2 -> x: 112..158, y: 215..235
+    const maleSvg = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Bottom underlines -->
+        <line x1="110" y1="239" x2="158" y2="239" stroke="black" stroke-width="2"/>
+        <line x1="230" y1="239" x2="278" y2="239" stroke="black" stroke-width="2"/>
+        <!-- Typed X in Left (Male) box touching underline -->
+        <line x1="125" y1="218" x2="145" y2="238" stroke="black" stroke-width="4"/>
+        <line x1="145" y1="218" x2="125" y2="238" stroke="black" stroke-width="4"/>
+      </svg>
+    `;
+    const maleImgBuffer = await sharp(Buffer.from(maleSvg)).png().toBuffer();
+
+    const maleInkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: maleImgBuffer,
+      rawLayout: azureRawLayoutNoX,
+    });
+
+    assert.strictEqual(maleInkRes.sex, "Male", "Should detect Male from Left mark box ink");
+    assert.ok(maleInkRes.confidence >= 90, `Male confidence should be >= 90%, got ${maleInkRes.confidence}`);
+    assert.strictEqual(maleInkRes.source, "pixel_ink_left_box");
+    assert.ok((maleInkRes.leftInkRatio || 0) > (maleInkRes.rightInkRatio || 0) * 1.55);
+
+    // Assert parsePsaCertificate resolves Male with >= 90% confidence even with NO 'X' in text
+    const maleCertRes = await parsePsaCertificate(docTextWithoutX, azureRawLayoutNoX, 0.95, {
+      uprightImageBuffer: maleImgBuffer,
+    });
+    assert.strictEqual(maleCertRes.identity.sex, "M");
+    assert.strictEqual(maleCertRes.identity.sex_label, "Male");
+    assert.ok(maleCertRes.field_statuses.sex.confidence >= 90, "field_statuses.sex.confidence must be >= 90");
+    assert.strictEqual(maleCertRes.field_statuses.sex.value, "Male");
+
+    // ── Test B: Mark 'X' drawn inside the Right (Female) underline box ──
+    // Right mark ROI spans: maleRight (220) + 4 to femaleAnchorLeft (280) - 2 -> x: 224..278, y: 215..235
+    const femaleSvg = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Bottom underlines -->
+        <line x1="110" y1="239" x2="158" y2="239" stroke="black" stroke-width="2"/>
+        <line x1="230" y1="239" x2="278" y2="239" stroke="black" stroke-width="2"/>
+        <!-- Typed X in Right (Female) box touching underline -->
+        <line x1="242" y1="218" x2="262" y2="238" stroke="black" stroke-width="4"/>
+        <line x1="262" y1="218" x2="242" y2="238" stroke="black" stroke-width="4"/>
+      </svg>
+    `;
+    const femaleImgBuffer = await sharp(Buffer.from(femaleSvg)).png().toBuffer();
+
+    const femaleInkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: femaleImgBuffer,
+      rawLayout: azureRawLayoutNoX,
+    });
+
+    assert.strictEqual(femaleInkRes.sex, "Female", "Should detect Female from Right mark box ink");
+    assert.ok(femaleInkRes.confidence >= 90, `Female confidence should be >= 90%, got ${femaleInkRes.confidence}`);
+    assert.strictEqual(femaleInkRes.source, "pixel_ink_right_box");
+    assert.ok((femaleInkRes.rightInkRatio || 0) > (femaleInkRes.leftInkRatio || 0) * 1.55);
+
+    // Assert parsePsaCertificate resolves Female with >= 90% confidence
+    const femaleCertRes = await parsePsaCertificate(docTextWithoutX, azureRawLayoutNoX, 0.95, {
+      uprightImageBuffer: femaleImgBuffer,
+    });
+    assert.strictEqual(femaleCertRes.identity.sex, "F");
+    assert.strictEqual(femaleCertRes.identity.sex_label, "Female");
+    assert.ok(femaleCertRes.field_statuses.sex.confidence >= 90, "field_statuses.sex.confidence must be >= 90");
+    assert.strictEqual(femaleCertRes.field_statuses.sex.value, "Female");
+  });
+
+  test("23. PSA Item 2. SEX pixel ink detection with merged line polygons and auto-trimmed white-margin scans", async () => {
+    const sharp = (await import("sharp")).default;
+    const { detectPsaSexFromMarkBoxInk, parsePsaCertificate } = await import("../src/lib/ocr/psaParser.ts");
+
+    const imgWidth = 1000;
+    const imgHeight = 1400;
+
+    // ── Part A: Merged line polygon "2. SEX 1 Male 2 Female" (with NO 'X' token) + left-box ink detects "Male" (confidence >= 90) ──
+    // Line bounding box: left: 100, top: 200, right: 600, bottom: 240 (width: 500, height: 40)
+    // Left mark slot (1 Male): 100 + 500 * 0.18 = 190 to 100 + 500 * 0.48 = 340
+    // Right mark slot (2 Female): 100 + 500 * 0.52 = 360 to 100 + 500 * 0.82 = 510
+    const mergedLineRawLayout = {
+      pages: [
+        {
+          width: imgWidth,
+          height: imgHeight,
+          lines: [
+            {
+              content: "2. SEX 1 Male 2 Female",
+              polygon: [100, 200, 600, 200, 600, 240, 100, 240],
+            },
+          ],
+          words: [], // NO individual Male or Female word polygons
+        },
+      ],
+    };
+
+    // Draw dark mark ('X') inside the Left slot (e.g. x: 235..265, y: 205..235)
+    const mergedLineSvg = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Bottom underline for the line -->
+        <line x1="100" y1="239" x2="600" y2="239" stroke="black" stroke-width="2"/>
+        <!-- Typed X in Left (Male) mark slot (x: 235..265) -->
+        <line x1="235" y1="205" x2="265" y2="235" stroke="black" stroke-width="4"/>
+        <line x1="265" y1="205" x2="235" y2="235" stroke="black" stroke-width="4"/>
+      </svg>
+    `;
+    const mergedLineImgBuf = await sharp(Buffer.from(mergedLineSvg)).png().toBuffer();
+
+    const mergedInkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: mergedLineImgBuf,
+      rawLayout: mergedLineRawLayout,
+    });
+
+    assert.strictEqual(mergedInkRes.sex, "Male", "Merged line polygon should detect Male from left-box ink");
+    assert.ok(mergedInkRes.confidence >= 90, `Merged line Male confidence must be >= 90%, got ${mergedInkRes.confidence}`);
+    assert.strictEqual(mergedInkRes.source, "pixel_ink_left_box");
+    assert.ok((mergedInkRes.leftInkRatio || 0) > (mergedInkRes.rightInkRatio || 0) * 1.55);
+    assert.ok(Array.isArray(mergedInkRes.matchedLines) && mergedInkRes.matchedLines.length > 0, "Should include matchedLines");
+
+    // Also assert parsePsaCertificate with merged line layout resolves Male
+    const docTextWithoutX = `
+CERTIFICATE OF LIVE BIRTH
+Registry No. 2004-1234
+1. NAME: JUSTIN LOQUILLANO GOMEZ
+2. SEX 1 Male 2 Female
+3. DATE OF BIRTH: 23 JUNE 2004
+`;
+    const mergedCertRes = await parsePsaCertificate(docTextWithoutX, mergedLineRawLayout, 0.95, {
+      uprightImageBuffer: mergedLineImgBuf,
+    });
+    assert.strictEqual(mergedCertRes.identity.sex, "M");
+    assert.strictEqual(mergedCertRes.identity.sex_label, "Male");
+    assert.ok(mergedCertRes.field_statuses.sex.confidence >= 90, "field_statuses.sex.confidence must be >= 90");
+    assert.strictEqual(mergedCertRes.field_statuses.sex.value, "Male");
+
+    // ── Part B: Centered PSA form surrounded by wide white margins (no rawLayout polygons) + left-box ink auto-trims white padding and detects "Male" (confidence >= 90) ──
+    // Wide white margins: Total image 1000x1400. Form content box centered: left: 200, top: 200, width: 600, height: 1000
+    // Inside form: Left slot is at 200 + 600 * 0.05 = 230 to 200 + 600 * 0.14 = 284
+    // Top is at 200 + 1000 * 0.195 = 395 to 200 + 1000 * 0.235 = 435
+    const centeredFormSvg = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Form outer border to establish trimmed bounding box -->
+        <rect x="200" y="200" width="600" height="1000" fill="none" stroke="black" stroke-width="2"/>
+        <!-- Form header line -->
+        <line x1="220" y1="250" x2="780" y2="250" stroke="black" stroke-width="2"/>
+        <!-- Typed X in Left (Male) slot of the centered form -->
+        <line x1="245" y1="405" x2="265" y2="425" stroke="black" stroke-width="4"/>
+        <line x1="265" y1="405" x2="245" y2="425" stroke="black" stroke-width="4"/>
+      </svg>
+    `;
+    const centeredFormImgBuf = await sharp(Buffer.from(centeredFormSvg)).png().toBuffer();
+
+    const centeredInkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: centeredFormImgBuf,
+      // no rawLayout polygons
+    });
+
+    assert.strictEqual(centeredInkRes.sex, "Male", "Centered form with white margins should detect Male after auto-trim");
+    assert.ok(centeredInkRes.confidence >= 90, `Centered form Male confidence must be >= 90%, got ${centeredInkRes.confidence}`);
+    assert.strictEqual(centeredInkRes.source, "pixel_ink_left_box");
+    assert.ok((centeredInkRes.leftInkRatio || 0) > (centeredInkRes.rightInkRatio || 0) * 1.55);
+
+    // Also assert parsePsaCertificate with centered form image resolves Male
+    const centeredCertRes = await parsePsaCertificate(docTextWithoutX, undefined, 0.95, {
+      uprightImageBuffer: centeredFormImgBuf,
+    });
+    assert.strictEqual(centeredCertRes.identity.sex, "M");
+    assert.strictEqual(centeredCertRes.identity.sex_label, "Male");
+    assert.ok(centeredCertRes.field_statuses.sex.confidence >= 90, "Centered form field_statuses.sex.confidence must be >= 90");
+    assert.strictEqual(centeredCertRes.field_statuses.sex.value, "Male");
+  });
+
+  test("24. PSA Item 2. SEX Right-Box Printed Label Contamination Prevention ('Female' False-Positive on Male Scan)", async () => {
+    const sharp = (await import("sharp")).default;
+    const { detectPsaSexFromMarkBoxInk } = await import("../src/lib/ocr/psaParser.ts");
+
+    const imgWidth = 1000;
+    const imgHeight = 1400;
+
+    // Merged line polygon: "2. SEX 1 Male 2 Female"
+    // line.left: 100, line.top: 200, line.width: 500, line.height: 40
+    // Tightened Left slot: 100 + 500 * 0.18 = 190 to 100 + 500 * 0.44 = 320
+    // Tightened Right slot: 100 + 500 * 0.44 = 320 to 100 + 500 * 0.60 = 400 (blank gap between "Male" and "2 Female")
+    // Printed words "2 Female" and "3. DATE" exist on the right at x: 420..520 (line.width * 0.64..0.84)
+    const mergedLineRawLayout = {
+      pages: [
+        {
+          width: imgWidth,
+          height: imgHeight,
+          lines: [
+            {
+              content: "2. SEX 1 Male 2 Female",
+              polygon: [100, 200, 600, 200, 600, 240, 100, 240],
+            },
+          ],
+          words: [],
+        },
+      ],
+    };
+
+    // Draw Male 'X' mark inside left slot (x: 235..265),
+    // and draw dark printed text pixels for "2 Female" in the right region (x: 420..490)
+    const svgWithPrintedLabel = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Bottom underline for the line -->
+        <line x1="100" y1="239" x2="600" y2="239" stroke="black" stroke-width="2"/>
+        <!-- Typed 'X' in Left (Male) slot (x: 235..265) -->
+        <line x1="235" y1="205" x2="265" y2="235" stroke="black" stroke-width="4"/>
+        <line x1="265" y1="205" x2="235" y2="235" stroke="black" stroke-width="4"/>
+        <!-- Printed text label "2 Female" located at x: 420..490 (outside the tightened 320..400 Right slot) -->
+        <text x="425" y="225" font-family="sans-serif" font-size="20" font-weight="bold" fill="black">2 Female</text>
+      </svg>
+    `;
+
+    const imgBuf = await sharp(Buffer.from(svgWithPrintedLabel)).png().toBuffer();
+
+    const inkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: imgBuf,
+      rawLayout: mergedLineRawLayout,
+    });
+
+    // The tightened Right ROI (320..400) excludes the printed text at x: 420+,
+    // so rightInkRatio remains near 0 and does NOT trigger false "Female"!
+    assert.strictEqual(inkRes.sex, "Male", "Should return Male and never Female when right printed label exists");
+    assert.notStrictEqual(inkRes.sex, "Female", "Must NEVER return Female due to printed label ink");
+    assert.strictEqual(inkRes.source, "pixel_ink_left_box");
+    assert.ok(inkRes.confidence >= 90, "Male confidence must be >= 90%");
+    assert.ok((inkRes.leftInkRatio || 0) > (inkRes.rightInkRatio || 0) * 1.55, "leftInkRatio must be > rightInkRatio * 1.55");
+  });
+
+  test("25. PSA Item 2. SEX Word-Polygon Mode Right ROI Tightening Before '2 Female' Printed Words", async () => {
+    const sharp = (await import("sharp")).default;
+    const { detectPsaSexFromMarkBoxInk } = await import("../src/lib/ocr/psaParser.ts");
+
+    const imgWidth = 1000;
+    const imgHeight = 1400;
+
+    // Word polygons: "2." at x: 50..65, "SEX" at x: 70..110, "1" at x: 160..170, "Male" at x: 175..220, "2" at x: 280..290, "Female" at x: 295..360
+    // Male mark slot is between "SEX" (110) and "1" (160): x: 110..158
+    // Female mark slot is between "Male" (220) and "2" (280) -> right ROI ends strictly before "2" (280 - 4 = 276)
+    const wordLayout = {
+      pages: [
+        {
+          width: imgWidth,
+          height: imgHeight,
+          lines: [
+            {
+              content: "2. SEX 1 Male 2 Female",
+              polygon: [50, 220, 360, 220, 360, 240, 50, 240],
+            },
+          ],
+          words: [
+            { content: "2.", polygon: [50, 220, 65, 220, 65, 240, 50, 240] },
+            { content: "SEX", polygon: [70, 220, 110, 220, 110, 240, 70, 240] },
+            { content: "1", polygon: [160, 220, 170, 220, 170, 240, 160, 240] },
+            { content: "Male", polygon: [175, 220, 220, 220, 220, 240, 175, 240] },
+            { content: "2", polygon: [280, 220, 290, 220, 290, 240, 280, 240] },
+            { content: "Female", polygon: [295, 220, 360, 220, 360, 240, 295, 240] },
+          ],
+        },
+      ],
+    };
+
+    // Draw Male 'X' mark inside left slot (x: 125..145)
+    // and draw dark printed text pixels for "2" and "Female" at x: 282 and x: 300
+    const svgContent = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <line x1="50" y1="239" x2="360" y2="239" stroke="black" stroke-width="2"/>
+        <!-- Typed 'X' in Male mark slot (x: 125..145) -->
+        <line x1="125" y1="215" x2="145" y2="235" stroke="black" stroke-width="4"/>
+        <line x1="145" y1="215" x2="125" y2="235" stroke="black" stroke-width="4"/>
+        <!-- Printed text '2' and 'Female' at x: 280+ -->
+        <text x="282" y="235" font-family="sans-serif" font-size="18" font-weight="bold" fill="black">2</text>
+        <text x="300" y="235" font-family="sans-serif" font-size="18" font-weight="bold" fill="black">Female</text>
+      </svg>
+    `;
+
+    const imgBuf = await sharp(Buffer.from(svgContent)).png().toBuffer();
+
+    const inkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: imgBuf,
+      rawLayout: wordLayout,
+    });
+
+    assert.strictEqual(inkRes.sex, "Male", "Word polygon mode must detect Male and never Female");
+    assert.strictEqual(inkRes.source, "pixel_ink_left_box");
+    assert.ok(inkRes.confidence >= 90, "Male confidence must be >= 90%");
+    assert.ok((inkRes.leftInkRatio || 0) > (inkRes.rightInkRatio || 0) * 1.55);
+  });
+
+  test("26. PSA Item 2. SEX Municipal Form No. 102 Geometry: '2. SEX' on line above 'X ___ 1 Male ___ 2 Female' (img_0007.png)", async () => {
+    const sharp = (await import("sharp")).default;
+    const { detectPsaSexFromMarkBoxInk, parsePsaCertificate } = await import("../src/lib/ocr/psaParser.ts");
+
+    const imgWidth = 1000;
+    const imgHeight = 1400;
+
+    // Exact Municipal Form No. 102 geometry:
+    // Line 1: '2.' and 'SEX' at y = 200..216, x = 60..135
+    // Line 2: '1' (x: 120..130), 'Male' (x: 136..178), '2' (x: 252..262), 'Female' (x: 268..325) at y = 224..242
+    // NO 'X' token in rawLayout words or lines!
+    const wordLayout = {
+      pages: [
+        {
+          width: imgWidth,
+          height: imgHeight,
+          lines: [
+            {
+              content: "2. SEX",
+              polygon: [60, 200, 135, 200, 135, 216, 60, 216],
+            },
+            {
+              content: "1 Male 2 Female",
+              polygon: [120, 224, 325, 224, 325, 242, 120, 242],
+            },
+          ],
+          words: [
+            { content: "2.", polygon: [60, 200, 80, 200, 80, 216, 60, 216] },
+            { content: "SEX", polygon: [85, 200, 135, 200, 135, 216, 85, 216] },
+            { content: "1", polygon: [120, 224, 130, 224, 130, 242, 120, 242] },
+            { content: "Male", polygon: [136, 224, 178, 224, 178, 242, 136, 242] },
+            { content: "2", polygon: [252, 224, 262, 224, 262, 242, 252, 242] },
+            { content: "Female", polygon: [268, 224, 325, 224, 325, 242, 268, 242] },
+          ],
+        },
+      ],
+    };
+
+    // Render SVG with:
+    // - Underlines at y = 241
+    // - Typed 'X' at x: 75..105, y: 224..242 (directly below '2. SEX' and to the left of '1 Male')
+    // - Printed digits and words '2' and 'Female' at x: 252+
+    const svgContent = `
+      <svg width="${imgWidth}" height="${imgHeight}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        <!-- Top line: 2. SEX -->
+        <text x="60" y="214" font-family="sans-serif" font-size="14" font-weight="bold" fill="black">2. SEX</text>
+        <!-- Underline before 1 Male -->
+        <line x1="70" y1="241" x2="115" y2="241" stroke="black" stroke-width="2"/>
+        <!-- Underline before 2 Female -->
+        <line x1="195" y1="241" x2="248" y2="241" stroke="black" stroke-width="2"/>
+        <!-- Typed 'X' on Left Underline (x: 82..102, y: 225..239) -->
+        <line x1="82" y1="225" x2="102" y2="239" stroke="black" stroke-width="3"/>
+        <line x1="102" y1="225" x2="82" y2="239" stroke="black" stroke-width="3"/>
+        <!-- Printed labels on Line 2 -->
+        <text x="120" y="239" font-family="sans-serif" font-size="14" font-weight="bold" fill="black">1</text>
+        <text x="136" y="239" font-family="sans-serif" font-size="14" font-weight="bold" fill="black">Male</text>
+        <text x="252" y="239" font-family="sans-serif" font-size="14" font-weight="bold" fill="black">2</text>
+        <text x="268" y="239" font-family="sans-serif" font-size="14" font-weight="bold" fill="black">Female</text>
+      </svg>
+    `;
+
+    const imgBuf = await sharp(Buffer.from(svgContent)).png().toBuffer();
+
+    const inkRes = await detectPsaSexFromMarkBoxInk({
+      uprightImageBuffer: imgBuf,
+      rawLayout: wordLayout,
+    });
+
+    assert.strictEqual(inkRes.sex, "Male", "Should detect Male from Left underline mark box ink on Municipal Form No. 102");
+    assert.notStrictEqual(inkRes.sex, "Female", "Must NEVER return Female for Male scan with 2. SEX above 1 Male");
+    assert.strictEqual(inkRes.source, "pixel_ink_left_box");
+    assert.ok(inkRes.confidence >= 90, `Male confidence must be >= 90%, got ${inkRes.confidence}`);
+    assert.ok((inkRes.leftInkRatio || 0) > (inkRes.rightInkRatio || 0) * 1.55, "leftInkRatio must be > rightInkRatio * 1.55");
+
+    const docTextWithoutX = `
+REPUBLIC OF THE PHILIPPINES
+CERTIFICATE OF LIVE BIRTH
+1. NAME: JUSTIN LOQUILLANO GOMEZ
+2. SEX
+1 Male 2 Female
+3. DATE OF BIRTH: 23 JUNE 2004
+`;
+
+    const certRes = await parsePsaCertificate(docTextWithoutX, wordLayout, 0.95, {
+      uprightImageBuffer: imgBuf,
+    });
+
+    assert.strictEqual(certRes.identity.sex, "M", "parsePsaCertificate must resolve sex to 'M'");
+    assert.strictEqual(certRes.identity.sex_label, "Male", "parsePsaCertificate must resolve sex_label to 'Male'");
+    assert.notStrictEqual(certRes.identity.sex, "F", "parsePsaCertificate must not resolve to 'F'");
+    assert.ok(certRes.field_statuses.sex.confidence >= 90, "field_statuses.sex.confidence must be >= 90");
+    assert.strictEqual(certRes.field_statuses.sex.value, "Male");
+  });
 });

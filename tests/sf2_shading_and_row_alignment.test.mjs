@@ -26,6 +26,11 @@ import {
 } from "../src/lib/ocr/shsSf2Parser.ts";
 
 import {
+  isBlacklistedStudentName,
+  DEPED_SEAL_AND_HEADER_PATTERNS,
+} from "../src/lib/validation/nameComparison.ts";
+
+import {
   evaluateUnifiedStudentValidation,
   parseNameParts,
 } from "../src/lib/validation/crossDocumentEngine.ts";
@@ -684,5 +689,149 @@ describe("Month-Scoped (June-Only) SF9↔SF2 Cross-Document Attendance Matching"
       juneRow.sf2Value.includes("Tardy: 3"),
       `Expected sf2Value to contain 'Tardy: 3', got: ${juneRow.sf2Value}`
     );
+  });
+});
+
+describe("Strict Vertical Bounding Box Cutoff & DepEd Seal Exclusion + Sheet Row Order", () => {
+  test("1. Rejects top-left DepEd seal OCR strings ('KAGAWARAN NG FOUKASYON', 'KAGAWARAN NG EDUKASYON', 'REPUBLIKA NG PILIPINAS')", () => {
+    assert.equal(isValidLearnerNameCandidate("KAGAWARAN NG FOUKASYON"), false);
+    assert.equal(isValidLearnerNameCandidate("KAGAWARAN NG EDUKASYON"), false);
+    assert.equal(isValidLearnerNameCandidate("REPUBLIKA NG PILIPINAS"), false);
+    assert.equal(isValidLearnerNameCandidate("Kagawaran ng Foukasyon"), false);
+    assert.equal(isValidLearnerNameCandidate("kagawaran ng poukasyon"), false);
+    assert.equal(isValidLearnerNameCandidate("Republic of the Philippines"), false);
+    assert.equal(isValidLearnerNameCandidate("Department of Education"), false);
+    assert.equal(isValidLearnerNameCandidate("School Form 2"), false);
+    assert.equal(isValidLearnerNameCandidate("Daily Attendance Report"), false);
+    assert.equal(isValidLearnerNameCandidate("Absenteeism and Dropout"), false);
+
+    assert.equal(isBlacklistedStudentName("KAGAWARAN NG FOUKASYON"), true);
+    assert.equal(isBlacklistedStudentName("KAGAWARAN NG EDUKASYON"), true);
+    assert.equal(isBlacklistedStudentName("REPUBLIKA NG PILIPINAS"), true);
+    assert.equal(isBlacklistedStudentName("Kagawaran ng Foukasyon"), true);
+  });
+
+  test("2. Rejects candidate lines above LEARNER'S NAME table header and below MALE/FEMALE TOTAL footer in spatial layout", () => {
+    const rawLayoutWithSeal = {
+      pages: [
+        {
+          width: 1000,
+          height: 1000,
+          lines: [
+            // Top-left DepEd seal lines (y = 50..120)
+            {
+              content: "REPUBLIKA NG PILIPINAS",
+              polygon: [50, 50, 250, 50, 250, 80, 50, 80],
+            },
+            {
+              content: "KAGAWARAN NG FOUKASYON",
+              polygon: [50, 85, 250, 85, 250, 115, 50, 115],
+            },
+            // Table Header lines (y = 200..250)
+            {
+              content: "LEARNER'S NAME (Last Name, First Name, Middle Name)",
+              polygon: [50, 200, 350, 200, 350, 240, 50, 240],
+            },
+            {
+              content: "1st row for date, 2nd row for day",
+              polygon: [360, 200, 900, 200, 900, 240, 360, 240],
+            },
+            // Valid Learner 1 (Row 1: Justin Gomez at y = 290..320)
+            {
+              content: "Gomez, Justin Loquillano",
+              polygon: [50, 290, 300, 290, 300, 320, 50, 320],
+            },
+            // Valid Learner 2 (Row 2: Kenneth Latonero at y = 350..380)
+            {
+              content: "Latonero, Kenneth Abad",
+              polygon: [50, 350, 300, 350, 300, 380, 50, 380],
+            },
+            // Footer lines (y = 800..850)
+            {
+              content: "MALE | TOTAL Per Day",
+              polygon: [50, 800, 350, 800, 350, 840, 50, 840],
+            },
+            // Free-floating line below footer (y = 880..910)
+            {
+              content: "Absenteeism and Dropout Reasons",
+              polygon: [50, 880, 350, 880, 350, 910, 50, 910],
+            },
+          ],
+          words: [
+            { content: "Gomez,", polygon: [50, 290, 120, 290, 120, 320, 50, 320] },
+            { content: "Justin", polygon: [125, 290, 190, 290, 190, 320, 125, 320] },
+            { content: "Loquillano", polygon: [195, 290, 300, 290, 300, 320, 195, 320] },
+            { content: "0", polygon: [750, 290, 770, 290, 770, 320, 750, 320] }, // Written Absent: 0
+            { content: "0", polygon: [790, 290, 810, 290, 810, 320, 790, 320] }, // Written Tardy: 0
+            { content: "Latonero,", polygon: [50, 350, 130, 350, 130, 380, 50, 380] },
+            { content: "Kenneth", polygon: [135, 350, 210, 350, 210, 380, 135, 380] },
+            { content: "Abad", polygon: [215, 350, 280, 350, 280, 380, 215, 380] },
+            { content: "0", polygon: [750, 350, 770, 350, 770, 380, 750, 380] }, // Written Absent: 0
+            { content: "3", polygon: [790, 350, 810, 350, 810, 380, 790, 380] }, // Written Tardy: 3
+          ],
+        },
+      ],
+    };
+
+    const parsed = parseShsSf2("", rawLayoutWithSeal);
+
+    // Seal text ("KAGAWARAN NG FOUKASYON", "REPUBLIKA NG PILIPINAS") and footer phrases must be rejected
+    assert.equal(parsed.attendance.length, 2, "Only authentic learner rows inside table body must be extracted");
+
+    // Exact top-to-bottom sheet row order preserved (Row 1 = Gomez, Row 2 = Latonero)
+    assert.equal(parsed.attendance[0].learner_name, "Gomez, Justin Loquillano");
+    assert.equal(parsed.attendance[0].rowIndex, 1);
+    assert.equal(parsed.attendance[1].learner_name, "Latonero, Kenneth Abad");
+    assert.equal(parsed.attendance[1].rowIndex, 2);
+
+    // Verify neither entry contains seal or government text
+    for (const entry of parsed.attendance) {
+      assert.ok(!entry.learner_name.toLowerCase().includes("kagawaran"));
+      assert.ok(!entry.learner_name.toLowerCase().includes("foukasyon"));
+      assert.ok(!entry.learner_name.toLowerCase().includes("republika"));
+      assert.ok(!entry.learner_name.toLowerCase().includes("pilipinas"));
+    }
+  });
+
+  test("3. Azure Table with top seal cell above header rejects seal row and preserves Row 1 = Gomez, Row 2 = Latonero", () => {
+    const rawTableWithSeal = [
+      {
+        cells: [
+          // Row 0: Outside table header / DepEd Seal
+          { rowIndex: 0, columnIndex: 0, content: "KAGAWARAN NG FOUKASYON", polygon: [50, 50, 250, 50, 250, 90, 50, 90] },
+          { rowIndex: 0, columnIndex: 1, content: "REPUBLIKA NG PILIPINAS", polygon: [260, 50, 500, 50, 500, 90, 260, 90] },
+          // Row 1: Header Row
+          { rowIndex: 1, columnIndex: 0, content: "LEARNER'S NAME (Last Name, First Name, Middle Name)", polygon: [50, 180, 350, 180, 350, 230, 50, 230] },
+          { rowIndex: 1, columnIndex: 1, content: "1st row for date, 2nd row for day", polygon: [360, 180, 700, 180, 700, 230, 360, 230] },
+          { rowIndex: 1, columnIndex: 2, content: "Total Absent", polygon: [710, 180, 780, 180, 780, 230, 710, 230] },
+          { rowIndex: 1, columnIndex: 3, content: "Total Tardy", polygon: [790, 180, 860, 180, 860, 230, 790, 230] },
+          // Row 2: Learner 1 (Gomez, Justin Loquillano)
+          { rowIndex: 2, columnIndex: 0, content: "Gomez, Justin Loquillano", polygon: [50, 250, 350, 250, 350, 290, 50, 290] },
+          { rowIndex: 2, columnIndex: 1, content: ":selected: :selected: :selected:", polygon: [360, 250, 700, 250, 700, 290, 360, 290] },
+          { rowIndex: 2, columnIndex: 2, content: "0", polygon: [710, 250, 780, 250, 780, 290, 710, 290] },
+          { rowIndex: 2, columnIndex: 3, content: "0", polygon: [790, 250, 860, 250, 860, 290, 790, 290] },
+          // Row 3: Learner 2 (Latonero, Kenneth Abad)
+          { rowIndex: 3, columnIndex: 0, content: "Latonero, Kenneth Abad", polygon: [50, 310, 350, 310, 350, 350, 50, 350] },
+          { rowIndex: 3, columnIndex: 1, content: "/ / /", polygon: [360, 310, 700, 310, 700, 350, 360, 350] },
+          { rowIndex: 3, columnIndex: 2, content: "0", polygon: [710, 310, 780, 310, 780, 350, 710, 350] },
+          { rowIndex: 3, columnIndex: 3, content: "3", polygon: [790, 310, 860, 310, 860, 350, 790, 350] },
+          // Row 4: Footer Row
+          { rowIndex: 4, columnIndex: 0, content: "MALE | TOTAL Per Day", polygon: [50, 800, 350, 800, 350, 840, 50, 840] },
+          { rowIndex: 4, columnIndex: 2, content: "0", polygon: [710, 800, 780, 800, 780, 840, 710, 840] },
+          { rowIndex: 4, columnIndex: 3, content: "3", polygon: [790, 800, 860, 800, 860, 840, 790, 840] },
+        ],
+      },
+    ];
+
+    const parsed = parseShsSf2("", rawTableWithSeal);
+
+    // Must extract exactly 2 learners
+    assert.equal(parsed.attendance.length, 2, "Must extract exactly 2 learners, excluding top seal row");
+
+    // Physical sheet order: Row 1 = Gomez, Row 2 = Latonero
+    assert.equal(parsed.attendance[0].learner_name, "Gomez, Justin Loquillano");
+    assert.equal(parsed.attendance[0].rowIndex, 1);
+    assert.equal(parsed.attendance[1].learner_name, "Latonero, Kenneth Abad");
+    assert.equal(parsed.attendance[1].rowIndex, 2);
   });
 });

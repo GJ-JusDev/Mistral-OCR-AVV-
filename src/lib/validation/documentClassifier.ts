@@ -399,8 +399,8 @@ export function validateSf9CrossSideCompatibility(
   }
 
   // 3. School Year check across sides
-  const sy1 = (frontFields.school_year || "").replace(/[^0-9]/g, "");
-  const sy2 = (backFields.school_year || "").replace(/[^0-9]/g, "");
+  const sy1 = String(frontFields.school_year ?? "").replace(/[^0-9]/g, "");
+  const sy2 = String(backFields.school_year ?? "").replace(/[^0-9]/g, "");
 
   if (sy1 && sy2 && sy1.length === 8 && sy2.length === 8) {
     if (sy1 !== sy2) {
@@ -411,8 +411,8 @@ export function validateSf9CrossSideCompatibility(
   }
 
   // 4. Grade Level check across sides
-  const gl1 = (frontFields.grade_level || "").toLowerCase().replace(/[^0-9]/g, "");
-  const gl2 = (backFields.grade_level || "").toLowerCase().replace(/[^0-9]/g, "");
+  const gl1 = String(frontFields.grade_level ?? "").toLowerCase().replace(/[^0-9]/g, "");
+  const gl2 = String(backFields.grade_level ?? "").toLowerCase().replace(/[^0-9]/g, "");
 
   if (gl1 && gl2 && gl1 !== gl2) {
     warnings.push(

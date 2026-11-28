@@ -23,7 +23,11 @@ import {
   DEPED_11_MONTHS,
   type CanonicalDepEdMonthKey,
 } from "@/lib/validation/monthNormalizer";
-import { isBlacklistedStudentName, areLearnerNamesMatching } from "@/lib/validation/nameComparison";
+import {
+  isBlacklistedStudentName,
+  areLearnerNamesMatching,
+  DEPED_SEAL_AND_HEADER_PATTERNS,
+} from "@/lib/validation/nameComparison";
 import { validateSf2RowFormattingAndTotals, validateSf2SchoolYear, type Sf2RowValidationResult } from "@/lib/validation/sf2Validation";
 import { validateConsecutiveSchoolYear } from "@/lib/validation/gradeUtils";
 
@@ -53,9 +57,14 @@ export function isValidLearnerNameCandidate(name: string): boolean {
 
   const lower = cleaned.toLowerCase();
 
+  // DepEd seal, government header, and OCR typo regex pattern check
+  if (DEPED_SEAL_AND_HEADER_PATTERNS.some((pat) => pat.test(name) || pat.test(cleaned) || pat.test(lower))) {
+    return false;
+  }
+
   // Explicit SF2 header, footer, guidelines, and instructions rejection
   if (
-    /(?:learner['’]?s?\s*name|last\s*name|first\s*name|middle\s*name|1st\s*row|2nd\s*row|row\s*for\s*date|row\s*for\s*day|day[:\s]*m|total\s*per\s*day|male\s*\|\s*total|female\s*\|\s*total|combined\s*\|\s*total|total\s*male|total\s*female|total\s*for\s*the\s*month|remark|dropped\s*out|transferred|school\s*form|sf2|daily\s*attendance|report\s*of\s*learners|section[:\s]|grade\s*level|school\s*id|school\s*year|track|strand)/i.test(
+    /(?:learner['’]?s?\s*name|last\s*name|first\s*name|middle\s*name|1st\s*row|2nd\s*row|row\s*for\s*date|row\s*for\s*day|day[:\s]*m|total\s*per\s*day|male\s*\|\s*total|female\s*\|\s*total|combined\s*\|\s*total|total\s*male|total\s*female|total\s*for\s*the\s*month|remark|dropped\s*out|transferred|school\s*form|sf2|daily\s*attendance|report\s*of\s*learners|section[:\s]|grade\s*level|school\s*id|school\s*year|track|strand|kagawaran|edukasyon|foukasyon|poukasyon|edukasyun|republika|pilipinas|absenteeism|dropout)/i.test(
       lower
     )
   ) {
@@ -78,7 +87,15 @@ export function isValidLearnerNameCandidate(name: string): boolean {
     lower.includes("cause") ||
     lower.includes("legend") ||
     lower.includes("dropped") ||
-    lower.includes("transferred")
+    lower.includes("transferred") ||
+    lower.includes("kagawaran") ||
+    lower.includes("foukasyon") ||
+    lower.includes("poukasyon") ||
+    lower.includes("edukasyon") ||
+    lower.includes("republika") ||
+    lower.includes("pilipinas") ||
+    lower.includes("absenteeism") ||
+    lower.includes("dropout")
   ) {
     return false;
   }
@@ -99,11 +116,36 @@ export function isValidLearnerNameCandidate(name: string): boolean {
     "date", "day", "days", "month", "total", "male", "female", "combined",
     "absent", "tardy", "present", "remark", "remarks", "school", "guideline",
     "guidelines", "reason", "reasons", "cause", "legend", "dropped", "transferred",
-    "section", "grade", "track", "strand", "form", "report", "profile"
+    "section", "grade", "track", "strand", "form", "report", "profile",
+    "kagawaran", "edukasyon", "foukasyon", "poukasyon", "edukasyun",
+    "republika", "pilipinas", "philippines", "department", "education",
+    "absenteeism", "dropout"
   ]);
 
   if (words.some((w) => blacklistedTokens.has(w.toLowerCase()))) {
     return false;
+  }
+
+  // Filipino Person-Name Format Guard:
+  // Must match Filipino person-name structure (e.g. "LastName, FirstName MiddleName" with a comma, or 2 to 5 valid person-name tokens)
+  const nameParts = cleaned.split(",").map((s) => s.trim()).filter(Boolean);
+  if (nameParts.length > 2) {
+    return false;
+  }
+
+  const nameTokens = cleaned
+    .replace(/,/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 0);
+
+  if (nameTokens.length < 2 || nameTokens.length > 5) {
+    return false;
+  }
+
+  for (const token of nameTokens) {
+    if (!/^[a-zA-ZñÑ\.\-']{1,25}$/.test(token)) {
+      return false;
+    }
   }
 
   return true;
@@ -132,6 +174,7 @@ export function deduplicateSf2Records<T extends Record<string, any>>(records: T[
   for (const rec of records) {
     const rawName = (rec.learner_name || rec.student_name || rec.name || "").trim();
     if (!rawName) continue;
+    if (!isValidLearnerNameCandidate(rawName) || isBlacklistedStudentName(rawName)) continue;
 
     const normName = cleanLearnerNameString(rawName).toLowerCase().replace(/[^a-z0-9]/g, "");
     if (!normName) continue;
@@ -205,9 +248,25 @@ export function deduplicateSf2Records<T extends Record<string, any>>(records: T[
     map.set(key, merged);
   }
 
+  // Preserve physical sheet row order (rowIndex / top-to-bottom vertical y position), NEVER alphabetical order
+  const items = Array.from(map.values());
+  items.sort((a: any, b: any) => {
+    const rowA = a.rowIndex ?? a.row_index ?? 9999;
+    const rowB = b.rowIndex ?? b.row_index ?? 9999;
+    if (rowA !== rowB && rowA !== 9999 && rowB !== 9999) {
+      return rowA - rowB;
+    }
+    const yA = a.bounding_box?.[1] ?? a.bounding_box?.minY ?? a.bounds?.centerY ?? a.bounds?.minY ?? 0;
+    const yB = b.bounding_box?.[1] ?? b.bounding_box?.minY ?? b.bounds?.centerY ?? b.bounds?.minY ?? 0;
+    if (yA !== yB && yA !== 0 && yB !== 0) {
+      return yA - yB;
+    }
+    return 0;
+  });
+
   const result: T[] = [];
   let index = 1;
-  for (const item of map.values()) {
+  for (const item of items) {
     result.push({
       ...item,
       row_index: index,
@@ -319,10 +378,12 @@ export function parseShsSf2(
 
   const attendance: ShsSf2ParseResult["attendance"] = [];
 
+  let hasTableEntries = false;
   if (tables && tables.length > 0) {
     const tableEntries = parseAttendanceFromAzureTables(tables, header, warnings, rawLayout);
     if (tableEntries.length > 0) {
       attendance.push(...tableEntries);
+      hasTableEntries = true;
     }
   }
 
@@ -335,7 +396,7 @@ export function parseShsSf2(
     ? rawLayoutOrTables.rawLayout.reconstructedRows
     : [];
 
-  if (reconstructedRows.length > 0) {
+  if (reconstructedRows.length > 0 && !hasTableEntries) {
     const reconEntries = parseAttendanceFromText(reconstructedRows.join("\n"), header, warnings, rawLayout);
     if (reconEntries.length > 0) {
       attendance.push(...reconEntries);
@@ -343,15 +404,34 @@ export function parseShsSf2(
   }
 
   // Pass 3: Spatial Line & Geometry Fallback
-  // Run when rawLayout is present so spatial shading and handwritten cursive entries are captured
+  // If tableEntries were already extracted from the table body, do NOT merge free-floating outside lines!
+  // Only use spatial layout if no table entries exist, OR if merging, only enrich EXISTING table entries.
   if (rawLayout) {
     const spatialEntries = parseAttendanceFromSpatialLayout(rawLayout, header, warnings);
     if (spatialEntries.length > 0) {
-      attendance.push(...spatialEntries);
+      if (!hasTableEntries) {
+        attendance.push(...spatialEntries);
+      } else {
+        // Only enrich existing table entries with spatial shading data, do NOT add new free-floating rows!
+        for (const spEntry of spatialEntries) {
+          const spName = spEntry.learner_name || spEntry.student_name || spEntry.name;
+          const matchingTableEntry = attendance.find((te) =>
+            areLearnerNamesMatching({ fullName: te.learner_name || te.student_name || te.name }, { fullName: spName })
+          );
+          if (matchingTableEntry) {
+            if ((spEntry.days_present ?? 0) > (matchingTableEntry.days_present ?? 0)) {
+              matchingTableEntry.days_present = spEntry.days_present;
+              matchingTableEntry.total_school_days = spEntry.total_school_days;
+              matchingTableEntry.daily_grid = spEntry.daily_grid;
+              matchingTableEntry.dailyCells = spEntry.dailyCells;
+            }
+          }
+        }
+      }
     }
   }
 
-  if (rawText) {
+  if (rawText && attendance.length === 0) {
     const textEntries = parseAttendanceFromText(rawText, header, warnings, rawLayout);
     if (textEntries.length > 0) {
       attendance.push(...textEntries);
@@ -546,13 +626,73 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
       rowMap.get(r)!.set(c, { content: cell.content?.trim() || "", polygon: poly });
     }
 
+    // 1. First pass over all cells: locate table header bottom Y and max header row index
+    let learnerTableHeaderBottomY = -1;
+    let learnerTableFooterTopY = Infinity;
+    let maxHeaderRowIndex = -1;
+    let minFooterRowIndex = Infinity;
+
+    for (const cell of table.cells) {
+      const r = cell.rowIndex;
+      const content = (cell.content || "").toLowerCase().trim();
+      const poly = cell.boundingRegions?.[0]?.polygon || cell.polygon;
+      const box = poly ? getPolygonBoundingBox(poly) : null;
+
+      const isHeaderCell =
+        content.includes("learner's name") ||
+        content.includes("learner name") ||
+        content.includes("pangalan") ||
+        content.includes("last name, first name") ||
+        content.includes("first name, middle name") ||
+        content.includes("1st row for date") ||
+        content.includes("2nd row for day") ||
+        content.includes("row for date") ||
+        content.includes("row for day");
+
+      if (isHeaderCell) {
+        if (r > maxHeaderRowIndex) maxHeaderRowIndex = r;
+        if (box && box.maxY > learnerTableHeaderBottomY) {
+          learnerTableHeaderBottomY = box.maxY;
+        }
+      }
+    }
+
+    // 2. Second pass: locate table footer top Y and min footer row index strictly below header rows
+    for (const cell of table.cells) {
+      const r = cell.rowIndex;
+      if (maxHeaderRowIndex !== -1 && r <= maxHeaderRowIndex) continue;
+
+      const content = (cell.content || "").toLowerCase().trim();
+      const poly = cell.boundingRegions?.[0]?.polygon || cell.polygon;
+      const box = poly ? getPolygonBoundingBox(poly) : null;
+
+      const isFooterCell =
+        content.includes("total per day") ||
+        content.includes("male | total") ||
+        content.includes("female | total") ||
+        content.includes("combined | total") ||
+        content.includes("total male") ||
+        content.includes("total female") ||
+        content.includes("absenteeism and dropout") ||
+        content.includes("reasons / causes") ||
+        content.includes("reasons and causes");
+
+      if (isFooterCell) {
+        if (r < minFooterRowIndex) minFooterRowIndex = r;
+        if (box && box.minY < learnerTableFooterTopY) {
+          learnerTableFooterTopY = box.minY;
+        }
+      }
+    }
+
     const sortedRows = Array.from(rowMap.keys()).sort((a, b) => a - b);
     for (const r of sortedRows) {
       const rowCells = rowMap.get(r)!;
       const rowText = Array.from(rowCells.values()).map(c => c.content).join(" ").toLowerCase();
 
       // Skip headers & totals
-      if (
+      const isHeaderRow =
+        r <= maxHeaderRowIndex ||
         rowText.includes("learner's name") ||
         rowText.includes("learner name") ||
         rowText.includes("pangalan") ||
@@ -561,7 +701,10 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         rowText.includes("1st row for date") ||
         rowText.includes("2nd row for day") ||
         rowText.includes("row for date") ||
-        rowText.includes("row for day") ||
+        rowText.includes("row for day");
+
+      const isFooterRow =
+        (minFooterRowIndex !== Infinity && r >= minFooterRowIndex) ||
         rowText.includes("total per day") ||
         rowText.includes("male | total") ||
         rowText.includes("female | total") ||
@@ -569,13 +712,15 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         rowText.includes("total male") ||
         rowText.includes("total female") ||
         rowText.includes("total for the month") ||
+        rowText.includes("absenteeism and dropout") ||
         rowText.includes("remark") ||
         rowText.includes("dropped out") ||
         rowText.includes("transferred") ||
         (rowText.includes("absent") && rowText.includes("tardy")) ||
         (rowText.includes("absent") && rowText.includes("present")) ||
-        (rowText.includes("total") && (rowText.includes("month") || rowText.includes("absent") || rowText.includes("tardy") || rowText.includes("day")))
-      ) {
+        (rowText.includes("total") && (rowText.includes("month") || rowText.includes("absent") || rowText.includes("tardy") || rowText.includes("day")));
+
+      if (isHeaderRow || isFooterRow) {
         for (const [c, cell] of rowCells.entries()) {
           const v = cell.content.toLowerCase().trim();
           if (v.includes("name") || v.includes("pangalan")) nameCol = c;
@@ -593,6 +738,26 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
           }
         }
         continue;
+      }
+
+      // Enforce strict vertical table-body bounding box cutoff
+      let rowCenterY = -1;
+      for (const cell of rowCells.values()) {
+        if (cell.polygon) {
+          const b = getPolygonBoundingBox(cell.polygon);
+          if (b.centerY > 0) {
+            rowCenterY = b.centerY;
+            break;
+          }
+        }
+      }
+      if (rowCenterY > 0) {
+        if (learnerTableHeaderBottomY > 0 && rowCenterY <= learnerTableHeaderBottomY) {
+          continue; // HARD REJECT: vertical center is at or above table header bottom
+        }
+        if (learnerTableFooterTopY < Infinity && rowCenterY >= learnerTableFooterTopY) {
+          continue; // HARD REJECT: vertical center is at or below table footer top
+        }
       }
 
       // If daily columns were not explicitly identified in the header, infer them from intermediate columns
@@ -651,12 +816,14 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
           const candidateLines = rawLines.filter((l: any) => {
             if (!l.polygon || l.polygon.length < 8) return false;
             const b = getPolygonBoundingBox(l.polygon);
+            if (learnerTableHeaderBottomY > 0 && b.centerY <= learnerTableHeaderBottomY) return false;
+            if (learnerTableFooterTopY < Infinity && b.centerY >= learnerTableFooterTopY) return false;
             const isYClose = Math.abs(b.centerY - cellBox.centerY) < Math.max(25, (cellBox.maxY - cellBox.minY) * 1.2);
             return isYClose && b.centerX < cellBox.centerX;
           });
           for (const cl of candidateLines) {
             const cleaned = cleanLearnerNameString(cl.content);
-            if (isValidLearnerNameCandidate(cleaned)) {
+            if (isValidLearnerNameCandidate(cleaned) && !isBlacklistedStudentName(cleaned)) {
               learnerName = cleaned;
               namePolygon = cl.polygon;
               break;
@@ -665,7 +832,7 @@ function parseAttendanceFromAzureTables(tables: any[], header: ShsSf2Header, war
         }
       }
 
-      if (!learnerName || !isValidLearnerNameCandidate(learnerName)) {
+      if (!learnerName || !isValidLearnerNameCandidate(learnerName) || isBlacklistedStudentName(learnerName)) {
         continue;
       }
 
@@ -1087,7 +1254,8 @@ function parseAttendanceFromSpatialLayout(
     }
   }
 
-  // 2. Identify vertical boundaries: headerY and bottomY
+  // 2. Identify vertical boundaries: learnerTableHeaderBottomY and learnerTableFooterTopY
+  let learnerTableHeaderBottomY = -1;
   let headerY = 0.20;
   for (const l of linesWithBounds) {
     const content = (l.content || "").toLowerCase();
@@ -1100,17 +1268,23 @@ function parseAttendanceFromSpatialLayout(
       content.includes("1st row for date") ||
       content.includes("2nd row for day")
     ) {
+      if (l.bounds.maxY > learnerTableHeaderBottomY) {
+        learnerTableHeaderBottomY = l.bounds.maxY;
+      }
       const normMaxY = l.bounds.maxY / pageHeight;
       if (normMaxY > headerY && normMaxY < 0.45) {
         headerY = normMaxY;
       }
     }
   }
+  if (learnerTableHeaderBottomY <= 0) {
+    learnerTableHeaderBottomY = headerY * pageHeight;
+  }
 
+  let learnerTableFooterTopY = Infinity;
   let bottomY = 0.95;
   for (const l of linesWithBounds) {
-    const normCenterY = l.bounds.centerY / pageHeight;
-    if (normCenterY <= headerY) continue;
+    if (learnerTableHeaderBottomY > 0 && l.bounds.centerY <= learnerTableHeaderBottomY) continue;
     const content = (l.content || "").toLowerCase();
     if (
       content.includes("total per day") ||
@@ -1120,13 +1294,20 @@ function parseAttendanceFromSpatialLayout(
       content.includes("male | total") ||
       content.includes("female | total") ||
       content.includes("combined | total") ||
-      ((content.includes("male") || content.includes("female")) && content.includes("total") && normCenterY > 0.45)
+      content.includes("absenteeism and dropout") ||
+      ((content.includes("male") || content.includes("female")) && content.includes("total") && l.bounds.centerY > 0.45 * pageHeight)
     ) {
+      if (l.bounds.minY < learnerTableFooterTopY && l.bounds.minY > learnerTableHeaderBottomY) {
+        learnerTableFooterTopY = l.bounds.minY;
+      }
       const normMinY = l.bounds.minY / pageHeight;
       if (normMinY < bottomY && normMinY > headerY) {
         bottomY = normMinY;
       }
     }
+  }
+  if (learnerTableFooterTopY === Infinity) {
+    learnerTableFooterTopY = bottomY * pageHeight;
   }
 
   // 3. Locate learner name lines inside dynamic LEARNER'S NAME column band
@@ -1152,13 +1333,17 @@ function parseAttendanceFromSpatialLayout(
     : 0.38;
 
   const candidateNameLines = linesWithBounds.filter((l) => {
+    // HARD REJECT if vertical center y is above learnerTableHeaderBottomY or at/below learnerTableFooterTopY
+    if (l.bounds.centerY <= learnerTableHeaderBottomY || l.bounds.centerY >= learnerTableFooterTopY) {
+      return false;
+    }
     const normCenterX = l.bounds.centerX / pageWidth;
     const normCenterY = l.bounds.centerY / pageHeight;
     if (normCenterY <= headerY || normCenterY >= bottomY) return false;
     if (normCenterX < colMinX || normCenterX > colMaxX) return false;
 
     const cleaned = cleanLearnerNameString(l.content);
-    if (!isValidLearnerNameCandidate(cleaned)) return false;
+    if (!isValidLearnerNameCandidate(cleaned) || isBlacklistedStudentName(cleaned)) return false;
 
     return true;
   });
@@ -1515,6 +1700,8 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
   let rowIndex = 1;
   let currentPageNumber = 1;
 
+  let inLearnerTableBody = !/(?:learner['’]?s?\s*name|last\s*name,\s*first\s*name|pangalan|1st\s*row\s*for\s*date)/i.test(text);
+
   const lines = text.split("\n");
   for (const line of lines) {
     const trimmed = line.trim();
@@ -1529,6 +1716,41 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
     }
 
     const lower = trimmed.toLowerCase();
+
+    // Check table-body header row activation
+    if (
+      lower.includes("learner's name") ||
+      lower.includes("last name, first name") ||
+      lower.includes("pangalan") ||
+      lower.includes("1st row for date") ||
+      lower.includes("2nd row for day")
+    ) {
+      inLearnerTableBody = true;
+      continue;
+    }
+
+    // Check table-body footer row deactivation
+    if (
+      lower.includes("total per day") ||
+      lower.includes("male | total") ||
+      lower.includes("female | total") ||
+      lower.includes("combined | total") ||
+      lower.includes("total male") ||
+      lower.includes("total female") ||
+      lower.includes("total for the month") ||
+      lower.includes("absenteeism and dropout") ||
+      lower.includes("guidelines") ||
+      lower.includes("reasons and causes")
+    ) {
+      inLearnerTableBody = false;
+      continue;
+    }
+
+    // Hard reject lines outside the learner table body
+    if (!inLearnerTableBody) {
+      continue;
+    }
+
     if (
       lower.includes("school form 2") ||
       lower.includes("daily attendance") ||
@@ -1561,7 +1783,7 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
           .filter((p) => /^\d+(\.\d+)?$/.test(p) && parseFloat(p) <= 31)
           .map((p) => parseFloat(p));
 
-        if (namePart && isValidLearnerNameCandidate(namePart) && numericCols.length >= 2) {
+        if (namePart && isValidLearnerNameCandidate(namePart) && !isBlacklistedStudentName(namePart) && numericCols.length >= 2) {
           // Detect daily cell tokens in parts (e.g. full, shaded, upper_triangle, blank)
           const cellTokens = parts.filter((p) => /^(?:full|shaded|full_shade|upper_triangle|lower_triangle|half|blank|unmarked|x|■)$/i.test(p));
           const fullShadedCount = cellTokens.filter((p) => /^(?:full|shaded|full_shade|x|■)$/i.test(p)).length;
@@ -1651,7 +1873,7 @@ function parseAttendanceFromText(text: string, header: ShsSf2Header, warnings: s
       const extractedLrn = labeledMatch[1] || null;
       const rawName = labeledMatch[2].trim();
       const name = cleanLearnerNameString(rawName);
-      if (!isValidLearnerNameCandidate(name)) continue;
+      if (!isValidLearnerNameCandidate(name) || isBlacklistedStudentName(name)) continue;
       const daysPresent = parseInt(labeledMatch[3], 10);
       const daysAbsent = parseInt(labeledMatch[4], 10);
       const daysTardy = labeledMatch[5] ? parseInt(labeledMatch[5], 10) : 0;

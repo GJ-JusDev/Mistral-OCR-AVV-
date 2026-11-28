@@ -3,6 +3,7 @@
  */
 
 import { normalizeObservedValueMarking, sanitizeLearnersObservedValues } from "../validation/gradeUtils";
+import { detectPsaSexFromMarkBoxInk } from "./psaParser";
 
 export { normalizeObservedValueMarking, sanitizeLearnersObservedValues };
 
@@ -614,10 +615,63 @@ export async function handleOcrRoute(
           fields = fieldParser(ocrResult.text, gradeLevel, ocrResult.rawLayout, effectiveDocType, targetOptions);
         }
 
+        let sexDiagnostic: any = undefined;
+        if (effectiveDocType === "birth_cert" || effectiveDocType === "psa") {
+          const currentSex = fields?.sex || fields?.identity?.sex;
+          const currentSexConf = fields?.field_statuses?.sex?.confidence ?? 0;
+          const rawImageCandidate = body.upperSectionImage || body.originalImage || effectiveFrontImage || body.image;
+
+          if ((!currentSex || currentSexConf < 75) && rawImageCandidate && typeof rawImageCandidate === "string") {
+            try {
+              const b64 = rawImageCandidate.includes(",") ? rawImageCandidate.split(",")[1] : rawImageCandidate;
+              const imgBuf = Buffer.from(b64, "base64");
+              const inkRes = await detectPsaSexFromMarkBoxInk({
+                uprightImageBuffer: imgBuf,
+                rawLayout: ocrResult.rawLayout,
+              });
+              if (inkRes.sex) {
+                if (!fields) fields = {};
+                fields.sex = inkRes.sex;
+                if (!fields.identity) fields.identity = {};
+                fields.identity.sex = inkRes.sex === "Male" ? "M" : "F";
+                fields.identity.sex_label = inkRes.sex;
+                if (!fields.field_statuses) fields.field_statuses = {};
+                fields.field_statuses.sex = {
+                  value: inkRes.sex,
+                  status: "extracted",
+                  confidence: inkRes.confidence || 92,
+                };
+                if (Array.isArray(fields.warnings)) {
+                  fields.warnings = fields.warnings.filter((w: string) => !w.toLowerCase().includes("sex could not be reliably extracted"));
+                }
+              }
+              sexDiagnostic = {
+                leftInkRatio: inkRes.leftInkRatio,
+                rightInkRatio: inkRes.rightInkRatio,
+                source: inkRes.source || (inkRes.sex ? (inkRes.sex === "Male" ? "pixel_ink_left_box" : "pixel_ink_right_box") : "not_detected"),
+                matchedLines: inkRes.matchedLines || [],
+              };
+            } catch (inkErr) {
+              console.warn("[handleOcrRoute] detectPsaSexFromMarkBoxInk error:", inkErr);
+            }
+          }
+
+          if (!sexDiagnostic) {
+            sexDiagnostic = {
+              leftInkRatio: 0,
+              rightInkRatio: 0,
+              source: (fields?.sex || fields?.identity?.sex) ? "text_x_mark" : "not_detected",
+              matchedLines: [],
+            };
+          }
+        }
+
         const { ocrConfidencePercent, extractedFieldCompletenessPercent } = calculateOcrMetrics(ocrResult.confidence, fields, effectiveDocType);
 
         const responseData: any = {
           text: ocrResult.text,
+          rawText: ocrResult.text,
+          raw_ocr_text: ocrResult.text,
           model: ocrResult.model,
           provider: ocrResult.provider || "azure",
           ocrConfidencePercent,
@@ -626,7 +680,21 @@ export async function handleOcrRoute(
         if (typeof ocrResult.confidence === "number") {
           responseData.confidence = ocrResult.confidence;
         }
+        if (sexDiagnostic) {
+          responseData.sexDiagnostic = sexDiagnostic;
+          if (fields?.sex || fields?.identity?.sex) {
+            responseData.sex = fields.sex || fields.identity?.sex;
+          }
+          if (fields?.field_statuses) {
+            responseData.field_statuses = fields.field_statuses;
+          }
+        }
         if (fields) {
+          if (sexDiagnostic) {
+            fields.sexDiagnostic = sexDiagnostic;
+          }
+          fields.rawText = ocrResult.text;
+          fields.raw_ocr_text = ocrResult.text;
           fields.ocr_provider = ocrResult.provider || "azure";
           fields.ocr_model = ocrResult.model;
           fields.ocr_confidence_percent = ocrConfidencePercent;
@@ -762,9 +830,63 @@ export async function handleOcrRoute(
               if (extractFields && fieldParser) {
                 fallbackFields = fieldParser(fallbackRes.text, gradeLevel, fallbackRes.rawLayout, effectiveDocType, targetOptions);
               }
+
+              let fallbackSexDiagnostic: any = undefined;
+              if (effectiveDocType === "birth_cert" || effectiveDocType === "psa") {
+                const currentSex = fallbackFields?.sex || fallbackFields?.identity?.sex;
+                const currentSexConf = fallbackFields?.field_statuses?.sex?.confidence ?? 0;
+                const rawImageCandidate = body.upperSectionImage || body.originalImage || effectiveFrontImage || body.image;
+
+                if ((!currentSex || currentSexConf < 75) && rawImageCandidate && typeof rawImageCandidate === "string") {
+                  try {
+                    const b64 = rawImageCandidate.includes(",") ? rawImageCandidate.split(",")[1] : rawImageCandidate;
+                    const imgBuf = Buffer.from(b64, "base64");
+                    const inkRes = await detectPsaSexFromMarkBoxInk({
+                      uprightImageBuffer: imgBuf,
+                      rawLayout: fallbackRes.rawLayout,
+                    });
+                    if (inkRes.sex) {
+                      if (!fallbackFields) fallbackFields = {};
+                      fallbackFields.sex = inkRes.sex;
+                      if (!fallbackFields.identity) fallbackFields.identity = {};
+                      fallbackFields.identity.sex = inkRes.sex === "Male" ? "M" : "F";
+                      fallbackFields.identity.sex_label = inkRes.sex;
+                      if (!fallbackFields.field_statuses) fallbackFields.field_statuses = {};
+                      fallbackFields.field_statuses.sex = {
+                        value: inkRes.sex,
+                        status: "extracted",
+                        confidence: inkRes.confidence || 92,
+                      };
+                      if (Array.isArray(fallbackFields.warnings)) {
+                        fallbackFields.warnings = fallbackFields.warnings.filter((w: string) => !w.toLowerCase().includes("sex could not be reliably extracted"));
+                      }
+                    }
+                    fallbackSexDiagnostic = {
+                      leftInkRatio: inkRes.leftInkRatio,
+                      rightInkRatio: inkRes.rightInkRatio,
+                      source: inkRes.source || (inkRes.sex ? (inkRes.sex === "Male" ? "pixel_ink_left_box" : "pixel_ink_right_box") : "not_detected"),
+                      matchedLines: inkRes.matchedLines || [],
+                    };
+                  } catch (inkErr) {
+                    console.warn("[handleOcrRoute fallback] detectPsaSexFromMarkBoxInk error:", inkErr);
+                  }
+                }
+
+                if (!fallbackSexDiagnostic) {
+                  fallbackSexDiagnostic = {
+                    leftInkRatio: 0,
+                    rightInkRatio: 0,
+                    source: (fallbackFields?.sex || fallbackFields?.identity?.sex) ? "text_x_mark" : "not_detected",
+                    matchedLines: [],
+                  };
+                }
+              }
+
               const { ocrConfidencePercent: fbConf, extractedFieldCompletenessPercent: fbComp } = calculateOcrMetrics(fallbackRes.confidence, fallbackFields, effectiveDocType);
               const fallbackResponse: any = {
                 text: fallbackRes.text,
+                rawText: fallbackRes.text,
+                raw_ocr_text: fallbackRes.text,
                 model: fallbackRes.model || "azure/prebuilt-read",
                 provider: "azure",
                 ocrConfidencePercent: fbConf,
@@ -773,7 +895,21 @@ export async function handleOcrRoute(
               if (typeof fallbackRes.confidence === "number") {
                 fallbackResponse.confidence = fallbackRes.confidence;
               }
+              if (fallbackSexDiagnostic) {
+                fallbackResponse.sexDiagnostic = fallbackSexDiagnostic;
+                if (fallbackFields?.sex || fallbackFields?.identity?.sex) {
+                  fallbackResponse.sex = fallbackFields.sex || fallbackFields.identity?.sex;
+                }
+                if (fallbackFields?.field_statuses) {
+                  fallbackResponse.field_statuses = fallbackFields.field_statuses;
+                }
+              }
               if (fallbackFields) {
+                if (fallbackSexDiagnostic) {
+                  fallbackFields.sexDiagnostic = fallbackSexDiagnostic;
+                }
+                fallbackFields.rawText = fallbackRes.text;
+                fallbackFields.raw_ocr_text = fallbackRes.text;
                 fallbackFields.ocr_provider = "azure";
                 fallbackFields.ocr_model = fallbackRes.model || "azure/prebuilt-read";
                 fallbackFields.ocr_confidence_percent = fbConf;

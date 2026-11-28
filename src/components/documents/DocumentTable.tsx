@@ -25,6 +25,9 @@ interface DocumentTableProps {
   showDeleteAction?: boolean;
   showDeleteRequest?: boolean;
   onQueueRefresh?: () => void;
+  mode?: "batches" | "individual";
+  onInspectBatch?: (folder: BatchFolderItem) => void;
+  onDeleteBatch?: (folder: BatchFolderItem) => void;
 }
 
 export default function DocumentTable({
@@ -34,6 +37,9 @@ export default function DocumentTable({
   showDeleteAction = false,
   showDeleteRequest = false,
   onQueueRefresh,
+  mode = "batches",
+  onInspectBatch,
+  onDeleteBatch,
 }: DocumentTableProps) {
   const [selectedDocForDeletion, setSelectedDocForDeletion] = useState<any | null>(null);
   const [selectedFolderForDetails, setSelectedFolderForDetails] = useState<BatchFolderItem | null>(null);
@@ -49,6 +55,117 @@ export default function DocumentTable({
       <div className="text-slate-500 text-center p-8 text-xs sm:text-sm">
         Loading document records...
       </div>
+    );
+  }
+
+  if (mode === "individual") {
+    if (!documents.length) {
+      return (
+        <div className="text-center p-8 border border-dashed border-slate-300 rounded-xl bg-slate-50/50">
+          <FileText className="h-8 w-8 text-slate-400 mx-auto mb-2" />
+          <p className="text-sm font-semibold text-slate-700">No individual documents found</p>
+          <p className="text-xs text-slate-400 mt-1">Upload student records in the Upload Wizard to view them here.</p>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <div className="rounded-xl border border-slate-200/80 overflow-hidden bg-white shadow-xs">
+          <Table>
+            <TableHeader className="bg-slate-50">
+              <TableRow>
+                <TableHead className="w-[180px]">DOCUMENT TYPE</TableHead>
+                <TableHead className="w-[150px]">LRN</TableHead>
+                <TableHead>STUDENT FULL NAME</TableHead>
+                <TableHead className="w-[170px]">BATCH NUMBER</TableHead>
+                <TableHead className="w-[130px]">STATUS</TableHead>
+                <TableHead className="text-right w-[130px]">SUBMISSION DATE</TableHead>
+                {canDelete && <TableHead className="text-right w-[100px]">Action</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {documents.map((doc: any) => {
+                const ef = (doc.extracted_fields || {}) as Record<string, any>;
+                const rawType = String(doc.document_type || "").toLowerCase().trim();
+                const isPsa = rawType === "birth_cert" || rawType === "psa";
+                const typeLabel = isPsa ? "PSA Birth Certificate" : (doc.document_type || "").toUpperCase();
+                const lrn = doc.canonical_lrn || ef.lrn || ef.learner_reference_number || doc.students?.lrn || "—";
+                const studentName = resolveDisplayStudentName(doc);
+                const rawBatch = ef.batch_number || ef.batch_id || doc.batch_id || doc.batch_number;
+                const formattedBatch = formatBatchNumber(rawBatch, doc.created_at || doc.submission_date);
+                const formattedDate = doc.submission_date || doc.created_at
+                  ? format(new Date(doc.submission_date || doc.created_at), "MMM d, yyyy")
+                  : "—";
+
+                return (
+                  <TableRow
+                    key={doc.id}
+                    className="cursor-pointer hover:bg-blue-50/40 transition-colors"
+                    onClick={() => onRowClick?.(doc)}
+                  >
+                    <TableCell className="font-bold text-xs text-slate-800">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-[#174EA6] shrink-0" />
+                        <span>{typeLabel}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs font-semibold text-slate-800">
+                      {lrn}
+                    </TableCell>
+                    <TableCell className="font-bold text-slate-900 text-xs sm:text-sm">
+                      {studentName}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-slate-600">
+                      {formattedBatch}
+                    </TableCell>
+                    <TableCell>
+                      <DocumentStatusBadge status={(doc.status as DocumentStatus) || "completed"} />
+                    </TableCell>
+                    <TableCell className="text-right text-slate-500 text-xs font-medium">
+                      {formattedDate}
+                    </TableCell>
+                    {canDelete && (
+                      <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedDocForDeletion(doc);
+                          }}
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200 text-xs py-1 px-2.5 h-auto transition-colors"
+                          leftIcon={<Trash2 className="h-3.5 w-3.5 text-red-500" />}
+                        >
+                          Delete
+                        </Button>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+
+        {selectedDocForDeletion && (
+          <DeleteReviewDocumentModal
+            isOpen={Boolean(selectedDocForDeletion)}
+            onClose={() => setSelectedDocForDeletion(null)}
+            documentId={selectedDocForDeletion.id}
+            documentName={
+              selectedDocForDeletion.original_filename ||
+              (selectedDocForDeletion.document_type || "Document").toUpperCase()
+            }
+            studentName={resolveDocumentStudentNameDisplay(selectedDocForDeletion)}
+            documentType={selectedDocForDeletion.document_type}
+            onSuccess={() => {
+              onQueueRefresh?.();
+              setSelectedDocForDeletion(null);
+            }}
+          />
+        )}
+      </>
     );
   }
 
@@ -74,8 +191,8 @@ export default function DocumentTable({
               <TableHead className="min-w-[210px]">BATCH FOLDER CONTENTS</TableHead>
               <TableHead className="min-w-[240px]">VALIDATION STATUS &amp; FINDINGS</TableHead>
               <TableHead className="text-right w-[130px]">SUBMISSION DATE</TableHead>
-              {canDelete && (
-                <TableHead className="text-right w-[100px]">Action</TableHead>
+              {(canDelete || Boolean(onInspectBatch)) && (
+                <TableHead className="text-right w-[150px]">Action</TableHead>
               )}
             </TableRow>
           </TableHeader>
@@ -211,22 +328,38 @@ export default function DocumentTable({
                   </TableCell>
 
                   {/* Action */}
-                  {canDelete && (
+                  {(canDelete || Boolean(onInspectBatch)) && (
                     <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (folder.documents[0]) {
-                            setSelectedDocForDeletion(folder.documents[0]);
-                          }
-                        }}
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200 text-xs py-1 px-2.5 h-auto transition-colors"
-                        leftIcon={<Trash2 className="h-3.5 w-3.5 text-red-500" />}
-                      >
-                        Delete
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {onInspectBatch && (
+                          <Button
+                            size="sm"
+                            onClick={() => onInspectBatch(folder)}
+                            className="bg-[#174EA6] hover:bg-[#0B1F33] text-white text-xs py-1 px-2.5 h-auto transition-colors"
+                            leftIcon={<Eye className="h-3.5 w-3.5" />}
+                          >
+                            Inspect
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (onDeleteBatch) {
+                                onDeleteBatch(folder);
+                              } else if (folder.documents[0]) {
+                                setSelectedDocForDeletion(folder.documents[0]);
+                              }
+                            }}
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200 text-xs py-1 px-2.5 h-auto transition-colors"
+                            leftIcon={<Trash2 className="h-3.5 w-3.5 text-red-500" />}
+                          >
+                            Delete
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   )}
                 </TableRow>

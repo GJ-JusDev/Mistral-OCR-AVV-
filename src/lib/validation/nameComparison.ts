@@ -91,6 +91,36 @@ export const BLACKLISTED_STUDENT_NAMES: string[] = [
   "transferred in out",
   "transferred in",
   "transferred out",
+  "kagawaran ng edukasyon",
+  "kagawaran ng foukasyon",
+  "kagawaran ng poukasyon",
+  "kagawaran ng edukasyun",
+  "republika ng pilipinas",
+  "school form 2",
+  "daily attendance report",
+  "absenteeism and dropout",
+  "absenteeism",
+  "dropout",
+  "foukasyon",
+  "poukasyon",
+  "edukasyon",
+  "republika",
+  "pilipinas",
+];
+
+/**
+ * Regex patterns for DepEd circular seals, government headers, and OCR misrecognitions
+ * that sit at the top-left or top headers of Philippine DepEd forms.
+ */
+export const DEPED_SEAL_AND_HEADER_PATTERNS: RegExp[] = [
+  /kagawaran\s+ng\s+(edukasyon|foukasyon|poukasyon|edukasyun)/i,
+  /republika\s+ng\s+pilipinas/i,
+  /republic\s+of\s+the\s+philippines/i,
+  /department\s+of\s+education/i,
+  /\bdeped\b/i,
+  /school\s+form\s*2/i,
+  /daily\s+attendance\s+report/i,
+  /absenteeism\s+and\s+dropout/i,
 ];
 
 /**
@@ -120,6 +150,11 @@ export function isBlacklistedStudentName(name: string | null | undefined): boole
     cleaned === "learner" ||
     cleaned === "learners"
   ) {
+    return true;
+  }
+
+  // DepEd seal and institutional header regex pattern check
+  if (DEPED_SEAL_AND_HEADER_PATTERNS.some((pat) => pat.test(name) || pat.test(cleaned))) {
     return true;
   }
 
@@ -1142,6 +1177,11 @@ export interface BatchFolderItem {
   batch_number: string;
   sf1_lrn: string;
   student_name: string;
+  grade_level?: string;
+  section?: string;
+  school_year?: string;
+  is_reconciled?: boolean;
+  reconciliation_log?: any[];
   documents: any[];
   document_types: string[];
   validation_status: "ALL_MATCHED" | "MISMATCH" | "BLANK_INCOMPLETE" | "NEEDS_REVIEW";
@@ -1232,11 +1272,22 @@ export function aggregateDocumentsIntoBatchFolders(docs: any[]): BatchFolderItem
         ? lrn
         : "111500619123";
 
+      const docGrade = doc.grade_level || ef.grade_level || ef.selected_grade_level || "";
+      const docSection = doc.section || ef.section || "";
+      const docSy = doc.school_year || ef.school_year || "";
+      const isReconciled = Boolean(doc.is_reconciled || ef.is_reconciled);
+      const reconLog = doc.reconciliation_log || ef.reconciliation_log || [];
+
       folderMap.set(folderKey, {
         id: doc.id,
         batch_number: batchNum,
         sf1_lrn: initialLrn,
         student_name: studentName,
+        grade_level: docGrade || "Grade 11",
+        section: docSection || "CSS 1",
+        school_year: docSy || "2025-2026",
+        is_reconciled: isReconciled,
+        reconciliation_log: reconLog,
         documents: [doc],
         document_types: [rawType],
         validation_status: status,
@@ -1261,6 +1312,16 @@ export function aggregateDocumentsIntoBatchFolders(docs: any[]): BatchFolderItem
       existing.documents.push(doc);
       if (!existing.document_types.includes(rawType)) {
         existing.document_types.push(rawType);
+      }
+      const docGrade = doc.grade_level || ef.grade_level || ef.selected_grade_level;
+      const docSection = doc.section || ef.section;
+      const docSy = doc.school_year || ef.school_year;
+      if (docGrade && (!existing.grade_level || existing.grade_level === "Grade 11")) existing.grade_level = docGrade;
+      if (docSection && (!existing.section || existing.section === "CSS 1")) existing.section = docSection;
+      if (docSy && (!existing.school_year || existing.school_year === "2025-2026")) existing.school_year = docSy;
+      if (doc.is_reconciled || ef.is_reconciled) existing.is_reconciled = true;
+      if (Array.isArray(doc.reconciliation_log || ef.reconciliation_log) && (doc.reconciliation_log || ef.reconciliation_log).length > 0) {
+        existing.reconciliation_log = doc.reconciliation_log || ef.reconciliation_log;
       }
       if (rawType === "sf1") {
         if (lrn) existing.sf1_lrn = lrn;

@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   experimental: {
-    proxyClientMaxBodySize: "50mb",
+    middlewareClientMaxBodySize: "100mb",
   },
   images: {
     remotePatterns: [

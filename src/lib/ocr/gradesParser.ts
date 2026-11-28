@@ -6,7 +6,7 @@ import { parseShsSf1 } from "./shsSf1Parser";
 import { parseShsSf2, deduplicateSf2Records } from "./shsSf2Parser";
 import { parseShsSf5 } from "./shsSf5Parser";
 import { parsePsaBirthCert } from "./psaParser";
-import { normalizeGradeRecords, updateExtractedFieldsAverages, normalizeObservedValueMarking, sanitizeLearnersObservedValues, normalizeStrictSex } from "../validation/gradeUtils";
+import { normalizeGradeRecords, updateExtractedFieldsAverages, normalizeObservedValueMarking, sanitizeLearnersObservedValues, normalizeStrictSex, roundSf10GeneralAverage } from "../validation/gradeUtils";
 import { isBlacklistedStudentName } from "../validation/nameComparison";
 import { isValidLrn } from "../validation/patterns";
 import { normalizeBirthDate } from "../validation/birthDateNormalizer";
@@ -228,7 +228,8 @@ export function parseGradesText(
     else if (parsed.sex) parsed.sex = normalizeStrictSex(parsed.sex) || undefined;
     if (L.birth_date_raw) parsed.birth_date = L.birth_date_raw;
 
-    const recs = sf10Parsed.scholastic_records;
+    const recs = (Array.isArray(sf10Parsed?.scholastic_records) ? sf10Parsed.scholastic_records : [])
+      .filter((r): r is any => Boolean(r && typeof r === "object"));
     const first = recs[0];
     const ELIGIBILITY_RE = /\b(?:junior\s+high\s+school\s+completer|high\s+school\s+completer|jhs\s+completer|gen\.?\s*ave|pept\s*passer|als\s*a\s*&?\s*e|als\s*passer)\b/i;
     if (first) {
@@ -251,12 +252,81 @@ export function parseGradesText(
     if (sf10Rows.length > 0) {
       parsed.grades = sf10Rows as any;
     }
-    const sem1 = recs.find((r) => r.semester === "1st Semester" && r.general_average !== undefined);
-    const sem2 = recs.find((r) => r.semester === "2nd Semester" && r.general_average !== undefined);
+    const isSem1 = (sem: any) => sem === 1 || sem === "1" || /1st|first|\b1\b/i.test(String(sem || ""));
+    const isSem2 = (sem: any) => sem === 2 || sem === "2" || /2nd|second|\b2\b/i.test(String(sem || ""));
+
+    const sem1 = recs.find((r) => isSem1(r?.semester));
+    const sem2 = recs.find((r) => isSem2(r?.semester));
+
+    if (sem1) {
+      (sem1 as any).generalAverage = sem1.general_average;
+      const s1Rows = (sem1.subjects || []).map((s: any) => ({
+        ...s,
+        category: s.subject_type || "CORE",
+        subject_category: s.subject_type || "CORE",
+        finalGrade: s.sem_final_grade,
+        final: s.sem_final_grade,
+        remarks: s.action_taken || "PASSED",
+        action_taken: s.action_taken || "PASSED",
+        status: "Passed",
+        confidence: 95,
+        semester: 1,
+      }));
+      (parsed as any).first_semester_grades = s1Rows;
+      (parsed as any).firstSemesterSubjects = s1Rows;
+    }
+    if (sem2) {
+      (sem2 as any).generalAverage = sem2.general_average;
+      const s2Rows = (sem2.subjects || []).map((s: any) => ({
+        ...s,
+        category: s.subject_type || "CORE",
+        subject_category: s.subject_type || "CORE",
+        finalGrade: s.sem_final_grade,
+        final: s.sem_final_grade,
+        remarks: s.action_taken || "PASSED",
+        action_taken: s.action_taken || "PASSED",
+        status: "Passed",
+        confidence: 95,
+        semester: 2,
+      }));
+      (parsed as any).second_semester_grades = s2Rows;
+      (parsed as any).secondSemesterSubjects = s2Rows;
+    }
+
+    const s1List = (parsed as any).first_semester_grades || [];
+    const s2List = (parsed as any).second_semester_grades || [];
+    if (s1List.length > 0 || s2List.length > 0) {
+      parsed.grades = [...s1List, ...s2List] as any;
+    }
+
     (parsed as any).scholastic_records = recs;
+    (parsed as any).shs_semesters = recs;
+    (parsed as any).semesters = recs;
     (parsed as any).sf10_learner_information = L;
-    if (sem1) (parsed as any).sem1_printed_general_average = sem1.general_average;
-    if (sem2) (parsed as any).sem2_printed_general_average = sem2.general_average;
+    if (sem1 && sem1.general_average !== undefined) {
+      (parsed as any).sem1_printed_general_average = sem1.general_average;
+      parsed.sem1_general_average = sem1.general_average;
+      parsed.sem1_confidence = (parsed as any).sem1_confidence ?? 95;
+    }
+    if (sem2 && sem2.general_average !== undefined) {
+      (parsed as any).sem2_printed_general_average = sem2.general_average;
+      parsed.sem2_general_average = sem2.general_average;
+      parsed.sem2_confidence = (parsed as any).sem2_confidence ?? 95;
+    }
+    if (parsed.general_average === undefined || parsed.general_average === null) {
+      if (sem1 && sem2 && typeof sem1.general_average === "number" && typeof sem2.general_average === "number") {
+        parsed.general_average = Math.round(((sem1.general_average + sem2.general_average) / 2) * 10) / 10;
+        parsed.general_average_confidence = 95;
+      } else if (sem1) {
+        parsed.general_average = sem1.general_average;
+        parsed.general_average_confidence = 95;
+      } else if (sem2) {
+        parsed.general_average = sem2.general_average;
+        parsed.general_average_confidence = 95;
+      }
+    } else {
+      parsed.general_average = roundSf10GeneralAverage(parsed.general_average) ?? parsed.general_average;
+    }
     if (sf10Parsed.warnings.length > 0) {
       parsed.warnings = [...((parsed as any).warnings || []), ...sf10Parsed.warnings];
     }
@@ -329,11 +399,12 @@ export function parseGradesText(
     >();
     const unresolvedSubjects: string[] = [];
 
-    for (const g of parsed.grades) {
+    for (const g of (Array.isArray(parsed.grades) ? parsed.grades : [])) {
+      if (!g || typeof g !== "object") continue;
       const gl: "Grade 11" | "Grade 12" =
         g.grade_level === "Grade 12" ? "Grade 12" : g.grade_level === "Grade 11" ? "Grade 11" : defaultGl;
       const sem: "1st Semester" | "2nd Semester" =
-        g.semester === "2nd Semester" ? "2nd Semester" : g.semester === "1st Semester" ? "1st Semester" : defaultSem;
+        g?.semester === "2nd Semester" ? "2nd Semester" : g?.semester === "1st Semester" ? "1st Semester" : defaultSem;
       const key = `${gl}_${sem}`;
       if (!semGroups.has(key)) {
         semGroups.set(key, { grade_level: gl, semester: sem, subjects: [] });

@@ -3,7 +3,9 @@ import { pathToFileURL } from 'node:url';
 
 export async function resolve(specifier, context, nextResolve) {
   let target = specifier;
-  if (specifier.startsWith('@/')) {
+  if (specifier.startsWith('next/')) {
+    target = specifier.endsWith('.js') ? specifier : specifier + '.js';
+  } else if (specifier.startsWith('@/')) {
     const resolvedPath = path.resolve('./src', specifier.slice(2));
     target = pathToFileURL(resolvedPath).href;
   }

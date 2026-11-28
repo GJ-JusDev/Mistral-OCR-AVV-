@@ -59,6 +59,8 @@ export interface DocumentSegment {
   sourceFileName?: string;
   imageUrl?: string;
   storagePath?: string;
+  rawText?: string;
+  extractedFields?: any;
 }
 
 // ---------------------------------------------------------------------------

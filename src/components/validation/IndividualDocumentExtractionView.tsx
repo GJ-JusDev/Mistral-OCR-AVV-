@@ -3,6 +3,7 @@
 import React, { useState, useMemo } from "react";
 import {
   FileText,
+  Check,
   CheckCircle2,
   AlertTriangle,
   XCircle,
@@ -29,6 +30,7 @@ import {
   normalizeStrictSex,
   validateConsecutiveSchoolYear,
   validateSf2RowFormattingAndTotals,
+  roundSf10GeneralAverage,
 } from "@/lib/validation/gradeUtils";
 
 // Canonical document type ordering: SF1 -> SF2 -> SF9 -> SF10 -> PSA (birth_cert)
@@ -909,605 +911,681 @@ export default function IndividualDocumentExtractionView({
           )}
 
           {/* Case 2: SF9 Progress Report Card */}
-          {docType === "sf9" && (
-            <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                    <GraduationCap className="w-4 h-4 text-amber-500" />
-                    <span>SF9-SHS Semestral Grades & Progress</span>
-                  </h4>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Learner: <span className="font-bold text-slate-800 dark:text-slate-200">{segmentData.name || "Student"}</span> • LRN: <span className="font-mono font-bold">{segmentData.lrn || "—"}</span>
-                  </p>
-                </div>
-                <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-right">
-                  <span className="text-[10px] font-bold text-amber-700 dark:text-amber-400 block uppercase">
-                    General Average
-                  </span>
-                  <span className="text-base font-extrabold text-amber-800 dark:text-amber-300">
-                    {segmentData.general_average !== null && segmentData.general_average !== undefined ? segmentData.general_average : "Blank"}
-                  </span>
-                </div>
-              </div>
+          {docType === "sf9" && (() => {
+            const merged = segmentData;
+            const isUnifiedTwoSides = merged.isUnifiedTwoSides || merged.is_unified_two_sides || (selectedSegment.pageCount && selectedSegment.pageCount > 1);
 
-              {/* Blank Grade Error Alert */}
-              {(Boolean(segmentData.has_blank_grade_error) ||
-                (Array.isArray(segmentData.grades) && segmentData.grades.length > 0 &&
-                  (segmentData.grades.some((g: any) => {
-                    const f = g.final ?? g.final_grade;
-                    return f === null || f === undefined || String(f).trim() === "" || String(f).trim() === "—" || String(f).trim().toLowerCase() === "blank";
-                  }) || segmentData.general_average === null || segmentData.general_average === undefined))) && (
-                <div
-                  data-testid="sf9-blank-grade-error"
-                  className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 flex items-start gap-2 text-xs"
-                >
-                  <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="font-bold">Blank Grade Error:</strong> One or more Final Grades or Semester General Averages are blank on the uploaded SF9 Back card.
-                  </div>
-                </div>
-              )}
+            // 1. Learner Identity Summary
+            const lrn = merged.lrn || "—";
+            const fullName = merged.name || [merged.last_name, merged.first_name, merged.middle_name].filter(Boolean).join(", ") || "—";
+            const sex = normalizeStrictSex(merged.sex) || (merged.sex === "M" ? "Male" : merged.sex === "F" ? "Female" : merged.sex) || "—";
+            const gradeLevel = merged.grade_level || activeGradeLevel || "Grade 11";
+            const section = merged.section || activeSection || "—";
+            const schoolYear = merged.school_year || segmentData.header?.school_year || batchContext?.schoolYear || "—";
+            const syValidation = validateConsecutiveSchoolYear(schoolYear);
+            const trackStrand = merged.track_strand || merged.shs_track || "—";
 
-              {/* Teacher-Friendly Error & Status Legends Header */}
+            // 2. Report on Attendance (from Front)
+            const defaultMonths = ["Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"];
+            const months = (merged.attendance_months && merged.attendance_months.length > 0)
+              ? merged.attendance_months
+              : defaultMonths;
+
+            const rawAttendance = Array.isArray(merged.attendance) ? merged.attendance : [];
+            const schoolDaysRow = rawAttendance.find((r: any) => /school\s*days|days\s*of\s*school/i.test(r.label || ""));
+            const daysPresentRow = rawAttendance.find((r: any) => /days\s*present|present/i.test(r.label || "") && !/absent/i.test(r.label || ""));
+            const daysAbsentRow = rawAttendance.find((r: any) => /days\s*absent|absent/i.test(r.label || ""));
+
+            const attTotals = merged.attendance_totals;
+            const schoolDaysTotal = schoolDaysRow?.total ?? attTotals?.computed_school_days ?? attTotals?.printed_school_days ?? "—";
+            const daysPresentTotal = daysPresentRow?.total ?? attTotals?.computed_days_present ?? attTotals?.printed_days_present ?? "—";
+            const daysAbsentTotal = daysAbsentRow?.total ?? attTotals?.computed_days_absent ?? attTotals?.printed_days_absent ?? "—";
+
+            // 3. Per-Semester Academic Grades (from Back)
+            const allGrades = Array.isArray(merged.grades) ? merged.grades : [];
+            const sem1Grades = (Array.isArray(merged.first_semester_grades) && merged.first_semester_grades.length > 0)
+              ? merged.first_semester_grades
+              : (Array.isArray(merged.firstSemesterSubjects) && merged.firstSemesterSubjects.length > 0)
+              ? merged.firstSemesterSubjects
+              : allGrades.filter((g: any) => {
+                  const s = String(g.semester ?? "").toLowerCase();
+                  return s.includes("1") || s.includes("first") || ((g.q1 !== undefined || g.q2 !== undefined) && g.q3 === undefined && g.q4 === undefined);
+                });
+
+            const sem2Grades = (Array.isArray(merged.second_semester_grades) && merged.second_semester_grades.length > 0)
+              ? merged.second_semester_grades
+              : (Array.isArray(merged.secondSemesterSubjects) && merged.secondSemesterSubjects.length > 0)
+              ? merged.secondSemesterSubjects
+              : allGrades.filter((g: any) => {
+                  const s = String(g.semester ?? "").toLowerCase();
+                  return s.includes("2") || s.includes("second") || ((g.q3 !== undefined || g.q4 !== undefined) && g.q1 === undefined && g.q2 === undefined);
+                });
+
+            const unassigned = allGrades.filter((g: any) => !sem1Grades.includes(g) && !sem2Grades.includes(g));
+            const effectiveSem1 = sem1Grades.length > 0 ? sem1Grades : (sem2Grades.length === 0 ? unassigned : []);
+            const effectiveSem2 = sem2Grades;
+
+            const formatQuarterGrade = (val: any) => {
+              if (val === undefined || val === null || val === "" || val === "—") return "—";
+              const n = Number(val);
+              if (!isNaN(n)) return Math.round(n).toString();
+              return String(val);
+            };
+
+            const sem1Avg = merged.sem1_printed_general_average ?? merged.first_semester_general_average ?? merged.sem1_displayed_general_average ?? merged.sem1_general_average ?? "Blank";
+            const sem2Avg = merged.sem2_printed_general_average ?? merged.second_semester_general_average ?? merged.sem2_displayed_general_average ?? merged.sem2_general_average ?? "Blank";
+
+            const isBlankVal = (v: any) => v === undefined || v === null || String(v).trim() === "" || String(v).trim() === "—" || String(v).trim().toLowerCase() === "blank" || String(v).trim().toLowerCase() === "null";
+
+            const hasBlankGrades =
+              (allGrades.length > 0 && allGrades.some((g: any) => {
+                const s = String(g.semester ?? "").toLowerCase();
+                const isSem2 = s.includes("2") || s.includes("second");
+                const qA = isSem2 ? g.q3 : g.q1;
+                const qB = isSem2 ? g.q4 : g.q2;
+                const f = isSem2 ? (g.sem2_final_grade ?? g.final_grade ?? g.final) : (g.sem1_final_grade ?? g.final_grade ?? g.final);
+                return isBlankVal(qA) || isBlankVal(qB) || isBlankVal(f);
+              })) ||
+              (effectiveSem1.length > 0 && isBlankVal(sem1Avg)) ||
+              (effectiveSem2.length > 0 && isBlankVal(sem2Avg)) ||
+              isBlankVal(merged.general_average);
+
+            // 4. Observed Values / Learner Behavior (from Back)
+            const obs = merged.observed_values;
+            const coreValues = Array.isArray(obs?.core_values) && obs.core_values.length > 0
+              ? obs.core_values
+              : Array.isArray(obs?.statements) && obs.statements.length > 0
+              ? [
+                  { name: "Maka-Diyos", statements: obs.statements.filter((s: any) => s.core_value === "Maka-Diyos" || s.core_value_index === 1) },
+                  { name: "Makatao", statements: obs.statements.filter((s: any) => s.core_value === "Makatao" || s.core_value_index === 2) },
+                  { name: "Makakalikasan", statements: obs.statements.filter((s: any) => s.core_value === "Makakalikasan" || s.core_value_index === 3) },
+                  { name: "Makabansa", statements: obs.statements.filter((s: any) => s.core_value === "Makabansa" || s.core_value_index === 4) },
+                ].filter((g) => g.statements.length > 0)
+              : [];
+
+            const renderAttendanceRow = (label: string, row: any, fallbackTotal: any) => {
+              const vals: any[] = row?.values || [];
+              const tot = row?.total ?? fallbackTotal;
+              return (
+                <tr className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                  <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                    {label}
+                  </td>
+                  {months.map((m: string, mIdx: number) => {
+                    const val = vals[mIdx];
+                    const displayVal = val !== undefined && val !== null && String(val).trim() !== "" ? String(val) : "—";
+                    return (
+                      <td key={mIdx} className="py-2 px-2 text-center font-mono text-slate-700 dark:text-slate-300">
+                        {displayVal}
+                      </td>
+                    );
+                  })}
+                  <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-50 dark:bg-slate-800/50">
+                    {tot !== undefined && tot !== null && String(tot).trim() !== "" ? String(tot) : "—"}
+                  </td>
+                </tr>
+              );
+            };
+
+            return (
               <div
-                data-testid="sf9-error-legends"
-                className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/60 text-xs space-y-2"
+                data-testid="sf9-extracted-preview-card"
+                className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-900/60 shadow-sm space-y-5"
               >
-                <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200 text-[11px] uppercase tracking-wider">
-                  <Info className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                  <span>SF9 Academic &amp; Clearance Status Guide (Teacher Reference)</span>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 text-[11px] leading-relaxed">
-                  <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
-                    <div className="flex items-center gap-1.5 font-bold mb-1">
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-                      <span>Blank Grade Error</span>
+                {/* Header */}
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 text-[#174EA6] dark:text-blue-300">
+                      <GraduationCap className="w-5 h-5" />
                     </div>
-                    <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
-                      Triggered when one or more subject <strong className="font-semibold">FINAL</strong> grades or <strong className="font-semibold">General Average for the Semester</strong> boxes are left blank on the uploaded SF9 card (no automatic grade calculation is performed).
-                    </p>
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                        SF9-SHS Extracted Data Preview
+                      </h4>
+                      <p className="text-xs text-slate-500">
+                        DepEd Form 138 • Senior High School Progress Report Card
+                      </p>
+                    </div>
                   </div>
-
-                  <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
-                    <div className="flex items-center gap-1.5 font-bold mb-1">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
-                        Blank / Incomplete
-                      </span>
-                    </div>
-                    <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
-                      Indicates an empty/unwritten grade cell on the form that requires teacher completion before final clearance.
-                    </p>
-                  </div>
-
-                  <div className="p-2.5 rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200">
-                    <div className="flex items-center gap-1.5 font-bold mb-1">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
-                        Passed / Failed
-                      </span>
-                    </div>
-                    <p className="text-emerald-800/90 dark:text-emerald-300/90 text-[10.5px]">
-                      Official DepEd remark displayed only when an explicit numeric grade (<strong className="font-semibold">&gt;= 75 Passed, &lt; 75 Failed</strong>) is written on the card.
-                    </p>
+                  <div className="flex items-center gap-2">
+                    <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1 ${
+                      isUnifiedTwoSides
+                        ? "bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-300 dark:border-purple-800"
+                        : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
+                    }`}>
+                      <Check className="w-3.5 h-3.5" />
+                      {isUnifiedTwoSides ? "Unified Front + Back Sides" : "Real-Time Extracted"}
+                    </span>
                   </div>
                 </div>
-              </div>
 
-              {/* Subject Grades Table */}
-              {Array.isArray(segmentData.grades) && segmentData.grades.length > 0 ? (
-                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                  <table className="w-full text-xs text-left">
-                    <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold tracking-wider border-b border-slate-200 dark:border-slate-800">
-                      <tr>
-                        <th className="py-2 px-3">Subject / Learning Area</th>
-                        <th className="py-2 px-2 text-center">Q1</th>
-                        <th className="py-2 px-2 text-center">Q2</th>
-                        <th className="py-2 px-2 text-center">Q3</th>
-                        <th className="py-2 px-2 text-center">Q4</th>
-                        <th className="py-2 px-3 text-center">Final</th>
-                        <th className="py-2 px-3">Remarks</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {segmentData.grades.map((g: any, gIdx: number) => {
-                        const finalVal = g.final ?? g.final_grade;
-                        const q1Conf = getConfidenceNum(g.q1Confidence ?? g.q1_confidence);
-                        const q2Conf = getConfidenceNum(g.q2Confidence ?? g.q2_confidence);
-                        const q3Conf = getConfidenceNum(g.q3Confidence ?? g.q3_confidence);
-                        const q4Conf = getConfidenceNum(g.q4Confidence ?? g.q4_confidence);
-                        const finalConf = getConfidenceNum(g.finalGradeConfidence ?? g.final_confidence ?? g.confidence);
-                        const evaluated = evaluateDynamicGradeStatus({
-                          grade: finalVal,
-                          rawRemark: g.remarks || g.remark || g.action_taken,
-                          confidencePercent: finalConf,
-                        });
-                        const rem = evaluated.remarkDisplay;
-                        const remPillClass = evaluated.status === "blank"
-                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                          : evaluated.isLowConfidence || evaluated.status === "not_recognized"
-                          ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
-                          : evaluated.status === "passed"
+                {/* 1. Learner Identity Summary */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                      Learner Identity Summary
+                    </span>
+                  </div>
+                  <div
+                    data-testid="sf9-identity-summary"
+                    className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 bg-slate-50/70 dark:bg-slate-800/40 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 text-xs"
+                  >
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">LRN</span>
+                      <span className="font-mono font-bold text-slate-900 dark:text-slate-100 text-sm">{lrn}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Full Name</span>
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">{fullName}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Sex</span>
+                      <span className="text-slate-700 dark:text-slate-300 font-medium">{sex}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Grade Level & Section</span>
+                      <span className="text-slate-700 dark:text-slate-300 font-medium">{gradeLevel} — {section}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">School Year</span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-slate-700 dark:text-slate-300 font-medium">{schoolYear}</span>
+                        {schoolYear !== "—" && !syValidation.isValid && (
+                          <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-rose-100 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400 border border-rose-200 dark:border-rose-800" title={syValidation.reason || "Non-consecutive school year"}>
+                            Invalid SY
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="col-span-2 sm:col-span-1 lg:col-span-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Track / Strand</span>
+                      <span className="text-slate-700 dark:text-slate-300 font-medium">{trackStrand}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Report on Attendance (from Front) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                      <Calendar className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      Report on Attendance (from Front)
+                    </span>
+                    {merged.attendance_risk_status && (
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        merged.attendance_risk_status === "NORMAL"
                           ? "bg-emerald-100 text-emerald-800"
-                          : "bg-rose-100 text-rose-800";
-                        return (
-                          <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                            <td className="py-2 px-3 font-medium text-slate-800 dark:text-slate-200">
-                              {g.subject}
-                            </td>
-                            {([
-                              { val: g.q1, conf: q1Conf },
-                              { val: g.q2, conf: q2Conf },
-                              { val: g.q3, conf: q3Conf },
-                              { val: g.q4, conf: q4Conf },
-                            ]).map((item, qIdx) => {
-                              const hasVal = item.val !== undefined && item.val !== null && String(item.val).trim() !== "" && String(item.val).trim() !== "—";
-                              return (
-                                <td key={qIdx} className="py-2 px-2 text-center font-mono text-slate-600 dark:text-slate-400">
-                                  <div className="flex flex-col items-center justify-center gap-0.5">
-                                    <span>{hasVal ? String(item.val) : "—"}</span>
-                                    {hasVal && item.conf !== undefined && (
-                                      <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(item.conf)}`}>
-                                        {item.conf}%
-                                      </span>
-                                    )}
-                                  </div>
-                                </td>
-                              );
-                            })}
-                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
-                              <div className="flex flex-col items-center justify-center gap-0.5">
-                                <span>{evaluated.status === "blank" ? "Blank" : String(finalVal)}</span>
-                                {evaluated.status !== "blank" && finalConf !== undefined && (
-                                  <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(finalConf)}`}>
-                                    {finalConf}%
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-2 px-3">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${remPillClass}`}>
-                                {rem}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                    <tfoot>
-                      {(() => {
-                        const isGenAvgBlank = segmentData.general_average === undefined || segmentData.general_average === null || String(segmentData.general_average).trim() === "" || String(segmentData.general_average).trim() === "—";
-                        const genAvgConf = getConfidenceNum(segmentData.general_average_confidence ?? segmentData.confidence) ?? (isGenAvgBlank ? undefined : 95);
-                        const genAvgEval = evaluateDynamicGradeStatus({
-                          grade: segmentData.general_average,
-                          confidencePercent: genAvgConf,
-                        });
-                        const genAvgRem = genAvgEval.remarkDisplay;
-                        const genAvgPillClass = genAvgEval.status === "blank"
-                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                          : genAvgEval.isLowConfidence || genAvgEval.status === "not_recognized"
-                          ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
-                          : genAvgEval.status === "passed"
-                          ? "bg-emerald-100 text-emerald-800"
-                          : "bg-rose-100 text-rose-800";
-                        return (
-                          <tr className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]" data-testid="sf9-general-average-row">
-                            <td colSpan={5} className="py-2 px-3 text-slate-700 dark:text-slate-300">
-                              General Average for the Semester
-                            </td>
-                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
-                              <div className="flex flex-col items-center justify-center gap-0.5">
-                                {genAvgEval.status === "blank" ? (
-                                  <span className="text-amber-700 dark:text-amber-400 font-bold">Blank</span>
-                                ) : (
-                                  <span>{String(segmentData.general_average)}</span>
-                                )}
-                                {genAvgEval.status !== "blank" && genAvgConf !== undefined && (
-                                  <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(genAvgConf)}`}>
-                                    {genAvgConf}%
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-2 px-3">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${genAvgPillClass}`}>
-                                {genAvgRem}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })()}
-                    </tfoot>
-                  </table>
-                </div>
-              ) : (
-                <div className="p-6 text-center border border-dashed rounded-xl border-slate-200 dark:border-slate-800 text-xs text-slate-400">
-                  No individual subject grades extracted for this report card.
-                </div>
-              )}
-              {/* SECTION A: School Days and Attendance */}
-              <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                  <div>
-                    <h5 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                      <Calendar className="w-4 h-4 text-emerald-600" />
-                      <span>Report on Attendance (School Days, Present &amp; Absent)</span>
-                    </h5>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      DepEd monthly attendance record, equation validation (Present + Absent = School Days), and screening.
-                    </p>
-                  </div>
-                  {/* Status chip */}
-                  {segmentData.attendance_risk_status && (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${
-                          segmentData.attendance_risk_status === "NORMAL"
-                            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800"
-                            : segmentData.attendance_risk_status === "ATTENDANCE_WARNING"
-                            ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-300 dark:border-amber-800"
-                            : segmentData.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED"
-                            ? "bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-400 border border-rose-300 dark:border-rose-800"
-                            : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-300 dark:border-slate-700"
-                        }`}
-                      >
-                        {segmentData.attendance_risk_status === "NORMAL" && <CheckCircle2 className="w-3.5 h-3.5" />}
-                        {segmentData.attendance_risk_status === "ATTENDANCE_WARNING" && <AlertTriangle className="w-3.5 h-3.5" />}
-                        {segmentData.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED" && <AlertTriangle className="w-3.5 h-3.5" />}
-                        <span>
-                          {segmentData.attendance_risk_status === "NORMAL"
-                            ? "Normal Attendance"
-                            : segmentData.attendance_risk_status === "ATTENDANCE_WARNING"
-                            ? "Attendance Warning (15-20%)"
-                            : segmentData.attendance_risk_status === "ATTENDANCE_REVIEW_REQUIRED"
-                            ? "Attendance Review Required (>20%)"
-                            : "Incomplete Attendance Data"}
-                        </span>
+                          : "bg-amber-100 text-amber-800"
+                      }`}>
+                        {merged.attendance_risk_status}
                       </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Metric Summary Cards */}
-                {segmentData.attendance_totals && (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
-                      <span className="text-[10px] font-bold text-slate-500 uppercase block">School Days</span>
-                      <div className="flex items-baseline gap-1 mt-0.5">
-                        <span className="text-lg font-extrabold text-slate-900 dark:text-slate-100">
-                          {segmentData.attendance_totals.computed_school_days ?? segmentData.attendance_totals.printed_school_days ?? "—"}
-                        </span>
-                        {segmentData.attendance_totals.printed_school_days !== undefined &&
-                          segmentData.attendance_totals.computed_school_days !== undefined &&
-                          segmentData.attendance_totals.printed_school_days !== segmentData.attendance_totals.computed_school_days && (
-                            <span className="text-[10px] text-amber-600 font-semibold" title="Printed total on card">
-                              (printed: {segmentData.attendance_totals.printed_school_days})
-                            </span>
-                          )}
-                      </div>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/50">
-                      <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase block">Days Present</span>
-                      <div className="flex items-baseline gap-1 mt-0.5">
-                        <span className="text-lg font-extrabold text-emerald-800 dark:text-emerald-300">
-                          {segmentData.attendance_totals.computed_days_present ?? segmentData.attendance_totals.printed_days_present ?? "—"}
-                        </span>
-                        {segmentData.attendance_percentage !== undefined && (
-                          <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
-                            ({segmentData.attendance_percentage}%)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-rose-50/50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/50">
-                      <span className="text-[10px] font-bold text-rose-700 dark:text-rose-400 uppercase block">Days Absent</span>
-                      <div className="flex items-baseline gap-1 mt-0.5">
-                        <span className="text-lg font-extrabold text-rose-800 dark:text-rose-300">
-                          {segmentData.attendance_totals.computed_days_absent ?? segmentData.attendance_totals.printed_days_absent ?? "—"}
-                        </span>
-                        {segmentData.absence_percentage !== undefined && (
-                          <span className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">
-                            ({segmentData.absence_percentage}%)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="p-3 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/50">
-                      <span className="text-[10px] font-bold text-blue-700 dark:text-blue-400 uppercase block">Equation Check</span>
-                      <div className="mt-0.5 text-xs font-semibold flex items-center gap-1">
-                        {segmentData.attendance_discrepancy_details && segmentData.attendance_discrepancy_details.length > 0 ? (
-                          <span className="text-amber-700 dark:text-amber-400 flex items-center gap-1 font-bold">
-                            <AlertTriangle className="w-3.5 h-3.5 text-amber-500" /> Discrepancy Flagged
-                          </span>
-                        ) : (
-                          <span className="text-emerald-700 dark:text-emerald-400 flex items-center gap-1 font-bold">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> Equations Balanced
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                    )}
                   </div>
-                )}
 
-                {/* Attendance Discrepancy Banner */}
-                {segmentData.attendance_discrepancy_details && segmentData.attendance_discrepancy_details.length > 0 && (
-                  <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-xs space-y-1.5">
-                    <div className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
-                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                      <span>Attendance Discrepancy Flagged for Teacher Verification:</span>
-                    </div>
-                    <ul className="list-disc list-inside space-y-1 text-amber-900 dark:text-amber-200/90 pl-1">
-                      {segmentData.attendance_discrepancy_details.map((detail: string, dIdx: number) => (
-                        <li key={dIdx}>{detail}</li>
-                      ))}
-                    </ul>
-                    <p className="text-[11px] text-amber-700 dark:text-amber-400 italic">
-                      Note: DepEd Order No. 8, s. 2015 safeguards protect students. Attendance warnings require teacher review and do not alter academic grades.
-                    </p>
-                  </div>
-                )}
-
-                {/* Monthly Attendance Breakdown Table */}
-                {Array.isArray(segmentData.attendance) && segmentData.attendance.length > 0 ? (
-                  <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                    <table className="w-full text-xs text-left">
-                      <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold tracking-wider border-b border-slate-200 dark:border-slate-800">
-                        <tr>
-                          <th className="py-2.5 px-3 min-w-[140px]">Attendance Metric</th>
-                          {(segmentData.attendance_months && segmentData.attendance_months.length > 0
-                            ? segmentData.attendance_months
-                            : (segmentData.attendance[0]?.values || []).map((_: any, idx: number) => `M${idx + 1}`)
-                          ).map((m: string, mIdx: number) => (
-                            <th key={mIdx} className="py-2.5 px-2 text-center min-w-[40px]">
+                  <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                    <table className="w-full text-xs text-left border-collapse" data-testid="sf9-attendance-preview-table">
+                      <thead>
+                        <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                          <th className="py-2.5 px-3 min-w-[140px]">Month</th>
+                          {months.map((m: string, mIdx: number) => (
+                            <th key={mIdx} className="py-2.5 px-2 text-center min-w-[36px]">
                               {m}
                             </th>
                           ))}
-                          <th className="py-2.5 px-3 text-center min-w-[60px] bg-slate-100/70 dark:bg-slate-800 font-extrabold text-slate-800 dark:text-slate-200">
+                          <th className="py-2.5 px-3 text-center min-w-[50px] bg-slate-100/70 dark:bg-slate-800 font-bold text-slate-800 dark:text-slate-200">
                             Total
-                          </th>
-                          <th className="py-2.5 px-3 text-center min-w-[70px]">
-                            Confidence %
                           </th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {segmentData.attendance.map((row: any, rIdx: number) => (
-                          <tr key={rIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                            <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200">
-                              {row.label}
-                            </td>
-                            {(row.values || []).map((val: any, vIdx: number) => (
-                              <td key={vIdx} className="py-2 px-2 text-center font-mono text-slate-600 dark:text-slate-400">
-                                {val !== undefined && val !== null && String(val).trim() !== "" ? String(val) : "—"}
-                              </td>
-                            ))}
-                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-900 dark:text-slate-100 bg-slate-50/50 dark:bg-slate-800/40">
-                              {row.total !== undefined && row.total !== null ? String(row.total) : "—"}
-                            </td>
-                            <td className="py-2 px-3 text-center">
-                              {(() => {
-                                const conf = row.confidence ?? (segmentData.attendance_confidence ?? 92);
-                                const isGreen = conf >= 85;
-                                const isAmber = conf >= 60 && conf < 85;
-                                return (
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    isGreen
-                                      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800"
-                                      : isAmber
-                                      ? "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800"
-                                      : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-300 dark:border-slate-700"
-                                  }`}>
-                                    {Math.round(conf)}%
-                                  </span>
-                                );
-                              })()}
-                            </td>
-                          </tr>
-                        ))}
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium text-slate-700 dark:text-slate-300">
+                        {renderAttendanceRow("No. of School Days", schoolDaysRow, schoolDaysTotal)}
+                        {renderAttendanceRow("No. of Days Present", daysPresentRow, daysPresentTotal)}
+                        {renderAttendanceRow("No. of Days Absent", daysAbsentRow, daysAbsentTotal)}
                       </tbody>
                     </table>
                   </div>
-                ) : (
-                  <div className="p-5 text-center border border-dashed rounded-xl border-slate-200 dark:border-slate-800 text-xs text-slate-400">
-                    No monthly attendance table detected on this document scan. (If this is a multi-page card, verify the back page).
-                  </div>
-                )}
-              </div>
+                </div>
 
-              {/* SECTION B: Behavior and Character Development (Observed Values) */}
-              <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                  <div>
-                    <h5 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                      <Heart className="w-4 h-4 text-rose-500" />
-                      <span>Report on Learners&apos; Observed Values (Core Values &amp; Behavior)</span>
-                    </h5>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      DepEd Core Values: Maka-Diyos, Makatao, Makakalikasan, Makabansa • Non-numerical ratings: AO, SO, RO, NO.
-                    </p>
+                {/* 3. Per-Semester Academic Grades (from Back) */}
+                <div className="space-y-3" data-testid="sf9-grades-preview">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                      Per-Semester Academic Grades (from Back)
+                    </span>
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                      Annual General Average: <strong className={`${(isBlankVal(sem1Avg) || isBlankVal(sem2Avg) || (merged.annual_general_average === null && merged.general_average === null) || isBlankVal(merged.annual_general_average ?? merged.general_average)) ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"} font-mono text-sm`}>{(isBlankVal(sem1Avg) || isBlankVal(sem2Avg)) ? "Blank" : (merged.annual_general_average ?? merged.general_average ?? "Blank")}</strong>
+                    </span>
                   </div>
-                  {/* Verification status badge */}
-                  {segmentData.observed_values && (
-                    <div>
-                      {segmentData.observed_values.has_unreadable_marks ? (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-300 dark:border-amber-800 flex items-center gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5" /> Needs Teacher Verification
+
+                  {hasBlankGrades && (
+                    <div
+                      data-testid="sf9-blank-grade-error"
+                      className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 flex items-start gap-2 text-xs"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <div>
+                        <strong className="font-bold">Blank Grade Error:</strong> One or more Final Grades or Semester General Averages are blank on the uploaded SF9 Back card.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Teacher-Friendly Error & Status Legends Header */}
+                  <div
+                    data-testid="sf9-error-legends"
+                    className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/60 text-xs space-y-2"
+                  >
+                    <div className="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200 text-[11px] uppercase tracking-wider">
+                      <Info className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                      <span>SF9 Academic &amp; Clearance Status Guide (Teacher Reference)</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 text-[11px] leading-relaxed">
+                      <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
+                        <div className="flex items-center gap-1.5 font-bold mb-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                          <span>Blank Grade Error</span>
+                        </div>
+                        <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
+                          Triggered when one or more subject <strong className="font-semibold">FINAL</strong> grades or <strong className="font-semibold">General Average for the Semester</strong> boxes are left blank on the uploaded SF9 card (no automatic grade calculation is performed).
+                        </p>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200">
+                        <div className="flex items-center gap-1.5 font-bold mb-1">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                            Blank / Incomplete
+                          </span>
+                        </div>
+                        <p className="text-amber-800/90 dark:text-amber-300/90 text-[10.5px]">
+                          Indicates an empty/unwritten grade cell on the form that requires teacher completion before final clearance.
+                        </p>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-900 dark:text-emerald-200">
+                        <div className="flex items-center gap-1.5 font-bold mb-1">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
+                            Passed / Failed
+                          </span>
+                        </div>
+                        <p className="text-emerald-800/90 dark:text-emerald-300/90 text-[10.5px]">
+                          Official DepEd remark displayed only when an explicit numeric grade (<strong className="font-semibold">&gt;= 75 Passed, &lt; 75 Failed</strong>) is written on the card.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {/* First Semester */}
+                    <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                        <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                          First Semester
                         </span>
+                        <span className="text-[11px] text-slate-500">
+                          General Average: <strong className="font-mono font-bold text-slate-900 dark:text-slate-100">{sem1Avg}</strong>
+                        </span>
+                      </div>
+                      {effectiveSem1.length > 0 ? (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs text-left border-collapse" data-testid="sf9-sem1-grades-table">
+                            <thead>
+                              <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                <th className="py-1.5 px-2">Subject</th>
+                                <th className="py-1.5 px-1.5 text-center">Q1</th>
+                                <th className="py-1.5 px-1.5 text-center">Q2</th>
+                                <th className="py-1.5 px-2 text-center font-bold">Final</th>
+                                <th className="py-1.5 px-2">Remarks</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                              {effectiveSem1.map((g: any, gIdx: number) => {
+                                const fVal = g.sem1_final_grade ?? g.final_grade ?? g.final;
+                                const q1Conf = getConfidenceNum(g.q1_confidence ?? g.q1Confidence);
+                                const q2Conf = getConfidenceNum(g.q2_confidence ?? g.q2Confidence);
+                                const finalConf = getConfidenceNum(g.final_confidence ?? g.finalGradeConfidence ?? g.confidence);
+                                const evaluated = evaluateDynamicGradeStatus({
+                                  grade: fVal,
+                                  rawRemark: g.remarks || g.remark || g.action_taken,
+                                  confidencePercent: finalConf,
+                                });
+                                const rem = evaluated.remarkDisplay;
+                                const remPillClass = evaluated.status === "blank"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                  : evaluated.isLowConfidence || evaluated.status === "not_recognized"
+                                  ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                  : evaluated.status === "passed"
+                                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                  : "bg-rose-50 text-rose-700";
+                                return (
+                                  <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                    <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{g.subject}</td>
+                                    <td className="py-1.5 px-1.5 text-center font-mono">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{formatQuarterGrade(g.q1)}</span>
+                                        {formatQuarterGrade(g.q1) !== "—" && q1Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(q1Conf)}`}>
+                                            {q1Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-1.5 text-center font-mono">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{formatQuarterGrade(g.q2)}</span>
+                                        {formatQuarterGrade(g.q2) !== "—" && q2Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(q2Conf)}`}>
+                                            {q2Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{evaluated.status === "blank" ? "Blank" : String(fVal)}</span>
+                                        {evaluated.status !== "blank" && finalConf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(finalConf)}`}>
+                                            {finalConf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-2">
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${remPillClass}`}>
+                                        {rem}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                            <tfoot>
+                              {(() => {
+                                const isSem1Blank = isBlankVal(sem1Avg);
+                                const sem1Conf = getConfidenceNum(merged.sem1_confidence ?? merged.general_average_confidence) ?? (isSem1Blank ? undefined : 95);
+                                const sem1AvgEval = evaluateDynamicGradeStatus({
+                                  grade: sem1Avg,
+                                  confidencePercent: sem1Conf,
+                                });
+                                const sem1Rem = sem1AvgEval.remarkDisplay;
+                                const sem1PillClass = sem1AvgEval.status === "blank"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                  : sem1AvgEval.isLowConfidence || sem1AvgEval.status === "not_recognized"
+                                  ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                  : sem1AvgEval.status === "passed"
+                                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                  : "bg-rose-50 text-rose-700";
+                                return (
+                                  <tr
+                                    className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]"
+                                    data-testid="sf9-sem1-general-average-row"
+                                  >
+                                    <td colSpan={3} className="py-2 px-2 text-slate-700 dark:text-slate-300">
+                                      General Average for the Semester
+                                    </td>
+                                    <td className="py-2 px-2 text-center font-mono font-bold text-xs">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        {isSem1Blank ? (
+                                          <span className="text-amber-700 dark:text-amber-400 font-bold">Blank</span>
+                                        ) : (
+                                          <span className="text-slate-900 dark:text-slate-100">{String(sem1Avg)}</span>
+                                        )}
+                                        {!isSem1Blank && sem1Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(sem1Conf)}`}>
+                                            {sem1Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-2 px-2">
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${sem1PillClass}`}>
+                                        {sem1Rem}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })()}
+                            </tfoot>
+                          </table>
+                        </div>
                       ) : (
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Observed Values Verified
-                        </span>
+                        <div className="py-6 text-center text-xs text-slate-400 italic">
+                          No First Semester subjects extracted on this side.
+                        </div>
                       )}
+                    </div>
+
+                    {/* Second Semester */}
+                    <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                        <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                          Second Semester
+                        </span>
+                        <span className="text-[11px] text-slate-500">
+                          General Average: <strong className="font-mono font-bold text-slate-900 dark:text-slate-100">{sem2Avg}</strong>
+                        </span>
+                      </div>
+                      {effectiveSem2.length > 0 ? (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs text-left border-collapse" data-testid="sf9-sem2-grades-table">
+                            <thead>
+                              <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                <th className="py-1.5 px-2">Subject</th>
+                                <th className="py-1.5 px-1.5 text-center">Q3</th>
+                                <th className="py-1.5 px-1.5 text-center">Q4</th>
+                                <th className="py-1.5 px-2 text-center font-bold">Final</th>
+                                <th className="py-1.5 px-2">Remarks</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                              {effectiveSem2.map((g: any, gIdx: number) => {
+                                const fVal = g.sem2_final_grade ?? g.final_grade ?? g.final;
+                                const q3Conf = getConfidenceNum(g.q3_confidence ?? g.q3Confidence);
+                                const q4Conf = getConfidenceNum(g.q4_confidence ?? g.q4Confidence);
+                                const finalConf = getConfidenceNum(g.final_confidence ?? g.finalGradeConfidence ?? g.confidence);
+                                const evaluated = evaluateDynamicGradeStatus({
+                                  grade: fVal,
+                                  rawRemark: g.remarks || g.remark || g.action_taken,
+                                  confidencePercent: finalConf,
+                                });
+                                const rem = evaluated.remarkDisplay;
+                                const remPillClass = evaluated.status === "blank"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                  : evaluated.isLowConfidence || evaluated.status === "not_recognized"
+                                  ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                  : evaluated.status === "passed"
+                                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                  : "bg-rose-50 text-rose-700";
+                                return (
+                                  <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                    <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{g.subject}</td>
+                                    <td className="py-1.5 px-1.5 text-center font-mono">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{formatQuarterGrade(g.q3)}</span>
+                                        {formatQuarterGrade(g.q3) !== "—" && q3Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(q3Conf)}`}>
+                                            {q3Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-1.5 text-center font-mono">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{formatQuarterGrade(g.q4)}</span>
+                                        {formatQuarterGrade(g.q4) !== "—" && q4Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(q4Conf)}`}>
+                                            {q4Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        <span>{evaluated.status === "blank" ? "Blank" : String(fVal)}</span>
+                                        {evaluated.status !== "blank" && finalConf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(finalConf)}`}>
+                                            {finalConf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 px-2">
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${remPillClass}`}>
+                                        {rem}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                            <tfoot>
+                              {(() => {
+                                const isSem2Blank = isBlankVal(sem2Avg);
+                                const sem2Conf = getConfidenceNum(merged.sem2_confidence ?? merged.general_average_confidence) ?? (isSem2Blank ? undefined : 95);
+                                const sem2AvgEval = evaluateDynamicGradeStatus({
+                                  grade: sem2Avg,
+                                  confidencePercent: sem2Conf,
+                                });
+                                const sem2Rem = sem2AvgEval.remarkDisplay;
+                                const sem2PillClass = sem2AvgEval.status === "blank"
+                                  ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                  : sem2AvgEval.isLowConfidence || sem2AvgEval.status === "not_recognized"
+                                  ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                  : sem2AvgEval.status === "passed"
+                                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                  : "bg-rose-50 text-rose-700";
+                                return (
+                                  <tr
+                                    className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]"
+                                    data-testid="sf9-sem2-general-average-row"
+                                  >
+                                    <td colSpan={3} className="py-2 px-2 text-slate-700 dark:text-slate-300">
+                                      General Average for the Semester
+                                    </td>
+                                    <td className="py-2 px-2 text-center font-mono font-bold text-xs">
+                                      <div className="flex flex-col items-center justify-center gap-0.5">
+                                        {isSem2Blank ? (
+                                          <span className="text-amber-700 dark:text-amber-400 font-bold">Blank</span>
+                                        ) : (
+                                          <span className="text-slate-900 dark:text-slate-100">{String(sem2Avg)}</span>
+                                        )}
+                                        {!isSem2Blank && sem2Conf !== undefined && (
+                                          <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${getConfidenceColorClass(sem2Conf)}`}>
+                                            {sem2Conf}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="py-2 px-2">
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${sem2PillClass}`}>
+                                        {sem2Rem}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                );
+                              })()}
+                            </tfoot>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="py-6 text-center text-xs text-slate-400 italic">
+                          No Second Semester subjects extracted on this side.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Observed Values / Learner Behavior (from Back) */}
+                <div className="space-y-2" data-testid="sf9-observed-values-preview">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                      <Heart className="w-3.5 h-3.5 text-rose-500" />
+                      Report on Learners&apos; Observed Values (Core Values &amp; Behavior)
+                    </span>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                      <span><strong className="text-emerald-700 dark:text-emerald-400">AO</strong>: Always</span>
+                      <span><strong className="text-blue-700 dark:text-blue-400">SO</strong>: Sometimes</span>
+                      <span><strong className="text-amber-700 dark:text-amber-400">RO</strong>: Rarely</span>
+                      <span><strong className="text-rose-700 dark:text-rose-400">NO</strong>: Not Observed</span>
+                    </div>
+                  </div>
+
+                  {coreValues.length > 0 ? (
+                    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/50">
+                      <table className="w-full text-xs text-left border-collapse" data-testid="sf9-observed-values-table">
+                        <thead>
+                          <tr className="bg-slate-50 dark:bg-slate-900/60 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-500">
+                            <th className="py-2 px-3 min-w-[120px]">Core Value</th>
+                            <th className="py-2 px-3 min-w-[220px]">Behavior Statement</th>
+                            <th className="py-2 px-2 text-center min-w-[40px]">Q1</th>
+                            <th className="py-2 px-2 text-center min-w-[40px]">Q2</th>
+                            <th className="py-2 px-2 text-center min-w-[40px]">Q3</th>
+                            <th className="py-2 px-2 text-center min-w-[40px]">Q4</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                          {coreValues.map((group: any, grpIdx: number) =>
+                            (group.statements || []).map((stmt: any, sIdx: number) => {
+                              const renderRatingBadge = (qRec: any, fallbackConf?: number | null) => {
+                                const rawVal = qRec?.normalized_rating ?? qRec?.original_mark ?? qRec;
+                                const normalized = normalizeObservedValueMarking(rawVal);
+                                if (!normalized) return <span className="text-slate-400 font-mono text-xs">—</span>;
+                                const cls =
+                                  normalized === "AO"
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                    : normalized === "SO"
+                                    ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400"
+                                    : normalized === "RO"
+                                    ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400"
+                                    : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400";
+                                const conf = getConfidenceNum(qRec?.confidence ?? fallbackConf);
+                                return (
+                                  <div className="inline-flex flex-col items-center justify-center gap-0.5">
+                                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${cls}`}>
+                                      {normalized}
+                                    </span>
+                                    {conf !== undefined && (
+                                      <span className={`px-1 py-0.2 rounded text-[8px] font-mono font-semibold border ${getConfidenceColorClass(conf)}`}>
+                                        {conf}%
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              };
+
+                              return (
+                                <tr key={`${grpIdx}-${sIdx}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                  {sIdx === 0 && (
+                                    <td
+                                      rowSpan={group.statements.length}
+                                      className="py-2 px-3 font-bold text-slate-900 dark:text-slate-100 bg-slate-50/40 dark:bg-slate-900/40 align-top border-r border-slate-100 dark:border-slate-800"
+                                    >
+                                      {group.name}
+                                    </td>
+                                  )}
+                                  <td className="py-2 px-3 text-slate-700 dark:text-slate-300 font-medium">
+                                    {stmt.statement}
+                                  </td>
+                                  <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q1, stmt.q1Confidence)}</td>
+                                  <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q2, stmt.q2Confidence)}</td>
+                                  <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q3, stmt.q3Confidence)}</td>
+                                  <td className="py-2 px-2 text-center">{renderRatingBadge(stmt.q4, stmt.q4Confidence)}</td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-5 text-center border border-dashed rounded-xl border-slate-200 dark:border-slate-800 text-xs text-slate-400">
+                      No behavior / observed values detected on this document scan. (If this is a multi-page card, verify the back page).
                     </div>
                   )}
                 </div>
-
-                {/* Rating Scale Legend banner */}
-                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600 dark:text-slate-400">
-                    <span className="font-bold text-slate-800 dark:text-slate-200">DepEd Rating Scale:</span>
-                    <span><strong className="font-mono text-emerald-700 dark:text-emerald-400">AO</strong> = Always Observed</span>
-                    <span><strong className="font-mono text-blue-700 dark:text-blue-400">SO</strong> = Sometimes Observed</span>
-                    <span><strong className="font-mono text-amber-700 dark:text-amber-400">RO</strong> = Rarely Observed</span>
-                    <span><strong className="font-mono text-rose-700 dark:text-rose-400">NO</strong> = Not Observed</span>
-                  </div>
-                  <span className="text-[10px] text-slate-500 font-medium italic">
-                    *Non-numerical; strictly independent of academic grades
-                  </span>
-                </div>
-
-                {/* Observed Values Table */}
-                {segmentData.observed_values && Array.isArray(segmentData.observed_values.core_values) && segmentData.observed_values.core_values.length > 0 ? (
-                  <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                    <table className="w-full text-xs text-left">
-                      <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold tracking-wider border-b border-slate-200 dark:border-slate-800">
-                        <tr>
-                          <th className="py-2.5 px-3 min-w-[120px]">Core Value</th>
-                          <th className="py-2.5 px-3 min-w-[280px]">Behavior Statement</th>
-                          <th className="py-2.5 px-2 text-center min-w-[42px]">Q1</th>
-                          <th className="py-2.5 px-2 text-center min-w-[42px]">Q2</th>
-                          <th className="py-2.5 px-2 text-center min-w-[42px]">Q3</th>
-                          <th className="py-2.5 px-2 text-center min-w-[42px]">Q4</th>
-                          <th className="py-2.5 px-3 min-w-[100px]">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {segmentData.observed_values.core_values.map((group: any, grpIdx: number) =>
-                          (group.statements || []).map((stmt: any, sIdx: number) => {
-                            const hasFlag = stmt.q1?.needs_verification || stmt.q2?.needs_verification || stmt.q3?.needs_verification || stmt.q4?.needs_verification;
-                            return (
-                              <tr key={`${grpIdx}-${sIdx}`} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                                {sIdx === 0 && (
-                                  <td
-                                    rowSpan={group.statements.length}
-                                    className="py-2.5 px-3 font-bold text-slate-900 dark:text-slate-100 bg-slate-50/30 dark:bg-slate-800/20 align-top border-r border-slate-100 dark:border-slate-800"
-                                  >
-                                    {group.name}
-                                  </td>
-                                )}
-                                <td className="py-2.5 px-3 text-slate-700 dark:text-slate-300 font-medium">
-                                  {stmt.statement}
-                                </td>
-                                {["q1", "q2", "q3", "q4"].map((qKey) => {
-                                  const qRec = stmt[qKey];
-                                  const normalized = normalizeObservedValueMarking(qRec?.normalized_rating ?? qRec?.original_mark ?? qRec);
-                                  const needsVer = qRec?.needs_verification && !normalized;
-                                  const conf = getConfidenceNum(qRec?.confidence ?? stmt[`${qKey}Confidence`] ?? stmt[`${qKey}_confidence`]);
-                                  return (
-                                    <td key={qKey} className="py-2 px-2 text-center">
-                                      {normalized ? (
-                                        <div className="inline-flex flex-col items-center justify-center gap-0.5">
-                                          <span
-                                            className={`inline-block px-1.5 py-0.5 rounded font-mono font-bold text-[11px] border ${
-                                              needsVer
-                                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-300"
-                                                : normalized === "AO"
-                                                ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400"
-                                                : normalized === "SO"
-                                                ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400"
-                                                : normalized === "RO"
-                                                ? "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400"
-                                                : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400"
-                                            }`}
-                                            title={needsVer ? `Unclear mark "${qRec?.original_mark}" requires review` : undefined}
-                                          >
-                                            {normalized}
-                                          </span>
-                                          {conf !== undefined && (
-                                            <span className={`px-1 py-0.2 rounded text-[8px] font-mono font-semibold border ${getConfidenceColorClass(conf)}`}>
-                                              {conf}%
-                                            </span>
-                                          )}
-                                        </div>
-                                      ) : (
-                                        <span className="text-slate-400 text-xs font-mono">—</span>
-                                      )}
-                                    </td>
-                                  );
-                                })}
-                                <td className="py-2.5 px-3">
-                                  {hasFlag ? (
-                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800">
-                                      <AlertTriangle className="w-3 h-3 text-amber-500" /> Verify Mark
-                                    </span>
-                                  ) : (
-                                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-500">
-                                      <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Recorded
-                                    </span>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : segmentData.observed_values && Array.isArray(segmentData.observed_values.observations) && segmentData.observed_values.observations.length > 0 ? (
-                  <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                    <table className="w-full text-xs text-left">
-                      <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold tracking-wider border-b border-slate-200 dark:border-slate-800">
-                        <tr>
-                          <th className="py-2 px-3">Core Value</th>
-                          <th className="py-2 px-3">Behavior Statement</th>
-                          <th className="py-2 px-2 text-center">Quarter</th>
-                          <th className="py-2 px-2 text-center">Rating</th>
-                          <th className="py-2 px-3">Remarks</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                        {segmentData.observed_values.observations.map((obs: any, oIdx: number) => (
-                          <tr key={oIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                            <td className="py-2 px-3 font-semibold text-slate-800 dark:text-slate-200">
-                              {obs.core_value}
-                            </td>
-                            <td className="py-2 px-3 text-slate-600 dark:text-slate-300">
-                              {obs.behavior_statement}
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono font-bold text-slate-700 dark:text-slate-300">
-                              {obs.quarter}
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono font-bold">
-                              {(() => {
-                                const normalized = normalizeObservedValueMarking(obs.normalized_rating ?? obs.original_mark);
-                                if (!normalized) return <span className="text-slate-400 text-xs font-mono">—</span>;
-                                const cls =
-                                  normalized === "AO"
-                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                    : normalized === "SO"
-                                    ? "bg-blue-50 text-blue-700 border-blue-200"
-                                    : normalized === "RO"
-                                    ? "bg-amber-50 text-amber-700 border-amber-200"
-                                    : "bg-rose-50 text-rose-700 border-rose-200";
-                                return (
-                                  <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] border ${cls}`}>
-                                    {normalized}
-                                  </span>
-                                );
-                              })()}
-                            </td>
-                            <td className="py-2 px-3">
-                              {obs.needs_verification ? (
-                                <span className="text-[10px] font-bold text-amber-700">Needs Verification</span>
-                              ) : (
-                                <span className="text-[10px] text-slate-400">OK</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="p-5 text-center border border-dashed rounded-xl border-slate-200 dark:border-slate-800 text-xs text-slate-400">
-                    No behavior / observed values detected on this document scan. (If this is a multi-page card, verify the back page).
-                  </div>
-                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Case 3: SF10 Permanent Record */}
           {docType === "sf10" && (
@@ -1525,118 +1603,373 @@ export default function IndividualDocumentExtractionView({
               </div>
 
               {/* Academic History / Grades */}
-              {Array.isArray(segmentData.grades) && segmentData.grades.length > 0 ? (
-                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
-                  <table className="w-full text-xs text-left">
-                    <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 uppercase text-[10px] font-bold tracking-wider border-b border-slate-200 dark:border-slate-800">
-                      <tr>
-                        <th className="py-2 px-3">Subject</th>
-                        <th className="py-2 px-2 text-center">Q1 / Q3</th>
-                        <th className="py-2 px-2 text-center">Q2 / Q4</th>
-                        <th className="py-2 px-2 text-center">Sem Final Grade</th>
-                        <th className="py-2 px-3">Action Taken</th>
-                        <th className="py-2 px-2 text-center">Confidence</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                      {segmentData.grades.map((g: any, gIdx: number) => {
-                        const evaluated = evaluateDynamicGradeStatus({
-                          grade: g.final ?? g.sem_final_grade ?? g.final_grade,
-                          rawRemark: g.remarks || g.remark || g.action_taken,
-                          confidencePercent: g.confidence,
-                        });
-                        const pillClass = evaluated.status === "blank"
-                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                          : evaluated.isLowConfidence || evaluated.status === "not_recognized"
-                          ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
-                          : evaluated.status === "passed"
-                          ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400"
-                          : "bg-rose-100 text-rose-800";
-                        const qA = g.q1 ?? g.q3 ?? "—";
-                        const qB = g.q2 ?? g.q4 ?? "—";
-                        const finalRating = g.final ?? g.sem_final_grade ?? g.final_grade ?? "—";
-                        const conf = typeof g.confidence === "number"
-                          ? Math.round(g.confidence <= 1 ? g.confidence * 100 : g.confidence)
-                          : 95;
-                        return (
-                          <tr key={gIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
-                            <td className="py-2 px-3 font-medium text-slate-800 dark:text-slate-200">
-                              {g.subject}
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono">
-                              <div className="flex items-center justify-center gap-1">
-                                <span>{qA}</span>
-                                {qA !== "—" && (
-                                  <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{conf}%</span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono">
-                              <div className="flex items-center justify-center gap-1">
-                                <span>{qB}</span>
-                                {qB !== "—" && (
-                                  <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{conf}%</span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
-                              <div className="flex items-center justify-center gap-1">
-                                <span>{finalRating}</span>
-                                {finalRating !== "—" && (
-                                  <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{conf}%</span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-2 px-3">
-                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${pillClass}`}>
-                                {evaluated.remarkDisplay}
-                              </span>
-                            </td>
-                            <td className="py-2 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400">
-                              {conf}%
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                    {(segmentData.general_average !== undefined || segmentData.sem1_general_average !== undefined || segmentData.sem2_general_average !== undefined) && (
-                      <tfoot>
-                        {(() => {
-                          const avgVal = segmentData.general_average ?? segmentData.sem1_general_average ?? segmentData.sem2_general_average;
-                          const evaluatedAvg = evaluateDynamicGradeStatus({
-                            grade: avgVal,
-                            allowDecimal: true,
-                            isGeneralAverage: true,
-                          });
-                          const avgPillClass = evaluatedAvg.status === "blank"
-                            ? "bg-amber-100 text-amber-800"
-                            : evaluatedAvg.status === "passed"
-                            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400"
-                            : "bg-rose-100 text-rose-800";
-                          return (
-                            <tr className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]">
-                              <td colSpan={3} className="py-2 px-3 text-slate-700 dark:text-slate-300">
-                                General Ave. for the Semester
-                              </td>
-                              <td className="py-2 px-2 text-center font-mono text-blue-700 dark:text-blue-300 text-xs">
-                                {avgVal}
-                              </td>
-                              <td className="py-2 px-3">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${avgPillClass}`}>
-                                  {evaluatedAvg.remarkDisplay}
-                                </span>
-                              </td>
-                              <td className="py-2 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400">
-                                95%
-                              </td>
-                            </tr>
-                          );
-                        })()}
-                      </tfoot>
-                    )}
-                  </table>
-                </div>
-              ) : (
+              {(Array.isArray(segmentData.grades) && segmentData.grades.length > 0) ||
+               (Array.isArray((segmentData as any).first_semester_grades) && (segmentData as any).first_semester_grades.length > 0) ||
+               (Array.isArray((segmentData as any).second_semester_grades) && (segmentData as any).second_semester_grades.length > 0) ||
+               (Array.isArray((segmentData as any).shs_semesters) && (segmentData as any).shs_semesters.length > 0) ||
+               (Array.isArray((segmentData as any).scholastic_records) && (segmentData as any).scholastic_records.length > 0) ? (() => {
+                const isSem1 = (sem: any) =>
+                  sem === 1 || sem === "1" || /1st|first|\b1\b/i.test(String(sem || ""));
+                const isSem2 = (sem: any) =>
+                  sem === 2 || sem === "2" || /2nd|second|\b2\b/i.test(String(sem || ""));
+
+                const scholasticRecords: any[] = [
+                  ...(Array.isArray((segmentData as any).shs_semesters) ? (segmentData as any).shs_semesters : []),
+                  ...(Array.isArray((segmentData as any).scholastic_records) ? (segmentData as any).scholastic_records : []),
+                  ...(Array.isArray((segmentData as any).semesters) ? (segmentData as any).semesters : []),
+                ];
+
+                const sem1Record = scholasticRecords.find((r) => isSem1(r.semester));
+                const sem2Record = scholasticRecords.find((r) => isSem2(r.semester));
+
+                const allGrades = Array.isArray(segmentData.grades) ? segmentData.grades : [];
+
+                const rawSem1 = (
+                  (Array.isArray((segmentData as any).first_semester_grades) && (segmentData as any).first_semester_grades.length > 0)
+                    ? (segmentData as any).first_semester_grades
+                    : (Array.isArray((segmentData as any).firstSemesterSubjects) && (segmentData as any).firstSemesterSubjects.length > 0)
+                    ? (segmentData as any).firstSemesterSubjects
+                    : sem1Record?.subjects?.length
+                    ? sem1Record.subjects
+                    : allGrades.filter(
+                        (g: any) =>
+                          isSem1(g.semester) ||
+                          ((g.q1 !== undefined || g.q2 !== undefined) && g.q3 === undefined && g.q4 === undefined)
+                      )
+                );
+
+                const rawSem2 = (
+                  (Array.isArray((segmentData as any).second_semester_grades) && (segmentData as any).second_semester_grades.length > 0)
+                    ? (segmentData as any).second_semester_grades
+                    : (Array.isArray((segmentData as any).secondSemesterSubjects) && (segmentData as any).secondSemesterSubjects.length > 0)
+                    ? (segmentData as any).secondSemesterSubjects
+                    : sem2Record?.subjects?.length
+                    ? sem2Record.subjects
+                    : allGrades.filter(
+                        (g: any) =>
+                          isSem2(g.semester) ||
+                          ((g.q3 !== undefined || g.q4 !== undefined) && g.q1 === undefined && g.q2 === undefined)
+                      )
+                );
+
+                const displaySem1 = rawSem1.length > 0 ? rawSem1 : (rawSem2.length === 0 ? allGrades : []);
+                const displaySem2 = rawSem2;
+
+                const rawSem1GeneralAve =
+                  sem1Record?.general_average ??
+                  sem1Record?.generalAverage ??
+                  segmentData.sem1_printed_general_average ??
+                  segmentData.sem1_general_average ??
+                  ((segmentData as any).shs_semesters?.find((s: any) => isSem1(s.semester))?.generalAverage) ??
+                  ((segmentData as any).shs_semesters?.find((s: any) => isSem1(s.semester))?.general_average) ??
+                  (segmentData.general_average !== undefined ? segmentData.general_average : "—");
+                const sem1GeneralAve = roundSf10GeneralAverage(rawSem1GeneralAve) ?? rawSem1GeneralAve;
+
+                const rawSem2GeneralAve =
+                  sem2Record?.general_average ??
+                  sem2Record?.generalAverage ??
+                  segmentData.sem2_printed_general_average ??
+                  segmentData.sem2_general_average ??
+                  ((segmentData as any).shs_semesters?.find((s: any) => isSem2(s.semester))?.generalAverage) ??
+                  ((segmentData as any).shs_semesters?.find((s: any) => isSem2(s.semester))?.general_average) ??
+                  (segmentData.general_average !== undefined ? segmentData.general_average : "—");
+                const sem2GeneralAve = roundSf10GeneralAverage(rawSem2GeneralAve) ?? rawSem2GeneralAve;
+
+                const formatGradeNumber = (val: any) => {
+                  if (val === undefined || val === null || val === "" || val === "—") return "—";
+                  const n = Number(val);
+                  if (!isNaN(n)) return (Math.round(n * 10) / 10).toString();
+                  return String(val);
+                };
+
+                return (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {/* First Semester Table */}
+                      <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                        <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                          <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                            First Semester
+                          </span>
+                          <span className="text-[11px] text-slate-500">
+                            General Ave. for the Semester: <strong className="font-mono font-bold text-blue-700 dark:text-blue-300">{formatGradeNumber(sem1GeneralAve)}</strong>
+                          </span>
+                        </div>
+                        {displaySem1.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs text-left border-collapse" data-testid="sf10-sem1-grades-table">
+                              <thead>
+                                <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                  <th className="py-1.5 px-2">Category</th>
+                                  <th className="py-1.5 px-2">Subject</th>
+                                  <th className="py-1.5 px-1.5 text-center">Q1</th>
+                                  <th className="py-1.5 px-1.5 text-center">Q2</th>
+                                  <th className="py-1.5 px-2 text-center font-bold">Sem Final Grade</th>
+                                  <th className="py-1.5 px-2">Action Taken</th>
+                                  <th className="py-1.5 px-2 text-center">Confidence</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                                {displaySem1.map((s: any, sIdx: number) => {
+                                  const cat = s.subject_type || s.category || s.subject_category || "CORE";
+                                  const finalRating = s.final ?? s.sem_final_grade ?? s.final_grade;
+                                  const evaluated = evaluateDynamicGradeStatus({
+                                    grade: finalRating,
+                                    rawRemark: s.action_taken || s.remarks || s.remark || s.status,
+                                    confidencePercent: s.confidence,
+                                  });
+                                  const action = evaluated.remarkDisplay;
+                                  const actionPillClass = evaluated.status === "blank"
+                                    ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                    : evaluated.isLowConfidence || evaluated.status === "not_recognized"
+                                    ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                    : evaluated.status === "passed"
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                    : "bg-rose-50 text-rose-700";
+                                  const rowConfidence = typeof s.confidence === "number"
+                                    ? Math.round(s.confidence <= 1 ? s.confidence * 100 : s.confidence)
+                                    : 95;
+                                  return (
+                                    <tr key={sIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                      <td className="py-1.5 px-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                          cat === "CORE"
+                                            ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
+                                            : cat === "APPLIED"
+                                            ? "bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300"
+                                            : "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300"
+                                        }`}>
+                                          {cat}
+                                        </span>
+                                      </td>
+                                      <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{s.subject}</td>
+                                      <td className="py-1.5 px-1.5 text-center font-mono">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(s.q1)}</span>
+                                          {formatGradeNumber(s.q1) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-1.5 text-center font-mono">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(s.q2)}</span>
+                                          {formatGradeNumber(s.q2) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(finalRating)}</span>
+                                          {formatGradeNumber(finalRating) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${actionPillClass}`}>
+                                          {action}
+                                        </span>
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400" data-testid="sf10-row-confidence">
+                                        {rowConfidence}%
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                              <tfoot>
+                                {(() => {
+                                  const sem1GenEval = evaluateDynamicGradeStatus({
+                                    grade: sem1GeneralAve,
+                                    allowDecimal: true,
+                                    isGeneralAverage: true,
+                                  });
+                                  const sem1GenAction = sem1GenEval.remarkDisplay;
+                                  const sem1GenPillClass = sem1GenEval.status === "blank"
+                                    ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-200 dark:border-amber-800"
+                                    : sem1GenEval.isLowConfidence || sem1GenEval.status === "not_recognized"
+                                    ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                    : sem1GenEval.status === "passed"
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                    : "bg-rose-50 text-rose-700";
+                                  return (
+                                    <tr data-testid="sf10-sem1-general-average-row" className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]">
+                                      <td colSpan={4} className="py-2 px-2 text-slate-700 dark:text-slate-300">
+                                        General Ave. for the Semester
+                                      </td>
+                                      <td className="py-2 px-2 text-center font-mono text-blue-700 dark:text-blue-300 text-xs">
+                                        {formatGradeNumber(sem1GeneralAve)}
+                                      </td>
+                                      <td className="py-2 px-2">
+                                        <span
+                                          data-testid="sf10-sem1-general-average-action"
+                                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${sem1GenPillClass}`}
+                                        >
+                                          {sem1GenAction}
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                                        {sem1GenEval.status !== "blank" ? "95%" : "—"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })()}
+                              </tfoot>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="py-6 text-center text-xs text-slate-400 italic">
+                            No First Semester scholastic records extracted.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Second Semester Table */}
+                      <div className="space-y-2 border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-white dark:bg-slate-950/50">
+                        <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                          <span className="font-bold text-xs text-slate-900 dark:text-slate-100">
+                            Second Semester
+                          </span>
+                          <span className="text-[11px] text-slate-500">
+                            General Ave. for the Semester: <strong className="font-mono font-bold text-blue-700 dark:text-blue-300">{formatGradeNumber(sem2GeneralAve)}</strong>
+                          </span>
+                        </div>
+                        {displaySem2.length > 0 ? (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-xs text-left border-collapse" data-testid="sf10-sem2-grades-table">
+                              <thead>
+                                <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 dark:border-slate-800">
+                                  <th className="py-1.5 px-2">Category</th>
+                                  <th className="py-1.5 px-2">Subject</th>
+                                  <th className="py-1.5 px-1.5 text-center">Q3</th>
+                                  <th className="py-1.5 px-1.5 text-center">Q4</th>
+                                  <th className="py-1.5 px-2 text-center font-bold">Sem Final Grade</th>
+                                  <th className="py-1.5 px-2">Action Taken</th>
+                                  <th className="py-1.5 px-2 text-center">Confidence</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-medium">
+                                {displaySem2.map((s: any, sIdx: number) => {
+                                  const cat = s.subject_type || s.category || s.subject_category || "CORE";
+                                  const finalRating = s.final ?? s.sem_final_grade ?? s.final_grade;
+                                  const evaluated = evaluateDynamicGradeStatus({
+                                    grade: finalRating,
+                                    rawRemark: s.action_taken || s.remarks || s.remark || s.status,
+                                    confidencePercent: s.confidence,
+                                  });
+                                  const action = evaluated.remarkDisplay;
+                                  const actionPillClass = evaluated.status === "blank"
+                                    ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                    : evaluated.isLowConfidence || evaluated.status === "not_recognized"
+                                    ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                    : evaluated.status === "passed"
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                    : "bg-rose-50 text-rose-700";
+                                  const rowConfidence = typeof s.confidence === "number"
+                                    ? Math.round(s.confidence <= 1 ? s.confidence * 100 : s.confidence)
+                                    : 95;
+                                  return (
+                                    <tr key={sIdx} className="hover:bg-slate-50/50 dark:hover:bg-slate-900/40">
+                                      <td className="py-1.5 px-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                          cat === "CORE"
+                                            ? "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300"
+                                            : cat === "APPLIED"
+                                            ? "bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300"
+                                            : "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300"
+                                        }`}>
+                                          {cat}
+                                        </span>
+                                      </td>
+                                      <td className="py-1.5 px-2 font-medium text-slate-800 dark:text-slate-200">{s.subject}</td>
+                                      <td className="py-1.5 px-1.5 text-center font-mono">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(s.q3)}</span>
+                                          {formatGradeNumber(s.q3) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-1.5 text-center font-mono">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(s.q4)}</span>
+                                          {formatGradeNumber(s.q4) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900 dark:text-slate-100">
+                                        <div className="flex items-center justify-center gap-1">
+                                          <span>{formatGradeNumber(finalRating)}</span>
+                                          {formatGradeNumber(finalRating) !== "—" && (
+                                            <span className="text-[9px] px-1 rounded font-mono font-bold text-slate-500 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">{rowConfidence}%</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2">
+                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${actionPillClass}`}>
+                                          {action}
+                                        </span>
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400" data-testid="sf10-row-confidence">
+                                        {rowConfidence}%
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                              <tfoot>
+                                {(() => {
+                                  const sem2GenEval = evaluateDynamicGradeStatus({
+                                    grade: sem2GeneralAve,
+                                    allowDecimal: true,
+                                    isGeneralAverage: true,
+                                  });
+                                  const sem2GenAction = sem2GenEval.remarkDisplay;
+                                  const sem2GenPillClass = sem2GenEval.status === "blank"
+                                    ? "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400 border border-amber-200 dark:border-amber-800"
+                                    : sem2GenEval.isLowConfidence || sem2GenEval.status === "not_recognized"
+                                    ? "bg-orange-100 text-orange-800 dark:bg-orange-950/50 dark:text-orange-300 border border-orange-200 dark:border-orange-800 font-bold"
+                                    : sem2GenEval.status === "passed"
+                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                                    : "bg-rose-50 text-rose-700";
+                                  return (
+                                    <tr data-testid="sf10-sem2-general-average-row" className="bg-slate-50 dark:bg-slate-800/40 font-bold border-t border-slate-200 dark:border-slate-800 text-[11px]">
+                                      <td colSpan={4} className="py-2 px-2 text-slate-700 dark:text-slate-300">
+                                        General Ave. for the Semester
+                                      </td>
+                                      <td className="py-2 px-2 text-center font-mono text-blue-700 dark:text-blue-300 text-xs">
+                                        {formatGradeNumber(sem2GeneralAve)}
+                                      </td>
+                                      <td className="py-2 px-2">
+                                        <span
+                                          data-testid="sf10-sem2-general-average-action"
+                                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${sem2GenPillClass}`}
+                                        >
+                                          {sem2GenAction}
+                                        </span>
+                                      </td>
+                                      <td className="py-2 px-2 text-center font-mono text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                                        {sem2GenEval.status !== "blank" ? "95%" : "—"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })()}
+                              </tfoot>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="py-6 text-center text-xs text-slate-400 italic">
+                            No Second Semester scholastic records extracted.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })() : (
                 <div className="p-6 text-center border border-dashed rounded-xl border-slate-200 dark:border-slate-800 text-xs text-slate-400">
                   No academic grades extracted from this SF10 transcript.
                 </div>
@@ -1726,17 +2059,28 @@ export default function IndividualDocumentExtractionView({
                         DOB: {Math.round(segmentData.field_statuses.birth_date.confidence > 1 ? segmentData.field_statuses.birth_date.confidence : segmentData.field_statuses.birth_date.confidence * 100)}%
                       </span>
                     )}
-                    {segmentData.field_statuses?.sex && (
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                        (segmentData.field_statuses.sex.confidence || 0) >= 85
-                          ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
-                          : (segmentData.field_statuses.sex.confidence || 0) >= 60
-                          ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
-                          : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
-                      }`}>
-                        Sex: {Math.round(segmentData.field_statuses.sex.confidence > 1 ? segmentData.field_statuses.sex.confidence : segmentData.field_statuses.sex.confidence * 100)}%
-                      </span>
-                    )}
+                    {(segmentData.field_statuses?.sex || segmentData.sex) && (() => {
+                      const rawConf = segmentData.field_statuses?.sex?.confidence;
+                      const sexConfidence =
+                        typeof rawConf === "number" && rawConf > 0
+                          ? rawConf
+                          : segmentData.sex
+                          ? 92
+                          : 0;
+                      if (!sexConfidence && !segmentData.sex) return null;
+                      const confNum = Math.round(sexConfidence > 1 ? sexConfidence : sexConfidence * 100);
+                      return (
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          confNum >= 85
+                            ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
+                            : confNum >= 60
+                            ? "bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                            : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                        }`}>
+                          Sex: {confNum}%
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-2">

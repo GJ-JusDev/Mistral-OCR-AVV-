@@ -148,6 +148,9 @@ export async function GET(request: NextRequest) {
       return {
         ...doc,
         batch_number: formattedBatch,
+        batch_id: formattedBatch,
+        is_reconciled: Boolean(ef.is_reconciled ?? doc.is_reconciled),
+        reconciliation_log: ef.reconciliation_log || doc.reconciliation_log || [],
       };
     });
 
@@ -1683,6 +1686,8 @@ export async function DELETE(request: NextRequest) {
     }
 
     const schoolId = roleRow.school_id;
+    const searchParams = request.nextUrl.searchParams;
+    const targetBatchId = searchParams.get('batchId') || searchParams.get('batch_id') || searchParams.get('batch');
 
     // 1. Fetch matching target documentIds and storage file paths scoped to user's school / uploaded_by
     // Use .select('*') to avoid PostgREST column missing errors on optional fields
@@ -1696,7 +1701,7 @@ export async function DELETE(request: NextRequest) {
       fetchQuery = fetchQuery.eq("uploaded_by", user.id);
     }
 
-    const { data: targetDocs, error: fetchErr } = await fetchQuery;
+    let { data: targetDocs, error: fetchErr } = await fetchQuery;
 
     if (fetchErr) {
       console.error("[DELETE /api/documents] Failed to query documents:", fetchErr);
@@ -1704,6 +1709,16 @@ export async function DELETE(request: NextRequest) {
         error: `Failed to fetch target documents: ${fetchErr.message}`,
         details: { code: fetchErr.code, message: fetchErr.message },
       }, { status: 500 });
+    }
+
+    if (targetBatchId && targetDocs && targetDocs.length > 0) {
+      const normTargetBatch = formatBatchNumber(targetBatchId).toLowerCase();
+      targetDocs = targetDocs.filter((d: any) => {
+        const ef = (d.extracted_fields || {}) as Record<string, any>;
+        const rawBatch = ef.batch_number || ef.batch_id || d.batch_id || d.batch_number;
+        const bNum = formatBatchNumber(rawBatch, d.created_at || d.submission_date).toLowerCase();
+        return bNum === normTargetBatch || (rawBatch && String(rawBatch).toLowerCase() === normTargetBatch);
+      });
     }
 
     if (!targetDocs || targetDocs.length === 0) {

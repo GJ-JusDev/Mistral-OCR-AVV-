@@ -513,7 +513,7 @@ export function evaluateBatchCrossDocumentValidation(params: {
 
     // SF10 Permanent Record
     if (seg.documentType === "sf10") {
-      const sf10Learner = data.learner || data;
+      const sf10Learner = data.learner ? { ...data, ...data.learner } : data;
       const l = getOrCreateLearner(
         sf10Learner.lrn || data.lrn,
         { lastName: sf10Learner.lastName || sf10Learner.last_name || data.last_name, firstName: sf10Learner.firstName || sf10Learner.first_name || data.first_name, middleName: sf10Learner.middleName || sf10Learner.middle_name || data.middle_name },

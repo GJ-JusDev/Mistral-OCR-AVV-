@@ -1501,4 +1501,79 @@ CERTIFICATE OF LIVE BIRTH
       assert.ok(spatialFemale.confidence >= 85);
     }
   );
+
+  await t.test(
+    "Test W — mergeSf9FrontAndBack handles numeric semester: 1 | 2 and numeric grade_level: 11 without throwing TypeError",
+    () => {
+      const frontSide = {
+        pageNumber: 1,
+        confidence: 0.95,
+        fields: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          grade_level: 11,
+          section: "CSS 1",
+          school_year: "2025-2026",
+          sex: "Male",
+          grades: [
+            {
+              subject: "Oral Communication in Context",
+              semester: 1,
+              grade_level: 11,
+              q1: 88,
+              q2: 90,
+              sem1_final_grade: 89,
+              final_grade: 89,
+              remarks: "PASSED",
+            },
+          ],
+        },
+      };
+
+      const backSide = {
+        pageNumber: 2,
+        confidence: 0.95,
+        fields: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          grade_level: 11,
+          section: "CSS 1",
+          school_year: "2025-2026",
+          grades: [
+            {
+              subject: "Reading and Writing Skills",
+              semester: 2,
+              grade_level: 11,
+              q3: 91,
+              q4: 93,
+              sem2_final_grade: 92,
+              final_grade: 92,
+              remarks: "PASSED",
+            },
+          ],
+          sem1_general_average: 89,
+          sem2_general_average: 92,
+          general_average: 91,
+        },
+      };
+
+      let result;
+      assert.doesNotThrow(() => {
+        result = mergeSf9FrontAndBack(frontSide, backSide);
+      }, "mergeSf9FrontAndBack must not throw TypeError when semester or grade_level is numeric");
+
+      assert.ok(result && result.unifiedFields, "Result must contain unifiedFields");
+      assert.strictEqual(result.unifiedFields.first_semester_grades.length, 1);
+      assert.strictEqual(result.unifiedFields.second_semester_grades.length, 1);
+      assert.strictEqual(result.unifiedFields.first_semester_grades[0].subject, "Oral Communication in Context");
+      assert.strictEqual(result.unifiedFields.second_semester_grades[0].subject, "Reading and Writing Skills");
+      assert.strictEqual(result.unifiedFields.first_semester_general_average, 89);
+      assert.strictEqual(result.unifiedFields.second_semester_general_average, 92);
+      assert.strictEqual(result.unifiedFields.general_average, 91);
+      assert.strictEqual(result.isSameLearner, true);
+      assert.strictEqual(result.hasAcademicConflict, false);
+    }
+  );
 });

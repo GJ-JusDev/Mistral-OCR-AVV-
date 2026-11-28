@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { parsePsaBirthCert } from "@/lib/ocr/psaParser";
+import { parsePsaBirthCert, detectPsaSexFromMarkBoxInk } from "@/lib/ocr/psaParser";
 import { logAuditEvent } from "@/lib/audit/auditLogger";
 import { getImageDimensionsFromBuffer } from "@/lib/ocr/providers/azureProvider";
 
@@ -140,11 +140,55 @@ export async function POST(request: NextRequest) {
   // 3. Fast-path: Direct raw text OCR testing (used in synthetic tests or debug)
   if (typeof rawText === "string" && rawText.trim().length > 0) {
     const parsed = parsePsaBirthCert(rawText);
+
+    // Fallback: If Item 2 Sex is not detected or confidence is low (< 75%), run detectPsaSexFromMarkBoxInk if image is provided
+    let fastInkRes: any = null;
+    const fastImage = upperSectionImage || image || frontImage;
+    if ((!parsed.identity.sex || (parsed.field_statuses?.sex?.confidence ?? 0) < 75) && fastImage && typeof fastImage === "string") {
+      const b64 = fastImage.includes(",") ? fastImage.split(",")[1] : fastImage;
+      try {
+        const imgBuf = Buffer.from(b64, "base64");
+        fastInkRes = await detectPsaSexFromMarkBoxInk({
+          uprightImageBuffer: imgBuf,
+          rawLayout: body?.rawLayout,
+        });
+        if (fastInkRes.sex) {
+          parsed.identity.sex = fastInkRes.sex === "Male" ? "M" : "F";
+          parsed.identity.sex_label = fastInkRes.sex;
+          if (!parsed.field_statuses) parsed.field_statuses = {} as any;
+          parsed.field_statuses.sex = {
+            value: fastInkRes.sex,
+            status: "extracted",
+            confidence: fastInkRes.confidence || 92,
+          };
+          parsed.warnings = (parsed.warnings || []).filter(
+            (w) => !w.toLowerCase().includes("sex could not be reliably extracted")
+          );
+        }
+      } catch (inkErr) {
+        console.warn("[PSA Scan Fast-path] detectPsaSexFromMarkBoxInk error:", inkErr);
+      }
+    }
+
     const resolvedSex = parsed.identity.sex === "M" ? "Male" : parsed.identity.sex === "F" ? "Female" : (parsed.identity.sex || null);
     const resolvedConfidence =
       typeof parsed.confidence === "number"
         ? (parsed.confidence > 1 ? parsed.confidence : parsed.confidence * 100)
         : 95;
+
+    const fastSexDiagnostic = fastInkRes
+      ? {
+          leftInkRatio: fastInkRes.leftInkRatio,
+          rightInkRatio: fastInkRes.rightInkRatio,
+          source: fastInkRes.source || (fastInkRes.sex ? (fastInkRes.sex === "Male" ? "pixel_ink_left_box" : "pixel_ink_right_box") : "not_detected"),
+          matchedLines: fastInkRes.matchedLines || [],
+        }
+      : {
+          leftInkRatio: 0,
+          rightInkRatio: 0,
+          source: resolvedSex ? "text_x_mark" : "not_detected",
+          matchedLines: [],
+        };
 
     const flatFields = {
       document_type: "birth_cert",
@@ -169,11 +213,18 @@ export async function POST(request: NextRequest) {
       field_statuses: parsed.field_statuses,
       confidence: Math.round(resolvedConfidence),
       ocr_confidence_percent: Math.round(resolvedConfidence),
+      sexDiagnostic: fastSexDiagnostic,
+      rawText: rawText,
+      raw_ocr_text: rawText,
     };
 
     return NextResponse.json({
       success: true,
       text: rawText,
+      rawText: rawText,
+      raw_ocr_text: rawText,
+      sex: resolvedSex,
+      sexDiagnostic: fastSexDiagnostic,
       identity: parsed.identity,
       fields: flatFields,
       psa_data: flatFields,
@@ -347,6 +398,39 @@ export async function POST(request: NextRequest) {
       childNameText,
     });
 
+    // Fallback: If Item 2 Sex is not detected or confidence is low (< 75%), run detectPsaSexFromMarkBoxInk
+    let fullInkRes: any = null;
+    const currentSex = parsed.identity.sex;
+    const currentSexConfidence = parsed.field_statuses?.sex?.confidence ?? 0;
+    if (!currentSex || currentSexConfidence < 75) {
+      const imageToUse = upperSectionImage || primaryImage;
+      if (imageToUse && typeof imageToUse === "string") {
+        const b64 = imageToUse.includes(",") ? imageToUse.split(",")[1] : imageToUse;
+        try {
+          const imgBuf = Buffer.from(b64, "base64");
+          fullInkRes = await detectPsaSexFromMarkBoxInk({
+            uprightImageBuffer: imgBuf,
+            rawLayout,
+          });
+          if (fullInkRes.sex) {
+            parsed.identity.sex = fullInkRes.sex === "Male" ? "M" : "F";
+            parsed.identity.sex_label = fullInkRes.sex;
+            if (!parsed.field_statuses) parsed.field_statuses = {} as any;
+            parsed.field_statuses.sex = {
+              value: fullInkRes.sex,
+              status: "extracted",
+              confidence: fullInkRes.confidence || 92,
+            };
+            parsed.warnings = (parsed.warnings || []).filter(
+              (w) => !w.toLowerCase().includes("sex could not be reliably extracted")
+            );
+          }
+        } catch (inkErr) {
+          console.warn("[PSA Scan] detectPsaSexFromMarkBoxInk error:", inkErr);
+        }
+      }
+    }
+
     const durationMs = Date.now() - startTime;
 
     // 7. Non-PII audit logging (Safe Test Mode — NEVER exposes child name or PII)
@@ -379,6 +463,20 @@ export async function POST(request: NextRequest) {
         ? (overallConfidence > 1 ? overallConfidence : overallConfidence * 100)
         : 95;
 
+    const fullSexDiagnostic = fullInkRes
+      ? {
+          leftInkRatio: fullInkRes.leftInkRatio,
+          rightInkRatio: fullInkRes.rightInkRatio,
+          source: fullInkRes.source || (fullInkRes.sex ? (fullInkRes.sex === "Male" ? "pixel_ink_left_box" : "pixel_ink_right_box") : "not_detected"),
+          matchedLines: fullInkRes.matchedLines || [],
+        }
+      : {
+          leftInkRatio: 0,
+          rightInkRatio: 0,
+          source: resolvedSex ? "text_x_mark" : "not_detected",
+          matchedLines: [],
+        };
+
     const flatFields = {
       document_type: "birth_cert",
       first_name: parsed.identity.first_name,
@@ -402,11 +500,18 @@ export async function POST(request: NextRequest) {
       field_statuses: parsed.field_statuses,
       confidence: Math.round(resolvedConfidence),
       ocr_confidence_percent: Math.round(resolvedConfidence),
+      sexDiagnostic: fullSexDiagnostic,
+      rawText: combinedText,
+      raw_ocr_text: combinedText,
     };
 
     return NextResponse.json({
       success: true,
       text: combinedText,
+      rawText: combinedText,
+      raw_ocr_text: combinedText,
+      sex: resolvedSex,
+      sexDiagnostic: fullSexDiagnostic,
       identity: parsed.identity,
       fields: flatFields,
       psa_data: flatFields,

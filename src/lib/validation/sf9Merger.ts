@@ -74,7 +74,7 @@ export function mergeSf9FrontAndBack(
   const lastName = front.last_name || back.last_name;
   const middleName = front.middle_name || back.middle_name;
 
-  if (front.last_name && back.last_name && front.last_name.toLowerCase() !== back.last_name.toLowerCase()) {
+  if (front.last_name && back.last_name && String(front.last_name).toLowerCase().trim() !== String(back.last_name).toLowerCase().trim()) {
     identityConflicts.push(`Conflicting Last Names: Front has "${front.last_name}", Back has "${back.last_name}".`);
   }
 
@@ -95,11 +95,11 @@ export function mergeSf9FrontAndBack(
     if (!grades || !Array.isArray(grades)) return;
 
     for (const g of grades) {
-      if (!g.subject || g.subject.trim().length < 2) continue;
+      if (!g.subject || String(g.subject).trim().length < 2) continue;
 
-      const normSubject = cleanSubjectName(g.subject);
-      const semTag = (g.semester || "").toLowerCase().trim();
-      const glTag = (g.grade_level || "").toLowerCase().trim();
+      const normSubject = cleanSubjectName(String(g.subject ?? ""));
+      const semTag = String(g.semester ?? "").toLowerCase().trim();
+      const glTag = String(g.grade_level ?? "").toLowerCase().trim();
       const uniqueKey = `${glTag}::${semTag}::${normSubject}`;
 
       const authoritativeFinal = getAuthoritativeSemesterFinalGrade(g);
@@ -201,6 +201,65 @@ export function mergeSf9FrontAndBack(
   const rawBackSex = normalizeStrictSex(back.sex);
   const resolvedSex = rawFrontSex || rawBackSex || null;
 
+  // Split mergedGrades into semesters
+  const allGrades = mergedGrades;
+  const sem1Grades = allGrades.filter((g) => {
+    const s = String(g.semester ?? "").toLowerCase();
+    return s.includes("1") || s.includes("first") || ((g.q1 !== undefined || g.q2 !== undefined) && g.q3 === undefined && g.q4 === undefined);
+  });
+  const sem2Grades = allGrades.filter((g) => {
+    const s = String(g.semester ?? "").toLowerCase();
+    return s.includes("2") || s.includes("second") || ((g.q3 !== undefined || g.q4 !== undefined) && g.q1 === undefined && g.q2 === undefined);
+  });
+  const unassigned = allGrades.filter((g) => !sem1Grades.includes(g) && !sem2Grades.includes(g));
+  const effectiveSem1 = sem1Grades.length > 0 ? sem1Grades : (sem2Grades.length === 0 ? unassigned : []);
+  const effectiveSem2 = sem2Grades;
+
+  const s1Subjects = effectiveSem1.map((s) => ({
+    ...s,
+    semester: 1,
+    final: s.sem1_final_grade ?? s.final_grade ?? s.final,
+    finalGrade: s.sem1_final_grade ?? s.final_grade ?? s.final,
+    sem1_final_grade: s.sem1_final_grade ?? s.final_grade ?? s.final,
+  }));
+
+  const s2Subjects = effectiveSem2.map((s) => ({
+    ...s,
+    semester: 2,
+    final: s.sem2_final_grade ?? s.final_grade ?? s.final,
+    finalGrade: s.sem2_final_grade ?? s.final_grade ?? s.final,
+    sem2_final_grade: s.sem2_final_grade ?? s.final_grade ?? s.final,
+  }));
+
+  const rawSem1Avg = back.sem1_printed_general_average ?? front.sem1_printed_general_average ?? back.sem1_general_average ?? front.sem1_general_average ?? null;
+  const rawSem2Avg = back.sem2_printed_general_average ?? front.sem2_printed_general_average ?? back.sem2_general_average ?? front.sem2_general_average ?? null;
+
+  const sem1Block = {
+    semester: "1st Semester",
+    school_name: schoolName,
+    school_id: schoolId,
+    grade_level: gradeLevel,
+    school_year: schoolYear,
+    track_strand: trackStrand,
+    section,
+    generalAverage: rawSem1Avg,
+    general_average: rawSem1Avg,
+    subjects: s1Subjects,
+  };
+
+  const sem2Block = {
+    semester: "2nd Semester",
+    school_name: schoolName,
+    school_id: schoolId,
+    grade_level: gradeLevel,
+    school_year: schoolYear,
+    track_strand: trackStrand,
+    section,
+    generalAverage: rawSem2Avg,
+    general_average: rawSem2Avg,
+    subjects: s2Subjects,
+  };
+
   const unifiedFields: ExtractedFields = {
     ...front,
     ...back,
@@ -219,6 +278,11 @@ export function mergeSf9FrontAndBack(
     school_id: schoolId,
     adviser,
     grades: mergedGrades,
+    first_semester_grades: s1Subjects,
+    firstSemesterSubjects: s1Subjects,
+    second_semester_grades: s2Subjects,
+    secondSemesterSubjects: s2Subjects,
+    shs_semesters: [sem1Block, sem2Block],
     attendance,
     attendance_months: attendanceMonths,
     attendance_confidence: attendanceConfidence,
@@ -229,11 +293,13 @@ export function mergeSf9FrontAndBack(
     attendance_discrepancy_details: attendanceDiscrepancyDetails,
     general_average: generalAverage,
     general_average_confidence: back.general_average_confidence ?? front.general_average_confidence,
-    sem1_general_average: back.sem1_general_average ?? front.sem1_general_average,
+    sem1_general_average: rawSem1Avg,
     sem1_printed_general_average: back.sem1_printed_general_average ?? front.sem1_printed_general_average,
+    first_semester_general_average: rawSem1Avg,
     sem1_confidence: back.sem1_confidence ?? front.sem1_confidence ?? back.general_average_confidence ?? front.general_average_confidence,
-    sem2_general_average: back.sem2_general_average ?? front.sem2_general_average,
+    sem2_general_average: rawSem2Avg,
     sem2_printed_general_average: back.sem2_printed_general_average ?? front.sem2_printed_general_average,
+    second_semester_general_average: rawSem2Avg,
     sem2_confidence: back.sem2_confidence ?? front.sem2_confidence ?? back.general_average_confidence ?? front.general_average_confidence,
     observed_values: sanitizeLearnersObservedValues(back.observed_values || front.observed_values),
     learner_progress_achievement: back.learner_progress_achievement || front.learner_progress_achievement,

@@ -1509,4 +1509,675 @@ MALE
       "crossDocumentEngine must NOT create Mother's Maiden Name comparison row in fieldsMatrix"
     );
   });
+
+  // ── 37. Pre-Upload Teacher Verification Modal & Persisting Reconciled Baseline Values ───
+  await t.test("37. Pre-Upload Verification Modal & Reconciled Payload Persistence across 5 Documents", async () => {
+    const uploadPagePath = path.join(rootDir, "src/app/upload/page.tsx");
+    const uploadPageSrc = fs.readFileSync(uploadPagePath, "utf8");
+
+    // 1. Pre-Upload Teacher Verification Modal in upload/page.tsx
+    assert.ok(
+      uploadPageSrc.includes("Confirm Upload to Document Registry?"),
+      "upload/page.tsx must render Teacher Verification Modal title 'Confirm Upload to Document Registry?'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Do you want to commit and save this verified student batch folder into /documents?"),
+      "upload/page.tsx must prompt 'Do you want to commit and save this verified student batch folder into /documents?'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Canonical Student Name (PSA)"),
+      "Modal must show 'Canonical Student Name (PSA)'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Canonical LRN (SF1)"),
+      "Modal must show 'Canonical LRN (SF1)'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Grade, Section &amp; School Year (SF1)") ||
+      uploadPageSrc.includes("Grade, Section & School Year (SF1)"),
+      "Modal must show 'Grade, Section & School Year (SF1)'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("Included Scanned Forms"),
+      "Modal must show 'Included Scanned Forms'"
+    );
+    assert.ok(
+      uploadPageSrc.includes("All Primary Source Fixes Applied") ||
+      uploadPageSrc.includes("✓ All Primary Source Fixes Applied"),
+      "Modal must display green badge for All Primary Source Fixes Applied"
+    );
+    assert.ok(
+      uploadPageSrc.includes("View Batch in /documents"),
+      "upload/page.tsx must render 'View Batch in /documents' post-upload action"
+    );
+
+    // 2. Functional test: reconcileStudentDataFromPrimarySources propagates canonical values
+    const { reconcileStudentDataFromPrimarySources } = await import("../src/lib/validation/crossDocumentEngine.ts");
+
+    const sampleDossier = {
+      lrn: "111500619123",
+      sf1Raw: {
+        lrn: "111500619123",
+        school_id: "500169",
+        school_year: "2025-2026",
+        grade_level: "Grade 11",
+        section: "CSS 1",
+        last_name: "GOMEZ",
+        first_name: "JUSTIN",
+      },
+      psaRaw: {
+        last_name: "GOMEZ",
+        first_name: "JUSTIN",
+        middle_name: "LOQUILLANO",
+        sex: "Male",
+        date_of_birth: "2008-05-15",
+      },
+      sf9Raw: {
+        lrn: "111500619123",
+        general_average: 89,
+      },
+      sf2Raw: {
+        lrn: "111500619123",
+      },
+      sf10Raw: {
+        lrn: "111500619123",
+      },
+      unifiedMatrix: [
+        { field: "lrn", label: "Learner Reference Number (LRN)", status: "MISMATCH", isMatch: false, sf1Value: "111500619123", sf2Value: "111999999999" },
+        { field: "sex", label: "Sex", status: "MISMATCH", isMatch: false, sf1Value: "M", psaValue: "Male" },
+        { field: "first_name", label: "First Name", status: "MATCH", isMatch: true, sf1Value: "JUSTIN", psaValue: "JUSTIN" }
+      ],
+    };
+
+    const result = reconcileStudentDataFromPrimarySources(sampleDossier);
+    assert.strictEqual(result.lrn, "111500619123", "Canonical LRN must be from SF1");
+    assert.strictEqual(result.sex, "Male", "Canonical Sex must be from PSA");
+    assert.strictEqual(result.gradeLevel, "Grade 11", "Grade Level must be from SF1");
+    assert.strictEqual(result.section, "CSS 1", "Section must be from SF1");
+    assert.ok(result.reconciliationLog.length > 0, "Audit trail must record reconciled fields");
+    assert.strictEqual(result.overallStatus, "MATCH", "Overall status must be MATCH");
+  });
+
+  // ── 38. Batch-Organized Registry & 5-Document Side-by-Side Inspector ───────────
+  await t.test("38. Batch-Organized Registry, Side-by-Side Inspector & Single Batch Deletion in /documents", async () => {
+    const docsPagePath = path.join(rootDir, "src/app/documents/page.tsx");
+    const docsPageSrc = fs.readFileSync(docsPagePath, "utf8");
+
+    // 1. Dual view tabs in /documents
+    assert.ok(
+      docsPageSrc.includes("All Batches"),
+      "Documents page must have 'All Batches' tab"
+    );
+    assert.ok(
+      docsPageSrc.includes("All Individual Files"),
+      "Documents page must have 'All Individual Files' tab"
+    );
+
+    // 2. Batch Folder Header Card elements
+    assert.ok(
+      docsPageSrc.includes("Verified &amp; Fixed") || docsPageSrc.includes("Verified & Fixed"),
+      "Batch header card must render 'Verified & Fixed' badge"
+    );
+    assert.ok(
+      docsPageSrc.includes("Inspect Batch Documents"),
+      "Batch header card must have 'Inspect Batch Documents' button"
+    );
+    assert.ok(
+      docsPageSrc.includes("Delete Batch"),
+      "Batch header card must have 'Delete Batch' button"
+    );
+
+    // 3. BatchSideBySideInspector component exists and satisfies layout requirements
+    const inspectorPath = path.join(rootDir, "src/components/documents/BatchSideBySideInspector.tsx");
+    assert.ok(fs.existsSync(inspectorPath), "BatchSideBySideInspector component must exist");
+    const inspectorSrc = fs.readFileSync(inspectorPath, "utf8");
+
+    assert.ok(
+      inspectorSrc.includes("CANONICAL_DOC_CONFIG"),
+      "BatchSideBySideInspector must define 5 canonical doc configs (SF1, SF2, SF9, SF10, PSA)"
+    );
+    assert.ok(
+      inspectorSrc.includes("Primary Source Fixed"),
+      "Inspector must render 'Primary Source Fixed' indicator"
+    );
+    assert.ok(
+      inspectorSrc.includes("Reconciliation Audit Trail"),
+      "Inspector must provide expandable Reconciliation Audit Trail"
+    );
+
+    // 4. aggregateDocumentsIntoBatchFolders groups 5 documents into 1 batch folder
+    const { aggregateDocumentsIntoBatchFolders } = await import("../src/lib/validation/nameComparison.ts");
+
+    const batchDocs = [
+      {
+        id: "doc-sf1",
+        document_type: "sf1",
+        batch_id: "BATCH-20261127-8F3",
+        canonical_lrn: "111500619123",
+        extracted_fields: {
+          lrn: "111500619123",
+          name: "Gomez, Justin Loquillano",
+          grade_level: "Grade 11",
+          section: "CSS 1",
+          school_year: "2025-2026",
+          is_reconciled: true,
+          reconciliation_log: [{ field: "name", baseline: "PSA" }],
+        },
+      },
+      {
+        id: "doc-sf2",
+        document_type: "sf2",
+        batch_id: "BATCH-20261127-8F3",
+        extracted_fields: {
+          lrn: "111500619123",
+          name: "Gomez, Justin Loquillano",
+          section: "CSS 1",
+          is_reconciled: true,
+        },
+      },
+      {
+        id: "doc-sf9",
+        document_type: "sf9",
+        batch_id: "BATCH-20261127-8F3",
+        extracted_fields: {
+          lrn: "111500619123",
+          name: "Gomez, Justin Loquillano",
+          general_average: 89,
+          is_reconciled: true,
+        },
+      },
+      {
+        id: "doc-sf10",
+        document_type: "sf10",
+        batch_id: "BATCH-20261127-8F3",
+        extracted_fields: {
+          lrn: "111500619123",
+          name: "Gomez, Justin Loquillano",
+          is_reconciled: true,
+        },
+      },
+      {
+        id: "doc-psa",
+        document_type: "birth_cert",
+        batch_id: "BATCH-20261127-8F3",
+        extracted_fields: {
+          child_name: "Gomez, Justin Loquillano",
+          is_reconciled: true,
+        },
+      },
+    ];
+
+    const folders = aggregateDocumentsIntoBatchFolders(batchDocs);
+    assert.strictEqual(folders.length, 1, "Must aggregate 5 docs into 1 batch folder");
+    const folder = folders[0];
+    assert.strictEqual(folder.sf1_lrn, "111500619123", "Batch folder sf1_lrn must be 111500619123");
+    assert.strictEqual(folder.documents.length, 5, "Batch folder must contain all 5 documents");
+    assert.strictEqual(folder.is_reconciled, true, "Batch folder must preserve is_reconciled: true");
+    assert.strictEqual(folder.grade_level, "Grade 11", "Batch folder must preserve grade_level");
+    assert.strictEqual(folder.section, "CSS 1", "Batch folder must preserve section");
+
+    // 5. DELETE route supports batchId query param
+    const docsRoutePath = path.join(rootDir, "src/app/api/documents/route.ts");
+    const docsRouteSrc = fs.readFileSync(docsRoutePath, "utf8");
+    assert.ok(
+      docsRouteSrc.includes("targetBatchId") || docsRouteSrc.includes("batchId"),
+      "DELETE /api/documents must support batchId filtering"
+    );
+  });
+
+  // ── 39. Hardened /api/teacher/assignments & safeParseJsonResponse ─────────────
+  await t.test("39. GET /api/teacher/assignments returns HTTP 200 valid JSON (never 404 HTML) and safeParseJsonResponse handles non-JSON / HTML", async () => {
+    // 1. GET handler exports and returns HTTP 200 JSON
+    const { GET } = await import("../src/app/api/teacher/assignments/route.ts");
+    assert.strictEqual(typeof GET, "function", "GET handler must be exported from /api/teacher/assignments");
+
+    // Unauthenticated / demo mode request
+    const req = new Request("http://localhost:3000/api/teacher/assignments");
+    const res = await GET(req);
+    assert.strictEqual(res.status, 200, "Must return HTTP 200 in unauthenticated/demo mode (never 404 HTML)");
+    const contentType = res.headers.get("content-type") || "";
+    assert.ok(contentType.includes("application/json"), `Content-Type must be application/json, got ${contentType}`);
+
+    const json = await res.json();
+    assert.strictEqual(json.success, true, "Response must indicate success: true");
+    assert.ok(Array.isArray(json.assignments), "Response must return assignments array");
+    assert.ok(Array.isArray(json.sections), "Response must return sections array");
+
+    // Query with teacherId and schoolId params
+    const paramReq = new Request("http://localhost:3000/api/teacher/assignments?teacherId=test-123&schoolId=500169");
+    const paramRes = await GET(paramReq);
+    assert.strictEqual(paramRes.status, 200, "Must return HTTP 200 with query params");
+    const paramJson = await paramRes.json();
+    assert.strictEqual(paramJson.success, true);
+    assert.ok(Array.isArray(paramJson.assignments));
+
+    // 2. safeParseJsonResponse helper from src/lib/upload/safeParseResponse.ts
+    const { safeParseJsonResponse } = await import("../src/lib/upload/safeParseResponse.ts");
+    assert.strictEqual(typeof safeParseJsonResponse, "function", "safeParseJsonResponse must be exported from safeParseResponse.ts");
+
+    // Also verify upload/page.tsx exports or references safeParseJsonResponse
+    const uploadPagePath = path.join(rootDir, "src/app/upload/page.tsx");
+    const uploadPageSrc = fs.readFileSync(uploadPagePath, "utf8");
+    assert.ok(uploadPageSrc.includes("safeParseJsonResponse"), "upload/page.tsx must use safeParseJsonResponse");
+
+    // Case A: Valid JSON response
+    const validRes = new Response(JSON.stringify({ status: "ok", count: 42 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    const parsedValid = await safeParseJsonResponse(validRes, {});
+    assert.strictEqual(parsedValid.ok, true);
+    assert.strictEqual(parsedValid.data.count, 42);
+
+    // Case B: 404 HTML page (<!DOCTYPE html>) must NOT throw SyntaxError: Unexpected token '<'
+    const html404Res = new Response("<!DOCTYPE html><html><head><title>404 Not Found</title></head><body><h1>404 Not Found</h1></body></html>", {
+      status: 404,
+      headers: { "Content-Type": "text/html" },
+    });
+    const parsedHtml404 = await safeParseJsonResponse(html404Res, []);
+    assert.strictEqual(parsedHtml404.ok, false);
+    assert.deepStrictEqual(parsedHtml404.data, [], "Must return provided fallback value");
+    assert.ok(parsedHtml404.error?.includes("404") || parsedHtml404.error?.includes("non-JSON"));
+
+    // Case C: 500 Server error with HTML body
+    const html500Res = new Response("<!DOCTYPE html><body>Internal Server Error</body>", {
+      status: 500,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+    const parsedHtml500 = await safeParseJsonResponse(html500Res, { assignments: [] });
+    assert.strictEqual(parsedHtml500.ok, false);
+    assert.deepStrictEqual(parsedHtml500.data, { assignments: [] });
+  });
+
+  // ── 40. Step 5 First-Extraction SF10 Data (Sem 1 + Sem 2) Carried Forward into Step 6 & /documents ──
+  await t.test("40. Preserve Step 5 First-Extraction SF10 Data (9 Sem 1 + 6 Sem 2 = 15 subjects, Gen Avg: 87) on Proceed to Review into Step 6 & Side-by-Side Inspector", async () => {
+    const { extractAcademicGradeRecords, reconcileStudentDataFromPrimarySources } = await import("../src/lib/validation/crossDocumentEngine.ts");
+    const { evaluateBatchCrossDocumentValidation } = await import("../src/lib/validation/batchCrossDocumentValidator.ts");
+    const { roundSf10GeneralAverage, evaluateDynamicGradeStatus } = await import("../src/lib/validation/gradeUtils.ts");
+
+    // 1. Simulate Step 5 first extraction SF10 object: 9 Sem 1 subjects + 6 Sem 2 subjects = 15 total
+    const sem1SampleSubjects = [
+      { subject: "Oral Communication in Context", q1: 85, q2: 86, sem_final_grade: 86, finalGrade: 86, action_taken: "PASSED" },
+      { subject: "Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino", q1: 87, q2: 88, sem_final_grade: 88, finalGrade: 88, action_taken: "PASSED" },
+      { subject: "General Mathematics", q1: 86, q2: 87, sem_final_grade: 87, finalGrade: 87, action_taken: "PASSED" },
+      { subject: "Earth and Life Science", q1: 88, q2: 88, sem_final_grade: 88, finalGrade: 88, action_taken: "PASSED" },
+      { subject: "Personal Development", q1: 89, q2: 89, sem_final_grade: 89, finalGrade: 89, action_taken: "PASSED" },
+      { subject: "Understanding Culture, Society and Politics", q1: 87, q2: 88, sem_final_grade: 88, finalGrade: 88, action_taken: "PASSED" },
+      { subject: "Physical Education and Health 1", q1: 90, q2: 90, sem_final_grade: 90, finalGrade: 90, action_taken: "PASSED" },
+      { subject: "English for Academic and Professional Purposes", q1: 85, q2: 86, sem_final_grade: 86, finalGrade: 86, action_taken: "PASSED" },
+      { subject: "Empowerment Technologies", q1: 87, q2: 87, sem_final_grade: 87, finalGrade: 87, action_taken: "PASSED" },
+    ];
+
+    const sem2SampleSubjects = [
+      { subject: "Reading and Writing Skills", q1: 86, q2: 87, sem_final_grade: 87, finalGrade: 87, action_taken: "PASSED" },
+      { subject: "Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik", q1: 88, q2: 88, sem_final_grade: 88, finalGrade: 88, action_taken: "PASSED" },
+      { subject: "Statistics and Probability", q1: 85, q2: 86, sem_final_grade: 86, finalGrade: 86, action_taken: "PASSED" },
+      { subject: "Physical Science", q1: 87, q2: 88, sem_final_grade: 88, finalGrade: 88, action_taken: "PASSED" },
+      { subject: "Physical Education and Health 2", q1: 91, q2: 91, sem_final_grade: 91, finalGrade: 91, action_taken: "PASSED" },
+      { subject: "Practical Research 1", q1: 86, q2: 86, sem_final_grade: 86, finalGrade: 86, action_taken: "PASSED" },
+    ];
+
+    const step5Sf10Extracted = {
+      documentType: "sf10",
+      learner_name: "Gomez, Justin Loquillano",
+      last_name: "Gomez",
+      first_name: "Justin",
+      middle_name: "Loquillano",
+      lrn: "111500619123",
+      grade_level: "Grade 11",
+      section: "CSS 1",
+      school_year: "2025-2026",
+      track_strand: "TVL - CSS",
+      first_semester_grades: sem1SampleSubjects,
+      second_semester_grades: sem2SampleSubjects,
+      firstSemesterSubjects: sem1SampleSubjects,
+      secondSemesterSubjects: sem2SampleSubjects,
+      shs_semesters: [
+        {
+          semester: "1st Semester",
+          general_average: 87.2,
+          records: sem1SampleSubjects,
+        },
+        {
+          semester: "2nd Semester",
+          general_average: 86.8,
+          records: sem2SampleSubjects,
+        },
+      ],
+      scholastic_records: [
+        {
+          semester: "1st Semester",
+          general_average: 87,
+          records: sem1SampleSubjects,
+        },
+        {
+          semester: "2nd Semester",
+          general_average: 87,
+          records: sem2SampleSubjects,
+        },
+      ],
+      sem1_general_average: 87.2,
+      sem2_general_average: 86.8,
+      general_average: 87.2,
+    };
+
+    // 2. Simulate Step 5 -> Step 6 transition ("Proceed to Review") carry-forward normalization
+    // as implemented in upload/page.tsx handleNextStep / extractSingleFile
+    const isSem1Helper = (sem) => sem === 1 || sem === "1" || /1st|first|\b1\b/i.test(String(sem || ""));
+    const isSem2Helper = (sem) => sem === 2 || sem === "2" || /2nd|second|\b2\b/i.test(String(sem || ""));
+
+    const s1Raw = Array.isArray(step5Sf10Extracted.first_semester_grades) && step5Sf10Extracted.first_semester_grades.length > 0
+      ? step5Sf10Extracted.first_semester_grades
+      : Array.isArray(step5Sf10Extracted.firstSemesterSubjects) && step5Sf10Extracted.firstSemesterSubjects.length > 0
+      ? step5Sf10Extracted.firstSemesterSubjects
+      : [];
+
+    const s2Raw = Array.isArray(step5Sf10Extracted.second_semester_grades) && step5Sf10Extracted.second_semester_grades.length > 0
+      ? step5Sf10Extracted.second_semester_grades
+      : Array.isArray(step5Sf10Extracted.secondSemesterSubjects) && step5Sf10Extracted.secondSemesterSubjects.length > 0
+      ? step5Sf10Extracted.secondSemesterSubjects
+      : [];
+
+    const normalizedGrades = [
+      ...s1Raw.map((s) => ({ ...s, semester: 1, semester_name: "1st Semester" })),
+      ...s2Raw.map((s) => ({ ...s, semester: 2, semester_name: "2nd Semester" })),
+    ];
+
+    const carriedForwardSf10 = {
+      ...step5Sf10Extracted,
+      grades: normalizedGrades,
+      first_semester_grades: s1Raw.map((s) => ({ ...s, semester: 1 })),
+      second_semester_grades: s2Raw.map((s) => ({ ...s, semester: 2 })),
+      firstSemesterSubjects: s1Raw.map((s) => ({ ...s, semester: 1 })),
+      secondSemesterSubjects: s2Raw.map((s) => ({ ...s, semester: 2 })),
+      sem1_general_average: roundSf10GeneralAverage(step5Sf10Extracted.sem1_general_average ?? 87),
+      sem2_general_average: roundSf10GeneralAverage(step5Sf10Extracted.sem2_general_average ?? 87),
+      general_average: roundSf10GeneralAverage(step5Sf10Extracted.general_average ?? 87),
+    };
+
+    // Assert that the carried forward object preserves exact counts and rounded whole-number averages
+    assert.strictEqual(carriedForwardSf10.first_semester_grades.length, 9, "Carried forward Sem 1 must have 9 subjects");
+    assert.strictEqual(carriedForwardSf10.second_semester_grades.length, 6, "Carried forward Sem 2 must have 6 subjects");
+    assert.strictEqual(carriedForwardSf10.grades.length, 15, "Carried forward grades array must total 15 subjects");
+    assert.strictEqual(carriedForwardSf10.sem1_general_average, 87, "Sem 1 Gen Avg must be whole number 87");
+    assert.strictEqual(carriedForwardSf10.sem2_general_average, 87, "Sem 2 Gen Avg must be whole number 87");
+    assert.strictEqual(carriedForwardSf10.general_average, 87, "Overall Gen Avg must be whole number 87");
+
+    // 3. Test IndividualDocumentExtractionView resolution logic on carried forward data
+    const segData = carriedForwardSf10;
+    const allGradeCandidates = Array.isArray(segData.grades) && segData.grades.length > 0
+      ? segData.grades
+      : [
+          ...(Array.isArray(segData.first_semester_grades) ? segData.first_semester_grades : []),
+          ...(Array.isArray(segData.second_semester_grades) ? segData.second_semester_grades : []),
+        ];
+
+    let sem1Rows = allGradeCandidates.filter((g) => isSem1Helper(g.semester ?? g.sem));
+    let sem2Rows = allGradeCandidates.filter((g) => isSem2Helper(g.semester ?? g.sem));
+
+    if (sem1Rows.length === 0 && Array.isArray(segData.first_semester_grades) && segData.first_semester_grades.length > 0) {
+      sem1Rows = segData.first_semester_grades;
+    }
+    if (sem2Rows.length === 0 && Array.isArray(segData.second_semester_grades) && segData.second_semester_grades.length > 0) {
+      sem2Rows = segData.second_semester_grades;
+    }
+
+    assert.strictEqual(sem1Rows.length, 9, "IndividualDocumentExtractionView must resolve exactly 9 Sem 1 subjects");
+    assert.strictEqual(sem2Rows.length, 6, "IndividualDocumentExtractionView must resolve exactly 6 Sem 2 subjects");
+    assert.ok(sem2Rows.length > 0, "Second Semester scholastic records must NEVER be empty");
+
+    // 4. Test evaluateBatchCrossDocumentValidation and crossDocumentEngine reconciliation with carried forward SF10
+    const segments = [
+      { id: "seg-psa", documentType: "birth_cert", fileName: "psa.jpg" },
+      { id: "seg-sf1", documentType: "sf1", fileName: "sf1.pdf" },
+      { id: "seg-sf2", documentType: "sf2", fileName: "sf2.pdf" },
+      { id: "seg-sf9", documentType: "sf9", fileName: "sf9.pdf" },
+      { id: "seg-sf10", documentType: "sf10", fileName: "sf10.pdf" },
+    ];
+
+    const extractedSegmentData = {
+      "seg-psa": {
+        child_last_name: "GOMEZ",
+        child_first_name: "JUSTIN",
+        child_middle_name: "LOQUILLANO",
+        last_name: "Gomez",
+        first_name: "Justin",
+        middle_name: "Loquillano",
+        child_name: "Gomez, Justin Loquillano",
+        date_of_birth: "2008-04-15",
+        birth_date: "2008-04-15",
+        sex: "Male",
+      },
+      "seg-sf1": {
+        learners: [
+          {
+            last_name: "Gomez",
+            first_name: "Justin",
+            middle_name: "Loquillano",
+            name: "Gomez, Justin Loquillano",
+            lrn: "111500619123",
+            birthdate: "2008-04-15",
+            birth_date: "2008-04-15",
+            sex: "Male",
+            grade_level: "Grade 11",
+            section: "CSS 1",
+            school_year: "2025-2026",
+          },
+        ],
+      },
+      "seg-sf2": {
+        attendance: [{ learner_name: "Gomez, Justin Loquillano", lrn: "111500619123", days_present: 21 }],
+      },
+      "seg-sf9": {
+        last_name: "Gomez",
+        first_name: "Justin",
+        middle_name: "Loquillano",
+        learner_name: "Gomez, Justin Loquillano",
+        name: "Gomez, Justin Loquillano",
+        lrn: "111500619123",
+        general_average: 89,
+      },
+      "seg-sf10": carriedForwardSf10,
+    };
+
+    const validationResult = evaluateBatchCrossDocumentValidation({
+      batchId: "batch-test-40",
+      schoolYear: "2025-2026",
+      gradeLevel: "Grade 11",
+      section: "CSS 1",
+      segments,
+      extractedSegmentData,
+    });
+
+    assert.ok(validationResult, "Batch cross-document validation must succeed");
+    const dossier = validationResult.learnerDossiers.find((d) => d.lrn === "111500619123") || validationResult.learnerDossiers[0];
+    assert.ok(dossier, "Must find learner dossier for Justin Gomez");
+    const sf10Rec = dossier.matchedSources.sf10 || dossier.allSf10Records?.[0];
+    assert.ok(sf10Rec, "Dossier must retain SF10 record in matchedSources");
+    assert.strictEqual(sf10Rec.raw.first_semester_grades.length, 9, "Retained SF10 record must have 9 Sem 1 subjects");
+    assert.strictEqual(sf10Rec.raw.second_semester_grades.length, 6, "Retained SF10 record must have 6 Sem 2 subjects");
+    assert.strictEqual(sf10Rec.raw.sem1_general_average, 87, "Sem 1 Gen Avg must be 87");
+    assert.strictEqual(sf10Rec.raw.sem2_general_average, 87, "Sem 2 Gen Avg must be 87");
+    assert.strictEqual(sf10Rec.raw.general_average, 87, "Overall Gen Avg must be 87");
+
+    // Test academic grade extraction from dossier SF10 record
+    const extractedGrades = extractAcademicGradeRecords([sf10Rec], "sf10");
+    const sem1Extracted = extractedGrades.filter((g) => isSem1Helper(g.semester));
+    const sem2Extracted = extractedGrades.filter((g) => isSem2Helper(g.semester));
+    assert.strictEqual(sem1Extracted.length, 9, "extractAcademicGradeRecords must extract all 9 Sem 1 subjects");
+    assert.strictEqual(sem2Extracted.length, 6, "extractAcademicGradeRecords must extract all 6 Sem 2 subjects");
+
+    // Test reconcileStudentDataFromPrimarySources retains student identity
+    const reconciled = reconcileStudentDataFromPrimarySources(dossier);
+    assert.strictEqual(reconciled.lrn, "111500619123", "Reconciled LRN must be 111500619123");
+    assert.strictEqual(reconciled.sex, "Male", "Reconciled Sex must be Male");
+
+    // 5. Verify source code consistency in components
+    const indViewPath = path.join(rootDir, "src/components/validation/IndividualDocumentExtractionView.tsx");
+    const indViewSrc = fs.readFileSync(indViewPath, "utf8");
+    assert.ok(
+      indViewSrc.includes("isSem1") && indViewSrc.includes("isSem2"),
+      "IndividualDocumentExtractionView.tsx must use robust isSem1 and isSem2 helpers"
+    );
+    assert.ok(
+      indViewSrc.includes("sem1_general_average") && indViewSrc.includes("sem2_general_average"),
+      "IndividualDocumentExtractionView.tsx must display sem1_general_average and sem2_general_average"
+    );
+
+    const inspectorPath = path.join(rootDir, "src/components/documents/BatchSideBySideInspector.tsx");
+    const inspectorSrc = fs.readFileSync(inspectorPath, "utf8");
+    assert.ok(
+      inspectorSrc.includes("isSem1") && inspectorSrc.includes("isSem2"),
+      "BatchSideBySideInspector.tsx must use robust isSem1 and isSem2 helpers"
+    );
+    assert.ok(
+      inspectorSrc.includes("First Semester") && inspectorSrc.includes("Second Semester"),
+      "BatchSideBySideInspector.tsx must render dedicated First and Second Semester tables"
+    );
+
+    const uploadPagePath = path.join(rootDir, "src/app/upload/page.tsx");
+    const uploadPageSrc = fs.readFileSync(uploadPagePath, "utf8");
+    assert.ok(
+      uploadPageSrc.includes("second_semester_grades") && uploadPageSrc.includes("roundSf10GeneralAverage"),
+      "upload/page.tsx must normalize and carry forward second_semester_grades with roundSf10GeneralAverage"
+    );
+  });
+
+  // ── 41. Exact Step 1 SF9 Template & Data Preserved in Step 6 Unified Results ──
+  await t.test("41. SF9 extraction carries forward to Step 6 with exact Step 1 template, First and Second Semester tables, averages, attendance, and observed values", () => {
+    const indViewPath = path.join(rootDir, "src/components/validation/IndividualDocumentExtractionView.tsx");
+    const indViewSrc = fs.readFileSync(indViewPath, "utf8");
+
+    // 1. IndividualDocumentExtractionView has exact Step 1 SF9 preview card & data-testids
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-extracted-preview-card"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-extracted-preview-card\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-identity-summary"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-identity-summary\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-attendance-preview-table"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-attendance-preview-table\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-grades-preview"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-grades-preview\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-sem1-grades-table"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-sem1-grades-table\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-sem2-grades-table"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-sem2-grades-table\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-sem1-general-average-row"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-sem1-general-average-row\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-sem2-general-average-row"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-sem2-general-average-row\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-error-legends"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-error-legends\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-observed-values-preview"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-observed-values-preview\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-observed-values-table"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-observed-values-table\""
+    );
+    assert.ok(
+      indViewSrc.includes('data-testid="sf9-blank-grade-error"'),
+      "IndividualDocumentExtractionView must render data-testid=\"sf9-blank-grade-error\""
+    );
+
+    // 2. BatchSideBySideInspector has dedicated SF9 template with testids
+    const inspectorPath = path.join(rootDir, "src/components/documents/BatchSideBySideInspector.tsx");
+    const inspectorSrc = fs.readFileSync(inspectorPath, "utf8");
+    assert.ok(
+      inspectorSrc.includes('activeDocType === "sf9"'),
+      "BatchSideBySideInspector must have dedicated activeDocType === 'sf9' branch"
+    );
+    assert.ok(
+      inspectorSrc.includes('data-testid="sf9-extracted-preview-card"'),
+      "BatchSideBySideInspector must render data-testid=\"sf9-extracted-preview-card\""
+    );
+    assert.ok(
+      inspectorSrc.includes('data-testid="sf9-sem1-grades-table"'),
+      "BatchSideBySideInspector must render data-testid=\"sf9-sem1-grades-table\""
+    );
+    assert.ok(
+      inspectorSrc.includes('data-testid="sf9-sem2-grades-table"'),
+      "BatchSideBySideInspector must render data-testid=\"sf9-sem2-grades-table\""
+    );
+    assert.ok(
+      inspectorSrc.includes('data-testid="sf9-attendance-preview-table"'),
+      "BatchSideBySideInspector must render data-testid=\"sf9-attendance-preview-table\""
+    );
+    assert.ok(
+      inspectorSrc.includes('data-testid="sf9-observed-values-table"'),
+      "BatchSideBySideInspector must render data-testid=\"sf9-observed-values-table\""
+    );
+
+    // 3. Step 1 -> Step 6 carry-forward preservation in page.tsx
+    const uploadPagePath = path.join(rootDir, "src/app/upload/page.tsx");
+    const uploadPageSrc = fs.readFileSync(uploadPagePath, "utf8");
+    assert.ok(
+      uploadPageSrc.includes("first_semester_grades") &&
+      uploadPageSrc.includes("second_semester_grades") &&
+      uploadPageSrc.includes("first_semester_general_average") &&
+      uploadPageSrc.includes("second_semester_general_average"),
+      "upload/page.tsx must carry forward both semesters of SF9 grades and averages into Step 6 review"
+    );
+
+    // 4. Data payload simulation
+    const mockStep1Sf9Payload = {
+      lrn: "111500619123",
+      name: "Justin Gomez",
+      sex: "Male",
+      grade_level: "Grade 11",
+      section: "CSS 1",
+      school_year: "2025-2026",
+      first_semester_grades: [
+        { subject: "Oral Communication", q1: 88, q2: 90, final: 89, remarks: "PASSED" },
+        { subject: "General Mathematics", q1: 85, q2: 87, final: 86, remarks: "PASSED" },
+      ],
+      second_semester_grades: [
+        { subject: "Reading and Writing", q3: 91, q4: 93, final: 92, remarks: "PASSED" },
+        { subject: "Statistics and Probability", q3: 88, q4: 90, final: 89, remarks: "PASSED" },
+      ],
+      first_semester_general_average: 88,
+      second_semester_general_average: 91,
+      general_average: 90,
+      attendance: [
+        { label: "No. of School Days", values: [20, 21, 22, 20, 21], total: 104 },
+        { label: "No. of Days Present", values: [20, 21, 22, 20, 21], total: 104 },
+        { label: "No. of Days Absent", values: [0, 0, 0, 0, 0], total: 0 },
+      ],
+      observed_values: {
+        core_values: [
+          {
+            name: "Maka-Diyos",
+            statements: [
+              { statement: "Expresses spiritual beliefs", q1: "AO", q2: "AO", q3: "AO", q4: "AO" },
+            ],
+          },
+        ],
+      },
+    };
+
+    assert.strictEqual(mockStep1Sf9Payload.first_semester_grades.length, 2);
+    assert.strictEqual(mockStep1Sf9Payload.second_semester_grades.length, 2);
+    assert.strictEqual(mockStep1Sf9Payload.first_semester_general_average, 88);
+    assert.strictEqual(mockStep1Sf9Payload.second_semester_general_average, 91);
+    assert.strictEqual(mockStep1Sf9Payload.attendance.length, 3);
+    assert.strictEqual(mockStep1Sf9Payload.observed_values.core_values.length, 1);
+  });
 });

@@ -75,9 +75,24 @@ export function normalizeSubjectName(raw: string | undefined | null): string {
   norm = norm.replace(/\bintro\b/g, "introduction");
   norm = norm.replace(/\bpe\s*&\s*health\b/g, "physical education and health");
   norm = norm.replace(/\bp\.e\b/g, "physical education");
+  norm = norm.replace(/\breading and writing skills\b/g, "reading and writing");
+  norm = norm.replace(/\bdrrr\b/g, "disaster readiness and risk reduction");
+  norm = norm.replace(/\bpr\s*1\b/g, "practical research 1");
+  norm = norm.replace(/\bpr\s*2\b/g, "practical research 2");
   norm = norm.replace(/\s*&\s*/g, " and ");
   norm = norm.replace(/[^a-z0-9\s]/g, " ");
   norm = norm.replace(/\s+/g, " ").trim();
+
+  // DepEd SHS bilingual & parenthetical subtitle normalizations
+  if (norm.startsWith("personal development")) {
+    norm = "personal development";
+  }
+  if (norm.startsWith("pagbasa at pagsusuri")) {
+    norm = "pagbasa at pagsusuri ng iba t ibang teksto tungo sa pananaliksik";
+  }
+  if (norm.startsWith("komunikasyon at pananaliksik")) {
+    norm = "komunikasyon at pananaliksik sa wika at kulturang pilipino";
+  }
 
   return norm;
 }

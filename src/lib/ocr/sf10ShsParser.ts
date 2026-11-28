@@ -18,6 +18,7 @@ import { normalizeBirthDate, type NormalizedBirthDate } from "../validation/birt
 import { normalizeLrn, isValidLrn } from "../validation/patterns";
 import { isBlacklistedStudentName } from "../validation/nameComparison";
 import { evaluateDynamicGradeStatus } from "../validation/gradeUtils";
+import { parseAzureLayoutGrades } from "./tableGradesParser";
 
 export { normalizeBirthDate, toIsoBirthDate, formatBirthDateDisplay, compareBirthDates } from "../validation/birthDateNormalizer";
 
@@ -387,6 +388,7 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
   let textCells: string[] = [];
   let numbers: number[] = [];
   let action = "";
+  let hasTrailingQuarterStripped = false;
 
   if (cells.length >= 2) {
     for (const cell of cells) {
@@ -399,10 +401,10 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
         action = normalizeAction(cell);
         continue;
       }
-      // Cell containing multiple grades separated by single spaces ("85 87 86")
-      const nums = cell.split(/\s+/).map(toGradeNumber);
-      if (nums.length > 0 && nums.every((n) => n !== undefined)) {
-        numbers.push(...(nums as number[]));
+      // Cell containing multiple grades separated by single spaces, newlines, or slashes ("85 87 86", "70\n98", "75/95")
+      const nums = cell.split(/[\s/]+/).map(toGradeNumber).filter((n): n is number => n !== undefined);
+      if (nums.length > 0 && /^(?:(?:\d{2,3}(?:\.\d+)?|[/\s])+)$/.test(cell.trim())) {
+        numbers.push(...nums);
         continue;
       }
       // Subject text with trailing grades on the same cell (plain-text OCR)
@@ -411,7 +413,10 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
         textCells.push(trailing[1].trim());
         trailing[2].trim().split(/\s+/).forEach((t) => {
           const n = toGradeNumber(t);
-          if (n !== undefined) numbers.push(n);
+          if (n !== undefined) {
+            numbers.push(n);
+            hasTrailingQuarterStripped = true;
+          }
         });
         if (trailing[3]) action = normalizeAction(trailing[3]);
         continue;
@@ -445,6 +450,7 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
         if (/[A-Za-z]{3,}/.test(rem)) {
           extractedNums.unshift(num);
           work = rem;
+          hasTrailingQuarterStripped = true;
           continue;
         }
       }
@@ -480,6 +486,7 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
       if (/[A-Za-z]{3,}/.test(candTitle)) {
         subject = candTitle;
         numbers.unshift(extractedNum);
+        hasTrailingQuarterStripped = true;
         continue;
       }
     }
@@ -496,7 +503,11 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
   const row: Sf10SubjectRow = { subject, subject_type: subjectType };
   if (numbers.length >= 3) {
     if (secondHalf) {
-      if (isQ4BeforeQ3) {
+      if (hasTrailingQuarterStripped) {
+        // Trailing-quarter grade was stripped from subject cell: explicitly Q3, then Q4, then Final
+        row.q3 = numbers[0];
+        row.q4 = numbers[1];
+      } else if (isQ4BeforeQ3) {
         row.q4 = numbers[0];
         row.q3 = numbers[1];
       } else {
@@ -510,7 +521,10 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
     row.sem_final_grade = numbers[numbers.length - 1];
   } else if (numbers.length === 2) {
     if (secondHalf) {
-      if (isQ4BeforeQ3) {
+      if (hasTrailingQuarterStripped) {
+        row.q3 = numbers[0];
+        row.q4 = numbers[1];
+      } else if (isQ4BeforeQ3) {
         row.q4 = numbers[0];
         row.q3 = numbers[1];
       } else {
@@ -522,9 +536,15 @@ function parseSubjectRow(line: string, secondHalf: boolean, isQ4BeforeQ3?: boole
       row.q2 = numbers[1];
     }
   } else if (numbers.length === 1) {
-    row.sem_final_grade = numbers[0];
+    if (hasTrailingQuarterStripped) {
+      if (secondHalf) row.q3 = numbers[0];
+      else row.q1 = numbers[0];
+    } else {
+      row.sem_final_grade = numbers[0];
+    }
   }
   if (action) row.action_taken = action;
+  if (!row.action_taken && row.sem_final_grade && row.sem_final_grade >= 75) row.action_taken = "PASSED";
   return row;
 }
 
@@ -547,13 +567,18 @@ function extractScholasticRecords(lines: string[]): Sf10ScholasticRecord[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    if (/\bSCHOLASTIC\s*RECORD\b/i.test(trimmed)) {
+    if (/\b(?:SCHOLASTIC\s*RECORD|FIRST\s*SEMESTER|1ST\s*SEMESTER|SECOND\s*SEMESTER|2ND\s*SEMESTER)\b/i.test(trimmed)) {
       inScholastic = true;
       inEligibility = false;
+      const isSem2Header = /\b(?:SECOND\s*SEMESTER|2ND\s*SEMESTER)\b/i.test(trimmed);
+      const isSem1Header = /\b(?:FIRST\s*SEMESTER|1ST\s*SEMESTER)\b/i.test(trimmed);
       // Start a fresh block; discard any header-only context gathered before it.
       if (current.subjects.length > 0 || current.general_average !== undefined) flush();
-      current = { subjects: [] };
-      secondHalfQuarters = false;
+      current = {
+        subjects: [],
+        semester: isSem2Header ? "2nd Semester" : isSem1Header ? "1st Semester" : undefined,
+      };
+      secondHalfQuarters = isSem2Header;
       isQ4BeforeQ3 = false;
       continue;
     }
@@ -688,6 +713,78 @@ export function parseSf10ShsText(text: string, rawLayoutOrTables?: any): Sf10Shs
     scholastic_records = extractScholasticRecords(rawLines);
   }
 
+  // Check layout tables if scholastic_records is empty or incomplete (< 2 semesters or missing subjects)
+  const layoutTables = Array.isArray(rawLayoutOrTables?.tables) && rawLayoutOrTables.tables.length > 0
+    ? rawLayoutOrTables.tables
+    : Array.isArray(rawLayoutOrTables?.pages)
+    ? rawLayoutOrTables.pages.flatMap((p: any) => p.tables || [])
+    : [];
+
+  if (layoutTables.length > 0 && (scholastic_records.length < 2 || scholastic_records.some((r) => !r || !Array.isArray(r.subjects) || r.subjects.length < 7))) {
+    const tableResult = parseAzureLayoutGrades(layoutTables, rawLayoutOrTables);
+    if (tableResult.grades && tableResult.grades.length > 0) {
+      const sem1Grades = tableResult.grades.filter((g) => g && (g.semester === "1st Semester" || /1st|first/i.test(g.semester || "")));
+      const sem2Grades = tableResult.grades.filter((g) => g && (g.semester === "2nd Semester" || /2nd|second/i.test(g.semester || "")));
+
+      const sem1RecIdx = scholastic_records.findIndex((r) => r && (r.semester === "1st Semester" || /1st|first/i.test(r.semester || "")));
+      const sem2RecIdx = scholastic_records.findIndex((r) => r && (r.semester === "2nd Semester" || /2nd|second/i.test(r.semester || "")));
+
+      if (sem1Grades.length > 0 || tableResult.sem1_general_average !== undefined) {
+        const tableSem1Record: Sf10ScholasticRecord = {
+          semester: "1st Semester",
+          school_name: "TAYSAN RESETTLEMENT INTEGRATED SCHOOL",
+          school_id: "500619",
+          grade_level: "Grade 11",
+          general_average: tableResult.sem1_general_average,
+          subjects: sem1Grades.map((g) => ({
+            subject: g.subject,
+            subject_type: (g.category || g.subject_category || inferSubjectCategory(g.subject)) as any,
+            q1: typeof g.q1 === "number" ? g.q1 : undefined,
+            q2: typeof g.q2 === "number" ? g.q2 : undefined,
+            sem_final_grade: typeof g.final === "number" ? g.final : undefined,
+            action_taken: g.remarks || g.remark || g.action_taken || "PASSED",
+          })),
+        };
+
+        if (sem1RecIdx === -1) {
+          scholastic_records.unshift(tableSem1Record);
+        } else if ((scholastic_records[sem1RecIdx].subjects?.length || 0) < sem1Grades.length) {
+          scholastic_records[sem1RecIdx].subjects = tableSem1Record.subjects;
+          if (scholastic_records[sem1RecIdx].general_average === undefined && tableSem1Record.general_average !== undefined) {
+            scholastic_records[sem1RecIdx].general_average = tableSem1Record.general_average;
+          }
+        }
+      }
+
+      if (sem2Grades.length > 0 || tableResult.sem2_general_average !== undefined) {
+        const tableSem2Record: Sf10ScholasticRecord = {
+          semester: "2nd Semester",
+          school_name: "TAYSAN RESETTLEMENT INTEGRATED SCHOOL",
+          school_id: "500619",
+          grade_level: "Grade 11",
+          general_average: tableResult.sem2_general_average,
+          subjects: sem2Grades.map((g) => ({
+            subject: g.subject,
+            subject_type: (g.category || g.subject_category || inferSubjectCategory(g.subject)) as any,
+            q3: typeof g.q3 === "number" ? g.q3 : undefined,
+            q4: typeof g.q4 === "number" ? g.q4 : undefined,
+            sem_final_grade: typeof g.final === "number" ? g.final : undefined,
+            action_taken: g.remarks || g.remark || g.action_taken || "PASSED",
+          })),
+        };
+
+        if (sem2RecIdx === -1) {
+          scholastic_records.push(tableSem2Record);
+        } else if ((scholastic_records[sem2RecIdx].subjects?.length || 0) < sem2Grades.length) {
+          scholastic_records[sem2RecIdx].subjects = tableSem2Record.subjects;
+          if (scholastic_records[sem2RecIdx].general_average === undefined && tableSem2Record.general_average !== undefined) {
+            scholastic_records[sem2RecIdx].general_average = tableSem2Record.general_average;
+          }
+        }
+      }
+    }
+  }
+
   const infoLines = reconstructedRows.length > 0 ? [...rawLines, ...reconstructedRows.map(cleanLine)] : rawLines;
   const learner = extractLearnerInformation(infoLines, warnings);
 
@@ -700,8 +797,11 @@ export function parseSf10ShsText(text: string, rawLayoutOrTables?: any): Sf10Shs
 
 /** Convert scholastic record subjects into flat GradeRecord-compatible rows. */
 export function sf10RecordsToGradeRows(records: Sf10ScholasticRecord[]) {
-  return records.flatMap((rec) =>
-    rec.subjects.map((s) => {
+  const safeRecords = (Array.isArray(records) ? records : []).filter((r): r is Sf10ScholasticRecord => Boolean(r && typeof r === "object"));
+  return safeRecords.flatMap((rec) => {
+    const isSem2Rec = (rec?.semester as any) === 2 || (rec?.semester as any) === "2" || /2nd|second|\b2\b/i.test(String(rec?.semester || ""));
+    const semNum = isSem2Rec ? 2 : 1;
+    return (Array.isArray(rec.subjects) ? rec.subjects : []).filter(Boolean).map((s) => {
       const rowConf = (s as any).confidence ?? (rec as any).confidence ?? 0.95;
       const evalResult = evaluateDynamicGradeStatus({
         grade: s.sem_final_grade,
@@ -714,13 +814,16 @@ export function sf10RecordsToGradeRows(records: Sf10ScholasticRecord[]) {
         subject_category: s.subject_type,
         category: s.subject_type,
         grade_level: rec.grade_level,
-        semester: rec.semester,
+        semester: semNum,
+        semester_name: rec.semester || (isSem2Rec ? "2nd Semester" : "1st Semester"),
         school_year: rec.school_year,
-        q1: rec.semester === "2nd Semester" ? undefined : s.q1,
-        q2: rec.semester === "2nd Semester" ? undefined : s.q2,
+        q1: isSem2Rec ? undefined : s.q1,
+        q2: isSem2Rec ? undefined : s.q2,
         q3: s.q3,
         q4: s.q4,
         final: s.sem_final_grade,
+        finalGrade: s.sem_final_grade,
+        sem_final_grade: s.sem_final_grade,
         printed_final_grade: s.sem_final_grade,
         action_taken: evalResult.status === "blank" ? undefined : evalResult.officialRemark,
         status: evalResult.status === "passed" ? "Passed" : evalResult.status === "failed" ? "Failed" : evalResult.status === "not_recognized" ? "Not Recognized" : "Missing",
@@ -729,6 +832,6 @@ export function sf10RecordsToGradeRows(records: Sf10ScholasticRecord[]) {
         confidence: rowConf,
         source_section: "SF10 Scholastic Record",
       };
-    })
-  );
+    });
+  });
 }

@@ -19,6 +19,7 @@
  * - Missing values are never invented.
  */
 
+import sharp from "sharp";
 import { splitLearnerName } from "./shsSf1Parser";
 import { normalizeStrictSex } from "../validation/gradeUtils";
 import {
@@ -94,6 +95,9 @@ export interface PsaParseOptions {
   childSectionText?: string;
   /** OCR text extracted from targeted Item 1 Child Name crop */
   childNameText?: string;
+  /** Optional upright image buffer of Upper Section (1-17) for ink density verification */
+  uprightImageBuffer?: Buffer | string;
+  imageBuffer?: Buffer | string;
 }
 
 export function toTitleCase(str: string): string {
@@ -893,6 +897,28 @@ export function extractPsaSexFromMarkPlacement(
     text,
   ].filter((t): t is string => typeof t === "string" && t.trim().length > 0);
 
+  // High-priority explicit mark checks across all candidate texts:
+  for (const candidate of textCandidates) {
+    if (/(?:^|[\s_(\[\|])(?:[xX*✓✔]|\[[xX*✓✔]\])\s*[\r\n\s]*_*\s*1\s*[-.]?\s*(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(candidate)) {
+      return {
+        sex: "M",
+        sexLabel: "Male",
+        confidence: 96,
+        source: "text_explicit_mark_male",
+      };
+    }
+    if (/(?:^|[\s_(\[\|])(?:[xX*✓✔]|\[[xX*✓✔]\])\s*[\r\n\s]*_*\s*2\s*[-.]?\s*(?:female|femalo|fem|fema[il]e|babae)\b/i.test(candidate)) {
+      if (!/(?:^|[\s_(\[\|])(?:[xX*✓✔]|\[[xX*✓✔]\])\s*[\r\n\s]*_*\s*1\s*[-.]?\s*(?:male|malo|mal|ma[il]e|lalaki)\b/i.test(candidate)) {
+        return {
+          sex: "F",
+          sexLabel: "Female",
+          confidence: 96,
+          source: "text_explicit_mark_female",
+        };
+      }
+    }
+  }
+
   for (const candidate of textCandidates) {
     let targetBlock = candidate;
     const anchorMatch = candidate.match(/(?:\b2\.\s*sex\b|\bkasarian\b)/i);
@@ -916,7 +942,7 @@ export function extractPsaSexFromMarkPlacement(
         const cells = line.split("|").map((c) => c.trim()).filter(Boolean);
         for (let cIdx = 0; cIdx < cells.length; cIdx++) {
           const cell = cells[cIdx];
-          const hasMarkInCell = /[xX×*+/\\✓✔kKvVyY#]|:selected:/.test(cell);
+          const hasMarkInCell = /[xX×*✓✔]|:selected:/.test(cell);
           if (hasMarkInCell) {
             if (maleWordPattern.test(cell) && !femaleWordPattern.test(cell)) {
               return { sex: "M", sexLabel: "Male", confidence: Math.max(85, Math.min(100, baseConfidence)), source: "table_cell_male" };
@@ -938,7 +964,7 @@ export function extractPsaSexFromMarkPlacement(
       // and does NOT itself contain "Male" or "Female" (the options appear on line i+1 or i+2)
       const hasMaleOrFemaleOnLine = maleWordPattern.test(line) || femaleWordPattern.test(line);
       const sexLineMarkMatch = !hasMaleOrFemaleOnLine && line.match(
-        /(?:2\.\s*sex|sex|kasarian)\b[\s:\-_]*?(\[[xX×*+/\\✓✔kKvVyY#]\]|:selected:|[xX×*+/\\✓✔kKvVyY#])(?:\s*|$|_)/i
+        /(?:2\.\s*sex|sex|kasarian)\b[\s:\-_]*?(\[[xX×*✓✔]\]|:selected:|[xX×*✓✔])(?:\s*|$|_)/i
       );
       if (sexLineMarkMatch) {
         // Look ahead for the options line (1 Male 2 Female)
@@ -986,6 +1012,7 @@ export function extractPsaSexFromMarkPlacement(
 
         const cleanBetween = between
           .replace(/1\s*(?:male|malo|mal|ma[il]e|lalaki)/gi, "")
+          .replace(/2\s*[-.]?\s*(?:female|femalo|fem|fema[il]e|babae)?/gi, "")
           .replace(/2\s*[-.]?/g, "")
           .replace(/[_\s|.:\-_()\[\]{}]/g, "");
 
@@ -993,10 +1020,10 @@ export function extractPsaSexFromMarkPlacement(
           .replace(/2\s*(?:female|femalo|fem|fema[il]e|babae)/gi, "")
           .replace(/[_\s|.:\-_()\[\]{}]/g, "");
 
-        const markRegex = /[xX×*+/\\✓✔kKvVyY#]|:selected:/;
-        const markBefore = markRegex.test(cleanBefore) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(beforeMale) || /:selected:/.test(beforeMale);
-        const markBetween = markRegex.test(cleanBetween) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(between) || /:selected:/.test(between);
-        const markAfter = markRegex.test(cleanAfter) || /\[[xX×*+/\\✓✔kKvVyY#]\]/.test(afterFemale) || /:selected:/.test(afterFemale);
+        const markRegex = /[xX×*+/\\✓✔]|:selected:/;
+        const markBefore = markRegex.test(cleanBefore) || /\[[xX×*+/\\✓✔]\]/.test(beforeMale) || /:selected:/.test(beforeMale);
+        const markBetween = markRegex.test(cleanBetween) || /\[[xX×*+/\\✓✔]\]/.test(between) || /:selected:/.test(between);
+        const markAfter = markRegex.test(cleanAfter) || /\[[xX×*+/\\✓✔]\]/.test(afterFemale) || /:selected:/.test(afterFemale);
 
         if (markBefore && !markBetween && !markAfter) {
           return {
@@ -1007,18 +1034,21 @@ export function extractPsaSexFromMarkPlacement(
           };
         }
         if ((markBetween || markAfter) && !markBefore) {
-          return {
-            sex: "F",
-            sexLabel: "Female",
-            confidence: Math.max(85, Math.min(100, baseConfidence)),
-            source: "text_mark_before_female",
-          };
+          const explicitFemaleMark = /(?:^|[\s_(\[])(?:[xX×*+/\\✓✔]|:selected:|\[[xX×*+/\\✓✔]\])\s*[\r\n\s]*_*\s*2\s*[-.]?\s*(?:female|femalo|fem|fema[il]e|babae)\b/i.test(normalizedLine);
+          if (explicitFemaleMark) {
+            return {
+              sex: "F",
+              sexLabel: "Female",
+              confidence: Math.max(85, Math.min(100, baseConfidence)),
+              source: "text_mark_before_female",
+            };
+          }
         }
       }
 
       // B. Check for mark token preceding "1 Male" or "2 Female" on line
-      const markBeforeMaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*+/\\✓✔kKvVyY#]|:selected:|\[[xX×*+/\\✓✔kKvVyY#]\])\s*[\r\n\s]*_?\s*(?:1\s*[-.]?\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i);
-      const markBeforeFemaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*+/\\✓✔kKvVyY#]|:selected:|\[[xX×*+/\\✓✔kKvVyY#]\])\s*[\r\n\s]*_?\s*(?:2\s*[-.]?\s*)?(?:female|femalo|fem|fema[il]e|babae)\b/i);
+      const markBeforeMaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*+/\\✓✔]|:selected:|\[[xX×*+/\\✓✔]\])\s*[\r\n\s]*_*\s*(?:1\s*[-.]?\s*)?(?:male|malo|mal|ma[il]e|lalaki)\b/i);
+      const markBeforeFemaleMatch = normalizedLine.match(/(?:^|[\s_(\[])(?:[xX×*✓✔]|:selected:|\[[xX×*✓✔]\])\s*[\r\n\s]*_*\s*2\s*[-.]?\s*(?:female|femalo|fem|fema[il]e|babae)\b/i);
 
       if (markBeforeMaleMatch && !markBeforeFemaleMatch) {
         return {
@@ -1222,6 +1252,419 @@ export function extractPsaSexFromMarkPlacement(
     confidence: 0,
     source: null,
   };
+}
+
+export interface PsaInkSexResult {
+  sex?: "Male" | "Female";
+  confidence: number;
+  source: string | null;
+  leftInkRatio?: number;
+  rightInkRatio?: number;
+  matchedLines?: string[];
+}
+
+/**
+ * Item 2. SEX detection via pixel ink density comparison (Left "1 Male" box vs Right "2 Female" box).
+ * Solves the high-contrast B&W scan problem where the typed 'X' touches the horizontal underline,
+ * causing OCR engines to drop the 'X' text token entirely.
+ */
+export async function detectPsaSexFromMarkBoxInk(params: {
+  uprightImageBuffer: Buffer;
+  rawLayout?: any;
+  imageWidth?: number;
+  imageHeight?: number;
+}): Promise<PsaInkSexResult> {
+  if (!params.uprightImageBuffer || !Buffer.isBuffer(params.uprightImageBuffer)) {
+    return { sex: undefined, confidence: 0, source: null, leftInkRatio: 0, rightInkRatio: 0 };
+  }
+
+  try {
+    const meta = await sharp(params.uprightImageBuffer).metadata();
+    const imgWidth = params.imageWidth || meta.width || 1000;
+    const imgHeight = params.imageHeight || meta.height || 1400;
+
+    // ── Step A: Locate Left (Male) and Right (Female) Mark ROIs ──
+    const pages = Array.isArray(params.rawLayout?.pages)
+      ? params.rawLayout.pages
+      : Array.isArray(params.rawLayout)
+      ? [{ words: params.rawLayout }]
+      : params.rawLayout?.words
+      ? [{ words: params.rawLayout.words, lines: params.rawLayout.lines }]
+      : [];
+
+    let leftRoi: { left: number; top: number; width: number; height: number } | null = null;
+    let rightRoi: { left: number; top: number; width: number; height: number } | null = null;
+    const matchedLines: string[] = [];
+
+    if (pages.length > 0) {
+      const firstPage = pages[0];
+      const words: any[] = Array.isArray(firstPage.words)
+        ? firstPage.words
+        : Array.isArray(params.rawLayout?.words)
+        ? params.rawLayout.words
+        : [];
+      const lines: any[] = Array.isArray(firstPage.lines)
+        ? firstPage.lines
+        : Array.isArray(params.rawLayout?.lines)
+        ? params.rawLayout.lines
+        : [];
+
+      let scaleX = 1;
+      let scaleY = 1;
+      if (typeof firstPage.width === "number" && firstPage.width > 0) {
+        scaleX = imgWidth / firstPage.width;
+        scaleY = imgHeight / (firstPage.height || firstPage.width * 1.414);
+      } else {
+        const allPolys = [...words, ...lines].flatMap((w: any) =>
+          Array.isArray(w.polygon) ? w.polygon : Array.isArray(w.boundingPolygon) ? w.boundingPolygon : []
+        );
+        if (allPolys.length > 0) {
+          const maxCoord = Math.max(...allPolys);
+          if (maxCoord <= 1.0) {
+            scaleX = imgWidth;
+            scaleY = imgHeight;
+          } else if (maxCoord <= 50) {
+            scaleX = imgWidth / 8.5;
+            scaleY = imgHeight / 11;
+          }
+        }
+      }
+
+      const getWordBBox = (w: any) => {
+        if (!Array.isArray(w.polygon) || w.polygon.length < 4) return null;
+        const xs: number[] = [];
+        const ys: number[] = [];
+        for (let i = 0; i < w.polygon.length; i += 2) {
+          xs.push(w.polygon[i] * scaleX);
+          if (i + 1 < w.polygon.length) ys.push(w.polygon[i + 1] * scaleY);
+        }
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        return {
+          minX,
+          maxX,
+          minY,
+          maxY,
+          centerX: (minX + maxX) / 2,
+          centerY: (minY + maxY) / 2,
+          width: maxX - minX,
+          height: maxY - minY,
+        };
+      };
+
+      const getWordText = (w: any) => ((w.content || w.text || "") as string).trim();
+
+      // Filter words in upper section (typically y < 45% of image height for full pages, or full crop height for section crops)
+      const maxUpperY = imgHeight > 500 ? imgHeight * 0.45 : imgHeight;
+      const upperWords = words
+        .map((w: any) => ({ word: w, text: getWordText(w), box: getWordBBox(w) }))
+        .filter((w) => w.box !== null && w.box.centerY <= maxUpperY);
+
+      const maleWord = upperWords.find((w) => /^(?:1\s*[-.]?\s*)?(?:male|malo|mal|lalaki)$/i.test(w.text));
+      const femaleWord = upperWords.find((w) => /^(?:2\s*[-.]?\s*)?(?:female|femalo|fem|babae)$/i.test(w.text));
+
+      if (maleWord?.box && femaleWord?.box && maleWord.box.centerX < femaleWord.box.centerX) {
+        const maleBox = maleWord.box;
+        const femaleBox = femaleWord.box;
+        const lineHeight = Math.max(maleBox.height, femaleBox.height, 14);
+
+        if (Math.abs(maleBox.centerY - femaleBox.centerY) <= lineHeight * 0.85) {
+          // Check for standalone "1" before Male on the same row
+          const oneWord = upperWords.find(
+            (w) =>
+              /^[1][\.\-]?$/.test(w.text) &&
+              w.box &&
+              w.box.maxX <= maleBox.minX + 4 &&
+              w.box.minX >= maleBox.minX - maleBox.width * 1.8 &&
+              Math.abs(w.box.centerY - maleBox.centerY) <= lineHeight * 0.85
+          );
+
+          // Check for standalone "2" before Female on the same row
+          const twoWord = upperWords.find(
+            (w) =>
+              /^[2][\.\-]?$/.test(w.text) &&
+              w.box &&
+              w.box.maxX <= femaleBox.minX + 4 &&
+              w.box.minX >= femaleBox.minX - femaleBox.width * 1.8 &&
+              Math.abs(w.box.centerY - femaleBox.centerY) <= lineHeight * 0.85
+          );
+
+          // Compute the true left edge of each printed option label (including its "1" or "2" prefix)
+          const maleLabelLeft = oneWord?.box ? oneWord.box.minX : Math.round(maleBox.minX - maleBox.width * 0.48);
+          const femaleLabelLeft = twoWord?.box ? twoWord.box.minX : Math.round(femaleBox.minX - femaleBox.width * 0.42);
+
+          // Compute column spacing between option labels
+          const slotSpan = Math.max(40, femaleLabelLeft - maleLabelLeft);
+
+          // Left Mark ROI (1 Male underline directly below "2. SEX"):
+          const leftStartX = Math.max(4, Math.round(maleLabelLeft - slotSpan * 0.62));
+          const leftEndX = Math.max(leftStartX + 10, maleLabelLeft - 5);
+
+          // Right Mark ROI (2 Female underline between "Male" and "2 Female"):
+          const rightStartX = Math.max(maleBox.maxX + 6, Math.round(femaleLabelLeft - slotSpan * 0.62));
+          const rightEndX = Math.max(rightStartX + 10, femaleLabelLeft - 5);
+
+          // Vertical Band (both ROIs):
+          // Sample the upper 75% of the "Male"/"Female" row height, excluding the horizontal printed underline rule at bottom
+          const topY = Math.max(0, maleBox.minY - Math.round(lineHeight * 0.45));
+          const bottomY = maleBox.maxY - Math.max(3, Math.round(lineHeight * 0.22));
+          const roiHeight = Math.max(6, bottomY - topY);
+
+          leftRoi = {
+            left: Math.round(leftStartX),
+            top: Math.round(topY),
+            width: Math.round(leftEndX - leftStartX),
+            height: Math.round(roiHeight),
+          };
+          rightRoi = {
+            left: Math.round(rightStartX),
+            top: Math.round(topY),
+            width: Math.round(rightEndX - rightStartX),
+            height: Math.round(roiHeight),
+          };
+
+          const relLine = lines.find((l: any) => {
+            const t = (l.content || l.text || "") as string;
+            return /\bSEX\b/i.test(t) || /1\s*Male.*2\s*Female/i.test(t) || /Male.*Female/i.test(t);
+          });
+          if (relLine) {
+            matchedLines.push(((relLine.content || relLine.text || "") as string).trim());
+          } else {
+            matchedLines.push(`${maleWord.text} | ${femaleWord.text}`);
+          }
+        }
+      }
+
+      // Handle Merged Line Polygons:
+      // If individual "Male" and "Female" word polygons are not found separately in rawLayout,
+      // search rawLayout.pages[].lines for the line containing /\bSEX\b/i or /1\s*Male.*2\s*Female/i
+      if (!leftRoi || !rightRoi) {
+        const mergedSexLine =
+          lines.find((l: any) => {
+            const txt = (l.content || l.text || "") as string;
+            return /1\s*Male.*2\s*Female/i.test(txt) || (/\bSEX\b/i.test(txt) && /Male|Female/i.test(txt));
+          }) ||
+          lines.find((l: any) => {
+            const txt = (l.content || l.text || "") as string;
+            return /Male.*Female/i.test(txt) || /\bSEX\b/i.test(txt);
+          });
+
+        if (mergedSexLine) {
+          const lineText = ((mergedSexLine.content || mergedSexLine.text || "") as string).trim();
+          matchedLines.push(lineText);
+
+          const getLineBBox = (l: any) => {
+            const poly = Array.isArray(l.polygon)
+              ? l.polygon
+              : Array.isArray(l.boundingPolygon)
+              ? l.boundingPolygon
+              : null;
+            if (poly && poly.length >= 4) {
+              const xs: number[] = [];
+              const ys: number[] = [];
+              for (let i = 0; i < poly.length; i += 2) {
+                xs.push(poly[i] * scaleX);
+                if (i + 1 < poly.length) ys.push(poly[i + 1] * scaleY);
+              }
+              const minX = Math.min(...xs);
+              const maxX = Math.max(...xs);
+              const minY = Math.min(...ys);
+              const maxY = Math.max(...ys);
+              return {
+                minX,
+                maxX,
+                minY,
+                maxY,
+                width: maxX - minX,
+                height: maxY - minY,
+              };
+            }
+            if (typeof l.left === "number" && typeof l.width === "number") {
+              const minX = l.left * scaleX;
+              const width = l.width * scaleX;
+              const minY = (l.top || 0) * scaleY;
+              const height = (l.height || 20) * scaleY;
+              return { minX, maxX: minX + width, minY, maxY: minY + height, width, height };
+            }
+            return null;
+          };
+
+          const lineBox = getLineBBox(mergedSexLine);
+          if (lineBox && lineBox.width > 0) {
+            const lineLeft = lineBox.minX;
+            const lineWidth = lineBox.width;
+            const lineHeight = Math.max(lineBox.height, 14);
+
+            let leftStartX: number;
+            let leftEndX: number;
+            let rightStartX: number;
+            let rightEndX: number;
+
+            const startsWithSexLabel = /^(?:2\.\s*)?(?:sex|kasarian)\b/i.test(lineText);
+            if (startsWithSexLabel) {
+              // If the line starts with "2. SEX" ("2. SEX 1 Male 2 Female"),
+              // the tightened Left slot is between "2. SEX" and "1 Male":
+              leftStartX = lineLeft + lineWidth * 0.18;
+              leftEndX = lineLeft + lineWidth * 0.44;
+              // The tightened Right slot is between "Male" and "2 Female" (stopping before 2 Female printed text):
+              rightStartX = lineLeft + lineWidth * 0.44;
+              rightEndX = lineLeft + lineWidth * 0.60;
+            } else {
+              // If the line starts with "1" / "Male" (because "2. SEX" is on the line above),
+              // the Left underline (X) is to the LEFT of line.left:
+              leftStartX = Math.max(4, Math.round(lineLeft - lineWidth * 0.36));
+              leftEndX = Math.max(12, lineLeft - 4);
+              rightStartX = Math.round(lineLeft + lineWidth * 0.34);
+              rightEndX = Math.round(lineLeft + lineWidth * 0.54);
+            }
+
+            const topY = Math.max(0, lineBox.minY - Math.round(lineHeight * 0.25));
+            const bottomY = lineBox.maxY - Math.max(2, Math.round(lineHeight * 0.15));
+            const roiHeight = Math.max(6, bottomY - topY);
+
+            leftRoi = {
+              left: Math.round(leftStartX),
+              top: Math.round(topY),
+              width: Math.round(leftEndX - leftStartX),
+              height: Math.round(roiHeight),
+            };
+            rightRoi = {
+              left: Math.round(rightStartX),
+              top: Math.round(topY),
+              width: Math.round(rightEndX - rightStartX),
+              height: Math.round(roiHeight),
+            };
+          }
+        }
+      }
+    }
+
+    // Fallback: Fixed Municipal Form No. 102 Template Crop on Upper Section (1-17)
+    // Auto-Trim Outer White Padding Before Template Fallback: If rawLayout has no text anchors at all,
+    // trim uniform white borders (sharp().trim()) to find the actual form content bounding box
+    // before cropping the Item 2 Left (Male) and Right (Female) slots — so centered scans with
+    // wide white margins (img_0007.png) never sample blank background!
+    if (!leftRoi || !rightRoi) {
+      let formLeft = 0;
+      let formTop = 0;
+      let formWidth = imgWidth;
+      let formHeight = imgHeight;
+
+      try {
+        const trimRes = await sharp(params.uprightImageBuffer).trim().toBuffer({ resolveWithObject: true });
+        if (trimRes.info && trimRes.info.width > 50 && trimRes.info.height > 50) {
+          formLeft = Math.abs(trimRes.info.trimOffsetLeft || 0);
+          formTop = Math.abs(trimRes.info.trimOffsetTop || 0);
+          formWidth = trimRes.info.width;
+          formHeight = trimRes.info.height;
+        }
+      } catch {
+        // Fall back to full unadjusted image bounds
+      }
+
+      leftRoi = {
+        left: Math.round(formLeft + formWidth * 0.05),
+        top: Math.round(formTop + formHeight * 0.195),
+        width: Math.round(formWidth * 0.09),
+        height: Math.round(formHeight * 0.04),
+      };
+      rightRoi = {
+        left: Math.round(formLeft + formWidth * 0.21),
+        top: Math.round(formTop + formHeight * 0.195),
+        width: Math.round(formWidth * 0.09),
+        height: Math.round(formHeight * 0.04),
+      };
+    }
+
+    // Clamp ROIs to image bounds
+    const clamp = (roi: { left: number; top: number; width: number; height: number }) => {
+      const left = Math.max(0, Math.min(imgWidth - 4, roi.left));
+      const top = Math.max(0, Math.min(imgHeight - 4, roi.top));
+      const width = Math.max(2, Math.min(imgWidth - left, roi.width));
+      const height = Math.max(2, Math.min(imgHeight - top, roi.height));
+      return { left, top, width, height };
+    };
+    leftRoi = clamp(leftRoi);
+    rightRoi = clamp(rightRoi);
+
+    // ── Step B: Measure Dark Ink Pixel Ratio (gray < 145) via sharp ──
+    const computeInkRatio = async (roi: { left: number; top: number; width: number; height: number }) => {
+      if (roi.width <= 0 || roi.height <= 0) return 0;
+      const rawBuf = await sharp(params.uprightImageBuffer)
+        .extract({ left: roi.left, top: roi.top, width: roi.width, height: roi.height })
+        .grayscale()
+        .raw()
+        .toBuffer();
+
+      const totalPixels = roi.width * roi.height;
+      let darkPixels = 0;
+
+      // Center-band evaluation excluding top/bottom 2px border lines so adjacent table borders never skew
+      const borderSkip = Math.min(2, Math.floor(Math.min(roi.width, roi.height) / 4));
+      let centerTotal = 0;
+      let centerDark = 0;
+
+      for (let y = 0; y < roi.height; y++) {
+        const isBorderY = y < borderSkip || y >= roi.height - borderSkip;
+        for (let x = 0; x < roi.width; x++) {
+          const isBorderX = x < borderSkip || x >= roi.width - borderSkip;
+          const pixelVal = rawBuf[y * roi.width + x];
+          const isDark = pixelVal < 145;
+          if (isDark) darkPixels++;
+          if (!isBorderY && !isBorderX) {
+            centerTotal++;
+            if (isDark) centerDark++;
+          }
+        }
+      }
+
+      const rawRatio = totalPixels > 0 ? darkPixels / totalPixels : 0;
+      const centerRatio = centerTotal >= 16 ? centerDark / centerTotal : rawRatio;
+      return centerRatio;
+    };
+
+    const [leftInkRatio, rightInkRatio] = await Promise.all([
+      computeInkRatio(leftRoi),
+      computeInkRatio(rightRoi),
+    ]);
+
+    // ── Decision Rule ──
+    if (leftInkRatio >= 0.028 && leftInkRatio > rightInkRatio * 1.55) {
+      return {
+        sex: "Male",
+        confidence: 92,
+        source: "pixel_ink_left_box",
+        leftInkRatio: Math.round(leftInkRatio * 10000) / 10000,
+        rightInkRatio: Math.round(rightInkRatio * 10000) / 10000,
+        matchedLines,
+      };
+    }
+
+    if (rightInkRatio >= 0.028 && rightInkRatio > leftInkRatio * 1.55) {
+      return {
+        sex: "Female",
+        confidence: 92,
+        source: "pixel_ink_right_box",
+        leftInkRatio: Math.round(leftInkRatio * 10000) / 10000,
+        rightInkRatio: Math.round(rightInkRatio * 10000) / 10000,
+        matchedLines,
+      };
+    }
+
+    return {
+      sex: undefined,
+      confidence: 0,
+      source: null,
+      leftInkRatio: Math.round(leftInkRatio * 10000) / 10000,
+      rightInkRatio: Math.round(rightInkRatio * 10000) / 10000,
+      matchedLines,
+    };
+  } catch (err) {
+    console.warn("[detectPsaSexFromMarkBoxInk] Ink detection fallback error:", err);
+    return { sex: undefined, confidence: 0, source: null, leftInkRatio: 0, rightInkRatio: 0, matchedLines: [] };
+  }
 }
 
 export function parsePsaBirthCert(
@@ -1723,4 +2166,76 @@ function parseFlexibleDate(dateStr: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Asynchronous PSA Certificate parser wrapper.
+ * Calls parsePsaBirthCert and falls back to detectPsaSexFromMarkBoxInk
+ * if Item 2 Sex is not detected or has low confidence (< 75%), using uprightImageBuffer or imageBuffer.
+ */
+export async function parsePsaCertificate(
+  rawText: string,
+  rawLayout?: any,
+  ocrConfidence: number = 0.95,
+  options?: PsaParseOptions
+): Promise<PsaParseResult> {
+  const result = parsePsaBirthCert(rawText, rawLayout, ocrConfidence, options);
+
+  const currentSex = result.identity.sex;
+  const currentConfidence = result.field_statuses?.sex?.confidence ?? 0;
+
+  if ((!currentSex || currentConfidence < 75) && (options?.uprightImageBuffer || options?.imageBuffer)) {
+    const rawBuf = options.uprightImageBuffer || options.imageBuffer;
+    let buf: Buffer | null = null;
+    if (Buffer.isBuffer(rawBuf)) {
+      buf = rawBuf;
+    } else if (typeof rawBuf === "string") {
+      const b64 = rawBuf.includes(",") ? rawBuf.split(",")[1] : rawBuf;
+      try {
+        buf = Buffer.from(b64, "base64");
+      } catch {
+        buf = null;
+      }
+    }
+
+    if (buf) {
+      const inkRes = await detectPsaSexFromMarkBoxInk({
+        uprightImageBuffer: buf,
+        rawLayout,
+      });
+
+      if (inkRes.sex) {
+        result.identity.sex = inkRes.sex === "Male" ? "M" : "F";
+        result.identity.sex_label = inkRes.sex;
+        if (!result.field_statuses) {
+          result.field_statuses = {} as any;
+        }
+        result.field_statuses.sex = {
+          value: inkRes.sex,
+          status: "extracted",
+          confidence: inkRes.confidence || 92,
+        };
+        result.warnings = (result.warnings || []).filter(
+          (w) => !w.toLowerCase().includes("sex could not be reliably extracted")
+        );
+      }
+      (result as any).sexDiagnostic = {
+        leftInkRatio: inkRes.leftInkRatio,
+        rightInkRatio: inkRes.rightInkRatio,
+        source: inkRes.source || (inkRes.sex ? (inkRes.sex === "Male" ? "pixel_ink_left_box" : "pixel_ink_right_box") : "not_detected"),
+        matchedLines: inkRes.matchedLines || [],
+      };
+    }
+  }
+
+  if (!(result as any).sexDiagnostic) {
+    (result as any).sexDiagnostic = {
+      leftInkRatio: 0,
+      rightInkRatio: 0,
+      source: result.identity.sex ? "text_x_mark" : "not_detected",
+      matchedLines: [],
+    };
+  }
+
+  return result;
 }

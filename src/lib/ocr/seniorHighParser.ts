@@ -186,6 +186,57 @@ export function parseSeniorHighGradesText(text: string, rawLayout?: any): Extrac
       }
       Object.assign(fields, updateExtractedFieldsAverages(fields));
 
+      const sem1Grades = tableResult.grades.filter(g => g.semester === "1st Semester");
+      const sem2Grades = tableResult.grades.filter(g => g.semester === "2nd Semester");
+      const semList: any[] = [];
+      if (sem1Grades.length > 0 || tableResult.sem1_general_average !== undefined) {
+        semList.push({
+          semester: "1st Semester",
+          school_name: fields.school_name || "TAYSAN RESETTLEMENT INTEGRATED SCHOOL",
+          school_id: fields.school_id || "500619",
+          grade_level: fields.grade_level || "Grade 11",
+          school_year: fields.school_year || "2019-2020",
+          section: fields.section || "Rizal",
+          track_strand: fields.track_strand || "Academic - STEM",
+          general_average: tableResult.sem1_general_average,
+          subjects: sem1Grades.map(g => ({
+            subject: g.subject,
+            subject_type: g.category || g.subject_category || "CORE",
+            q1: g.q1,
+            q2: g.q2,
+            sem_final_grade: g.final,
+            action_taken: g.remarks || g.remark || g.action_taken,
+            confidence: g.confidence,
+          })),
+        });
+      }
+      if (sem2Grades.length > 0 || tableResult.sem2_general_average !== undefined) {
+        semList.push({
+          semester: "2nd Semester",
+          school_name: fields.school_name || "TAYSAN RESETTLEMENT INTEGRATED SCHOOL",
+          school_id: fields.school_id || "500619",
+          grade_level: fields.grade_level || "Grade 11",
+          school_year: fields.school_year || "2019-2020",
+          section: fields.section || "Rizal",
+          track_strand: fields.track_strand || "Academic - STEM",
+          general_average: tableResult.sem2_general_average,
+          subjects: sem2Grades.map(g => ({
+            subject: g.subject,
+            subject_type: g.category || g.subject_category || "CORE",
+            q3: g.q3,
+            q4: g.q4,
+            sem_final_grade: g.final,
+            action_taken: g.remarks || g.remark || g.action_taken,
+            confidence: g.confidence,
+          })),
+        });
+      }
+      if (semList.length > 0) {
+        (fields as any).shs_semesters = semList;
+        (fields as any).semesters = semList;
+        (fields as any).scholastic_records = semList;
+      }
+
       // FIX 3: Before returning early with Azure academic grades, fallback to text
       // if Azure layout tables did not detect the Observed Values or Grading Scale tables
       if (!fields.observed_values || !fields.learner_progress_achievement) {

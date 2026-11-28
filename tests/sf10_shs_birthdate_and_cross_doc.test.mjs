@@ -24,8 +24,10 @@ import {
 } from "../src/lib/ocr/sf10ShsParser.ts";
 import { parseAzureLayoutGrades, extractTwoQuarterGrades } from "../src/lib/ocr/tableGradesParser.ts";
 import { calculateOcrMetrics } from "../src/lib/ocr/mistral.ts";
-import { evaluateDynamicGradeStatus, normalizeStrictSex } from "../src/lib/validation/gradeUtils.ts";
+import { evaluateDynamicGradeStatus, normalizeStrictSex, roundSf10GeneralAverage } from "../src/lib/validation/gradeUtils.ts";
 import { parsePsaBirthCert, extractPsaSexFromMarkPlacement } from "../src/lib/ocr/psaParser.ts";
+import { parseGradesText } from "../src/lib/ocr/gradesParser.ts";
+import { parseSeniorHighGradesText } from "../src/lib/ocr/seniorHighParser.ts";
 
 import {
   compareSf10AndSf1,
@@ -34,9 +36,11 @@ import {
   resolveSf10SemesterBlocks,
   evaluateUnifiedStudentValidation,
   evaluate4StateRowStatus,
+  normalizeGradeLevelForComparison,
   reconcileStudentDataFromPrimarySources,
   reconcileStudentDataFromPrimaryKeys,
 } from "../src/lib/validation/crossDocumentEngine.ts";
+import { safeJsonStringify } from "../src/lib/upload/safeParseResponse.ts";
 import { evaluateBatchCrossDocumentValidation } from "../src/lib/validation/batchCrossDocumentValidator.ts";
 
 test("Universal Birthdate Normalizer, SF10-SHS Parser & Cross-Document Suite", async (t) => {
@@ -440,7 +444,549 @@ TRACK/STRAND: Academic - STEM | SECTION: Rizal
     assert.equal(gc2?.q4, 81);
   });
 
-  await t.test("2f. OCR Readability Confidence & Field Completeness metrics calculation", () => {
+  await t.test("2f. SF10-SHS Single-Page 4-Table Layout: Sem 1 (6-col), Remedial Ignored, Sem 2 (5-col merged quarter), Remedial Ignored & Decimal General Averages (86.5 & 86.8)", () => {
+    // 1. Test via Markdown & Reconstructed Rows in parseSf10ShsText
+    const singlePageSf10Text = `
+SENIOR HIGH SCHOOL STUDENT PERMANENT RECORD (SF10-SHS)
+LEARNER'S INFORMATION
+LAST NAME: GOMEZ   FIRST NAME: JUSTIN   MIDDLE NAME: LOQUILLANO
+LRN: 111304501972   Date of Birth: 06/23/2004   Sex: Male
+
+SCHOLASTIC RECORD
+SCHOOL: TAYSAN RESETTLEMENT INTEGRATED SCHOOL | SCHOOL ID: 500619 | GRADE LEVEL: 11 | SY: 2019-2020 | SEM: 1 | SECTION: Rizal
+| Category | SUBJECTS | Quarter 1ST | 2ND | SEM FINAL GRADE | ACTION TAKEN |
+|---|---|---|---|---|---|
+| CORE | Oral Communication | 85 | 87 | 86 | PASSED |
+| CORE | Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino | 86 | 84 | 85 | PASSED |
+| CORE | General Mathematics | 88 | 86 | 87 | PASSED |
+| CORE | Earth and Life Science | 89 | 87 | 88 | PASSED |
+| CORE | Personal Development | 90 | 92 | 91 | PASSED |
+| CORE | Understanding Culture, Society and Politics | 84 | 86 | 85 | PASSED |
+| CORE | Physical Education and Health 1 | 87 | 89 | 88 | PASSED |
+| APPLIED | Empowerment Technologies | 86 | 88 | 87 | PASSED |
+| SPECIALIZED | Pre-Calculus | 85 | 87 | 86 | PASSED |
+| General Ave. for the Semester | | | | 86.5 | |
+
+REMEDIAL CLASSES
+| REMEDIAL CLASS MARK | RECOMPUTED FINAL GRADE | ACTION TAKEN |
+|---|---|---|
+
+SCHOLASTIC RECORD
+SCHOOL: TAYSAN RESETTLEMENT INTEGRATED SCHOOL | SCHOOL ID: 500619 | GRADE LEVEL: 11 | SY: 2019-2020 | SEM: 2 | SECTION: Rizal
+| Category | SUBJECTS | Quarter 4TH 3RD | SEM FINAL GRADE | ACTION TAKEN |
+|---|---|---|---|---|
+| CORE | Reading and Writing | 70 98 | 84 | PASSED |
+| CORE | Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik | 85 85 | 85 | PASSED |
+| CORE | Statistics and Probability | 86 87 | 87 | PASSED |
+| CORE | Physical Education and Health 3 | 75 95 | 85 | PASSED |
+| CORE | Disaster Readiness and Risk Reduction | 91 93 | 92 | PASSED |
+| CORE | Filipino sa Piling Larangan | 88 88 | 88 | PASSED |
+| APPLIED | Practical Research 1 | 84 87 | 86 | PASSED |
+| SPECIALIZED | Basic Calculus | 88 98 | 93 | PASSED |
+| SPECIALIZED | General Chemistry 2 | 78 81 | 80 | PASSED |
+| General Ave. for the Semester | | | 86.8 | |
+
+REMEDIAL CLASSES
+| REMEDIAL CLASS MARK | RECOMPUTED FINAL GRADE | ACTION TAKEN |
+|---|---|---|
+`;
+
+    const parsedSf10 = parseSf10ShsText(singlePageSf10Text);
+    assert.equal(parsedSf10.scholastic_records.length, 2, "Must extract exactly 2 scholastic record semesters, ignoring remedial classes");
+
+    // Sem 1 verification
+    const s1 = parsedSf10.scholastic_records[0];
+    assert.equal(s1.semester, "1st Semester");
+    assert.equal(s1.general_average, 86.5);
+    assert.equal(s1.subjects.length, 9, "Sem 1 must have all 9 subjects");
+    const oc = s1.subjects.find((s) => s.subject === "Oral Communication");
+    assert.equal(oc?.q1, 85);
+    assert.equal(oc?.q2, 87);
+    assert.equal(oc?.sem_final_grade, 86);
+    assert.equal(oc?.action_taken, "PASSED");
+
+    // Sem 2 verification with merged quarter splitting (4TH before 3RD)
+    const s2 = parsedSf10.scholastic_records[1];
+    assert.equal(s2.semester, "2nd Semester");
+    assert.equal(s2.general_average, 86.8);
+    assert.equal(s2.subjects.length, 9, "Sem 2 must have all 9 subjects");
+
+    const rw = s2.subjects.find((s) => s.subject === "Reading and Writing");
+    assert.ok(rw);
+    assert.equal(rw.q4, 70, "Q4 must be 70 (first number in Quarter 4TH 3RD)");
+    assert.equal(rw.q3, 98, "Q3 must be 98 (second number in Quarter 4TH 3RD)");
+    assert.equal(rw.sem_final_grade, 84);
+    assert.equal(rw.action_taken, "PASSED");
+
+    const pe3 = s2.subjects.find((s) => s.subject === "Physical Education and Health 3");
+    assert.ok(pe3);
+    assert.equal(pe3.q4, 75);
+    assert.equal(pe3.q3, 95);
+    assert.equal(pe3.sem_final_grade, 85, "PE Sem Final Grade must be strictly 85, never overwritten by quarter cell");
+    assert.equal(pe3.action_taken, "PASSED");
+
+    // 2. Test via Azure Layout Tables in parseAzureLayoutGrades
+    const mockAzureTables = [
+      // Table 1: Sem 1 (6 columns)
+      {
+        rowCount: 11,
+        columnCount: 6,
+        cells: [
+          { rowIndex: 0, columnIndex: 0, content: "Category" },
+          { rowIndex: 0, columnIndex: 1, content: "SUBJECTS" },
+          { rowIndex: 0, columnIndex: 2, content: "Quarter 1ST" },
+          { rowIndex: 0, columnIndex: 3, content: "2ND" },
+          { rowIndex: 0, columnIndex: 4, content: "SEM FINAL GRADE" },
+          { rowIndex: 0, columnIndex: 5, content: "ACTION TAKEN" },
+          // Subject 1
+          { rowIndex: 1, columnIndex: 0, content: "CORE" },
+          { rowIndex: 1, columnIndex: 1, content: "Oral Communication" },
+          { rowIndex: 1, columnIndex: 2, content: "85" },
+          { rowIndex: 1, columnIndex: 3, content: "87" },
+          { rowIndex: 1, columnIndex: 4, content: "86" },
+          { rowIndex: 1, columnIndex: 5, content: "PASSED" },
+          // Subject 2
+          { rowIndex: 2, columnIndex: 0, content: "CORE" },
+          { rowIndex: 2, columnIndex: 1, content: "General Mathematics" },
+          { rowIndex: 2, columnIndex: 2, content: "88" },
+          { rowIndex: 2, columnIndex: 3, content: "86" },
+          { rowIndex: 2, columnIndex: 4, content: "87" },
+          { rowIndex: 2, columnIndex: 5, content: "PASSED" },
+          // General Ave Row
+          { rowIndex: 3, columnIndex: 0, content: "General Ave. for the Semester" },
+          { rowIndex: 3, columnIndex: 1, content: "" },
+          { rowIndex: 3, columnIndex: 2, content: "" },
+          { rowIndex: 3, columnIndex: 3, content: "" },
+          { rowIndex: 3, columnIndex: 4, content: "86.5" },
+          { rowIndex: 3, columnIndex: 5, content: "" },
+        ],
+      },
+      // Table 2: Sem 1 Remedial Classes (ignored)
+      {
+        rowCount: 3,
+        columnCount: 6,
+        cells: [
+          { rowIndex: 0, columnIndex: 0, content: "REMEDIAL CLASSES" },
+          { rowIndex: 0, columnIndex: 1, content: "REMEDIAL CLASS MARK" },
+          { rowIndex: 0, columnIndex: 2, content: "RECOMPUTED FINAL GRADE" },
+        ],
+      },
+      // Table 3: Sem 2 (5 columns with merged quarter in col 2)
+      {
+        rowCount: 11,
+        columnCount: 5,
+        cells: [
+          { rowIndex: 0, columnIndex: 0, content: "Category" },
+          { rowIndex: 0, columnIndex: 1, content: "SUBJECTS" },
+          { rowIndex: 0, columnIndex: 2, content: "Quarter 4TH 3RD" },
+          { rowIndex: 0, columnIndex: 3, content: "SEM FINAL GRADE" },
+          { rowIndex: 0, columnIndex: 4, content: "ACTION TAKEN" },
+          // Subject 1
+          { rowIndex: 1, columnIndex: 0, content: "CORE" },
+          { rowIndex: 1, columnIndex: 1, content: "Reading and Writing" },
+          { rowIndex: 1, columnIndex: 2, content: "70\n98" },
+          { rowIndex: 1, columnIndex: 3, content: "84" },
+          { rowIndex: 1, columnIndex: 4, content: "PASSED" },
+          // Subject 2
+          { rowIndex: 2, columnIndex: 0, content: "CORE" },
+          { rowIndex: 2, columnIndex: 1, content: "Physical Education and Health 3" },
+          { rowIndex: 2, columnIndex: 2, content: "75\n95" },
+          { rowIndex: 2, columnIndex: 3, content: "85" },
+          { rowIndex: 2, columnIndex: 4, content: "PASSED" },
+          // General Ave Row
+          { rowIndex: 3, columnIndex: 0, content: "General Ave. for the Semester" },
+          { rowIndex: 3, columnIndex: 1, content: "" },
+          { rowIndex: 3, columnIndex: 2, content: "" },
+          { rowIndex: 3, columnIndex: 3, content: "86.8" },
+          { rowIndex: 3, columnIndex: 4, content: "" },
+        ],
+      },
+      // Table 4: Sem 2 Remedial Classes (ignored)
+      {
+        rowCount: 3,
+        columnCount: 6,
+        cells: [
+          { rowIndex: 0, columnIndex: 0, content: "REMEDIAL CLASSES" },
+          { rowIndex: 0, columnIndex: 1, content: "REMEDIAL CLASS MARK" },
+          { rowIndex: 0, columnIndex: 2, content: "RECOMPUTED FINAL GRADE" },
+        ],
+      },
+    ];
+
+    const azureResult = parseAzureLayoutGrades(mockAzureTables);
+    assert.equal(azureResult.sem1_general_average, 86.5, "Azure Sem 1 General Average must be 86.5");
+    assert.equal(azureResult.sem2_general_average, 86.8, "Azure Sem 2 General Average must be 86.8");
+
+    const azureSem1 = azureResult.grades.filter((g) => g.semester === "1st Semester");
+    const azureSem2 = azureResult.grades.filter((g) => g.semester === "2nd Semester");
+    assert.ok(azureSem1.length >= 2, "Must extract Sem 1 grades");
+    assert.ok(azureSem2.length >= 2, "Must extract Sem 2 grades");
+
+    const azRw = azureSem2.find((g) => g.subject === "Reading and Writing");
+    assert.ok(azRw);
+    assert.equal(azRw.q4, 70);
+    assert.equal(azRw.q3, 98);
+    assert.equal(azRw.final, 84);
+
+    const azPe = azureSem2.find((g) => g.subject === "Physical Education and Health 3");
+    assert.ok(azPe);
+    assert.equal(azPe.q4, 75);
+    assert.equal(azPe.q3, 95);
+    assert.equal(azPe.final, 85);
+
+    // 3. Dynamic evaluation of decimal General Averages: 86.5 & 86.8 -> PASSED
+    const evalSem1 = evaluateDynamicGradeStatus({ grade: 86.5, allowDecimal: true, isGeneralAverage: true });
+    assert.equal(evalSem1.status, "passed");
+    assert.equal(evalSem1.remarkDisplay, "PASSED");
+    assert.equal(evalSem1.gradeDisplay, "86.5");
+
+    const evalSem2 = evaluateDynamicGradeStatus({ grade: 86.8, allowDecimal: true, isGeneralAverage: true });
+    assert.equal(evalSem2.status, "passed");
+    assert.equal(evalSem2.remarkDisplay, "PASSED");
+    assert.equal(evalSem2.gradeDisplay, "86.8");
+
+    // 4. Test via full parseGradesText (docType = "sf10")
+    const fullSf10 = parseGradesText(singlePageSf10Text, "Senior High School", undefined, "sf10");
+    assert.equal(fullSf10.document_type, "sf10");
+    assert.equal(fullSf10.sem1_general_average, 86.5);
+    assert.equal(fullSf10.sem1_printed_general_average, 86.5);
+    assert.equal(fullSf10.sem2_general_average, 86.8);
+    assert.equal(fullSf10.sem2_printed_general_average, 86.8);
+    assert.equal(fullSf10.sem1_confidence, 95);
+    assert.equal(fullSf10.sem2_confidence, 95);
+    assert.ok(Array.isArray(fullSf10.shs_semesters) && fullSf10.shs_semesters.length === 2);
+    assert.ok(Array.isArray(fullSf10.grades) && fullSf10.grades.length === 18);
+  });
+
+  await t.test("2f-2. SF10-SHS Exact 18 Subjects (9 Sem 1 & 9 Sem 2 with trailing-quarter splitting for PE 2 95 through Gen Chem 2 78) mapped for /upload and /api/scan/batch", () => {
+    const rawOcrSf10All18Text = `
+SENIOR HIGH SCHOOL STUDENT PERMANENT RECORD (SF10-SHS)
+LEARNER'S INFORMATION
+LAST NAME: GOMEZ   FIRST NAME: JUSTIN   MIDDLE NAME: LOQUILLANO
+LRN: 111304501972   Date of Birth: 06/23/2004   Sex: Male
+
+SCHOLASTIC RECORD
+SCHOOL: TAYSAN RESETTLEMENT INTEGRATED SCHOOL | SCHOOL ID: 500619 | GRADE LEVEL: 11 | SY: 2019-2020 | SEM: 1st | SECTION: Rizal
+| Category | SUBJECTS | Quarter 1st | 2nd | SEM FINAL GRADE | ACTION TAKEN |
+|---|---|---|---|---|---|
+| CORE | Oral Communication | 85 | 87 | 86 | PASSED |
+| CORE | Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino | 86 | 84 | 85 | PASSED |
+| CORE | General Mathematics | 88 | 86 | 87 | PASSED |
+| CORE | Earth and Life Science | 89 | 87 | 88 | PASSED |
+| CORE | Personal Development | 90 | 92 | 91 | PASSED |
+| CORE | Understanding Culture, Society and Politics | 84 | 86 | 85 | PASSED |
+| CORE | Physical Education and Health 1 | 87 | 89 | 88 | PASSED |
+| APPLIED | Empowerment Technologies | 86 | 88 | 87 | PASSED |
+| SPECIALIZED | Pre-Calculus | 85 | 87 | 86 | PASSED |
+| General Ave. for the Semester | | | | 86.5 | |
+
+SCHOLASTIC RECORD
+SCHOOL: TAYSAN RESETTLEMENT INTEGRATED SCHOOL | SCHOOL ID: 500619 | GRADE LEVEL: 11 | SY: 2019-2020 | SEM: 2nd | SECTION: Rizal
+| Category | SUBJECTS | Quarter 3rd | 4th | SEM FINAL GRADE | ACTION TAKEN |
+|---|---|---|---|---|---|
+| CORE | Reading and Writing | 70 | 98 | 84 | PASSED |
+| CORE | Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik | 80 | 80 | 80 | PASSED |
+| CORE | Personal Development (Pansariling Kaunlaran) | 90 | 90 | 90 | PASSED |
+| CORE | Physical Education and Health 2 95 | 75 | 85 | PASSED |
+| CORE | Statistics and Probability 86 | 87 | 87 | PASSED |
+| CORE | Disaster Readiness and Risk Reduction 91 | 93 | 92 | PASSED |
+| APPLIED | Practical Research 1 84 | 87 | 86 | PASSED |
+| SPECIALIZED | Basic Calculus 88 | 98 | 93 | PASSED |
+| SPECIALIZED | General Chemistry 2 78 | 81 | 80 | PASSED |
+| General Ave. for the Semester | | | | 86.8 | |
+`;
+
+    // 1. Parse via parseSf10ShsText
+    const parsed = parseSf10ShsText(rawOcrSf10All18Text);
+    assert.equal(parsed.scholastic_records.length, 2);
+
+    const sem1 = parsed.scholastic_records[0];
+    const sem2 = parsed.scholastic_records[1];
+
+    assert.equal(sem1.subjects.length, 9, "Sem 1 must have exactly 9 subjects");
+    assert.equal(sem2.subjects.length, 9, "Sem 2 must have exactly 9 subjects");
+    assert.equal(sem1.general_average, 86.5);
+    assert.equal(sem2.general_average, 86.8);
+
+    // Verify Sem 2 exact values
+    const s2Subs = sem2.subjects;
+    // Row 1
+    assert.equal(s2Subs[0].subject, "Reading and Writing");
+    assert.equal(s2Subs[0].q3, 70);
+    assert.equal(s2Subs[0].q4, 98);
+    assert.equal(s2Subs[0].sem_final_grade, 84);
+    assert.equal(s2Subs[0].action_taken, "PASSED");
+
+    // Row 2
+    assert.equal(s2Subs[1].subject, "Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik");
+    assert.equal(s2Subs[1].q3, 80);
+    assert.equal(s2Subs[1].q4, 80);
+    assert.equal(s2Subs[1].sem_final_grade, 80);
+    assert.equal(s2Subs[1].action_taken, "PASSED");
+
+    // Row 3
+    assert.equal(s2Subs[2].subject, "Personal Development (Pansariling Kaunlaran)");
+    assert.equal(s2Subs[2].q3, 90);
+    assert.equal(s2Subs[2].q4, 90);
+    assert.equal(s2Subs[2].sem_final_grade, 90);
+    assert.equal(s2Subs[2].action_taken, "PASSED");
+
+    // Row 4: Physical Education and Health 2 (95 stripped -> Q3=95, Q4=75, Final=85)
+    assert.equal(s2Subs[3].subject, "Physical Education and Health 2");
+    assert.equal(s2Subs[3].q3, 95);
+    assert.equal(s2Subs[3].q4, 75);
+    assert.equal(s2Subs[3].sem_final_grade, 85);
+    assert.equal(s2Subs[3].action_taken, "PASSED");
+
+    // Row 5: Statistics and Probability (86 stripped -> Q3=86, Q4=87, Final=87)
+    assert.equal(s2Subs[4].subject, "Statistics and Probability");
+    assert.equal(s2Subs[4].q3, 86);
+    assert.equal(s2Subs[4].q4, 87);
+    assert.equal(s2Subs[4].sem_final_grade, 87);
+    assert.equal(s2Subs[4].action_taken, "PASSED");
+
+    // Row 6: Disaster Readiness and Risk Reduction (91 stripped -> Q3=91, Q4=93, Final=92)
+    assert.equal(s2Subs[5].subject, "Disaster Readiness and Risk Reduction");
+    assert.equal(s2Subs[5].q3, 91);
+    assert.equal(s2Subs[5].q4, 93);
+    assert.equal(s2Subs[5].sem_final_grade, 92);
+    assert.equal(s2Subs[5].action_taken, "PASSED");
+
+    // Row 7: Practical Research 1 (84 stripped -> Q3=84, Q4=87, Final=86)
+    assert.equal(s2Subs[6].subject, "Practical Research 1");
+    assert.equal(s2Subs[6].q3, 84);
+    assert.equal(s2Subs[6].q4, 87);
+    assert.equal(s2Subs[6].sem_final_grade, 86);
+    assert.equal(s2Subs[6].action_taken, "PASSED");
+
+    // Row 8: Basic Calculus (88 stripped -> Q3=88, Q4=98, Final=93)
+    assert.equal(s2Subs[7].subject, "Basic Calculus");
+    assert.equal(s2Subs[7].q3, 88);
+    assert.equal(s2Subs[7].q4, 98);
+    assert.equal(s2Subs[7].sem_final_grade, 93);
+    assert.equal(s2Subs[7].action_taken, "PASSED");
+
+    // Row 9: General Chemistry 2 (78 stripped -> Q3=78, Q4=81, Final=80)
+    assert.equal(s2Subs[8].subject, "General Chemistry 2");
+    assert.equal(s2Subs[8].q3, 78);
+    assert.equal(s2Subs[8].q4, 81);
+    assert.equal(s2Subs[8].sem_final_grade, 80);
+    assert.equal(s2Subs[8].action_taken, "PASSED");
+
+    // Exact Sem 2 final grades sequence
+    const actualSem2Finals = s2Subs.map((s) => s.sem_final_grade);
+    assert.deepEqual(actualSem2Finals, [84, 80, 90, 85, 87, 92, 86, 93, 80]);
+
+    // 2. Parse via parseGradesText (docType = "sf10")
+    const gradesRes = parseGradesText(rawOcrSf10All18Text, "Senior High School", undefined, "sf10");
+    assert.equal(gradesRes.grades?.length, 18);
+    assert.equal(gradesRes.first_semester_grades?.length, 9);
+    assert.equal(gradesRes.second_semester_grades?.length, 9);
+    assert.equal(gradesRes.sem1_general_average, 86.5);
+    assert.equal(gradesRes.sem2_general_average, 86.8);
+
+    // 3. Test Azure Layout table representation for Sem 2
+    const azureSem2Table = {
+      rowCount: 11,
+      columnCount: 6,
+      cells: [
+        { rowIndex: 0, columnIndex: 0, content: "Category" },
+        { rowIndex: 0, columnIndex: 1, content: "SUBJECTS" },
+        { rowIndex: 0, columnIndex: 2, content: "Quarter 3rd" },
+        { rowIndex: 0, columnIndex: 3, content: "4th" },
+        { rowIndex: 0, columnIndex: 4, content: "SEM FINAL GRADE" },
+        { rowIndex: 0, columnIndex: 5, content: "ACTION TAKEN" },
+
+        // Rows 1-3 separate cells
+        { rowIndex: 1, columnIndex: 0, content: "CORE" },
+        { rowIndex: 1, columnIndex: 1, content: "Reading and Writing" },
+        { rowIndex: 1, columnIndex: 2, content: "70" },
+        { rowIndex: 1, columnIndex: 3, content: "98" },
+        { rowIndex: 1, columnIndex: 4, content: "84" },
+        { rowIndex: 1, columnIndex: 5, content: "PASSED" },
+
+        { rowIndex: 2, columnIndex: 0, content: "CORE" },
+        { rowIndex: 2, columnIndex: 1, content: "Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik" },
+        { rowIndex: 2, columnIndex: 2, content: "80" },
+        { rowIndex: 2, columnIndex: 3, content: "80" },
+        { rowIndex: 2, columnIndex: 4, content: "80" },
+        { rowIndex: 2, columnIndex: 5, content: "PASSED" },
+
+        { rowIndex: 3, columnIndex: 0, content: "CORE" },
+        { rowIndex: 3, columnIndex: 1, content: "Personal Development (Pansariling Kaunlaran)" },
+        { rowIndex: 3, columnIndex: 2, content: "90" },
+        { rowIndex: 3, columnIndex: 3, content: "90" },
+        { rowIndex: 3, columnIndex: 4, content: "90" },
+        { rowIndex: 3, columnIndex: 5, content: "PASSED" },
+
+        // Rows 4-9 trailing 3rd quarter grade appended to subject cell
+        { rowIndex: 4, columnIndex: 0, content: "CORE" },
+        { rowIndex: 4, columnIndex: 1, content: "Physical Education and Health 2 95" },
+        { rowIndex: 4, columnIndex: 2, content: "75" },
+        { rowIndex: 4, columnIndex: 3, content: "85" },
+        { rowIndex: 4, columnIndex: 4, content: "PASSED" },
+
+        { rowIndex: 5, columnIndex: 0, content: "CORE" },
+        { rowIndex: 5, columnIndex: 1, content: "Statistics and Probability 86" },
+        { rowIndex: 5, columnIndex: 2, content: "87" },
+        { rowIndex: 5, columnIndex: 3, content: "87" },
+        { rowIndex: 5, columnIndex: 4, content: "PASSED" },
+
+        { rowIndex: 6, columnIndex: 0, content: "CORE" },
+        { rowIndex: 6, columnIndex: 1, content: "Disaster Readiness and Risk Reduction 91" },
+        { rowIndex: 6, columnIndex: 2, content: "93" },
+        { rowIndex: 6, columnIndex: 3, content: "92" },
+        { rowIndex: 6, columnIndex: 4, content: "PASSED" },
+
+        { rowIndex: 7, columnIndex: 0, content: "APPLIED" },
+        { rowIndex: 7, columnIndex: 1, content: "Practical Research 1 84" },
+        { rowIndex: 7, columnIndex: 2, content: "87" },
+        { rowIndex: 7, columnIndex: 3, content: "86" },
+        { rowIndex: 7, columnIndex: 4, content: "PASSED" },
+
+        { rowIndex: 8, columnIndex: 0, content: "SPECIALIZED" },
+        { rowIndex: 8, columnIndex: 1, content: "Basic Calculus 88" },
+        { rowIndex: 8, columnIndex: 2, content: "98" },
+        { rowIndex: 8, columnIndex: 3, content: "93" },
+        { rowIndex: 8, columnIndex: 4, content: "PASSED" },
+
+        { rowIndex: 9, columnIndex: 0, content: "SPECIALIZED" },
+        { rowIndex: 9, columnIndex: 1, content: "General Chemistry 2 78" },
+        { rowIndex: 9, columnIndex: 2, content: "81" },
+        { rowIndex: 9, columnIndex: 3, content: "80" },
+        { rowIndex: 9, columnIndex: 4, content: "PASSED" },
+
+        // Footer
+        { rowIndex: 10, columnIndex: 0, content: "General Ave. for the Semester" },
+        { rowIndex: 10, columnIndex: 4, content: "86.8" },
+      ],
+    };
+
+    const azTableResult = parseAzureLayoutGrades([azureSem2Table]);
+    assert.equal(azTableResult.sem2_general_average, 86.8);
+    const azSem2Grades = azTableResult.grades.filter((g) => g.semester === "2nd Semester");
+    assert.equal(azSem2Grades.length, 9, "Azure Layout table must extract all 9 subjects");
+
+    const azPe = azSem2Grades.find((g) => g.subject === "Physical Education and Health 2");
+    assert.ok(azPe, "Must find Physical Education and Health 2 with cleaned title");
+    assert.equal(azPe.q3, 95);
+    assert.equal(azPe.q4, 75);
+    assert.equal(azPe.final, 85);
+
+    const azStat = azSem2Grades.find((g) => g.subject === "Statistics and Probability");
+    assert.ok(azStat);
+    assert.equal(azStat.q3, 86);
+    assert.equal(azStat.q4, 87);
+    assert.equal(azStat.final, 87);
+
+    const azDrrr = azSem2Grades.find((g) => g.subject === "Disaster Readiness and Risk Reduction");
+    assert.ok(azDrrr);
+    assert.equal(azDrrr.q3, 91);
+    assert.equal(azDrrr.q4, 93);
+    assert.equal(azDrrr.final, 92);
+
+    const azPr1 = azSem2Grades.find((g) => g.subject === "Practical Research 1");
+    assert.ok(azPr1);
+    assert.equal(azPr1.q3, 84);
+    assert.equal(azPr1.q4, 87);
+    assert.equal(azPr1.final, 86);
+
+    const azBc = azSem2Grades.find((g) => g.subject === "Basic Calculus");
+    assert.ok(azBc);
+    assert.equal(azBc.q3, 88);
+    assert.equal(azBc.q4, 98);
+    assert.equal(azBc.final, 93);
+
+    const azGc2 = azSem2Grades.find((g) => g.subject === "General Chemistry 2");
+    assert.ok(azGc2);
+    assert.equal(azGc2.q3, 78);
+    assert.equal(azGc2.q4, 81);
+    assert.equal(azGc2.final, 80);
+  });
+
+  await t.test("2f-3. roundSf10GeneralAverage whole-number rounding (.5-.9 up, .0-.4 down) and SF10 shs_semesters average mapping", () => {
+    // 1. Assert helper rounding rules
+    assert.equal(roundSf10GeneralAverage(86.5), 87, "86.5 must round up to 87");
+    assert.equal(roundSf10GeneralAverage(86.8), 87, "86.8 must round up to 87");
+    assert.equal(roundSf10GeneralAverage(86.4), 86, "86.4 must round down to 86");
+    assert.equal(roundSf10GeneralAverage(89.9), 90, "89.9 must round up to 90");
+    assert.equal(roundSf10GeneralAverage(86.0), 86, "86.0 must round to 86");
+    assert.equal(roundSf10GeneralAverage("86.5"), 87, "String '86.5' must round to 87");
+    assert.equal(roundSf10GeneralAverage("86.4"), 86, "String '86.4' must round to 86");
+    assert.equal(roundSf10GeneralAverage(null), null);
+    assert.equal(roundSf10GeneralAverage(undefined), null);
+    assert.equal(roundSf10GeneralAverage("—"), null);
+
+    // 2. Simulate SF10 parsed payload with 18 subjects
+    const mockSf10Parsed = {
+      shs_semesters: [
+        {
+          semester: "1st Semester",
+          generalAverage: roundSf10GeneralAverage(86.5) ?? 87,
+          general_average: roundSf10GeneralAverage(86.5) ?? 87,
+          subjects: [
+            { subject: "Oral Communication", q1: 85, q2: 87, finalGrade: 86, sem_final_grade: 86, action_taken: "PASSED" },
+            { subject: "Komunikasyon at Pananaliksik", q1: 86, q2: 84, finalGrade: 85, sem_final_grade: 85, action_taken: "PASSED" },
+            { subject: "General Mathematics", q1: 88, q2: 86, finalGrade: 87, sem_final_grade: 87, action_taken: "PASSED" },
+            { subject: "Earth and Life Science", q1: 89, q2: 87, finalGrade: 88, sem_final_grade: 88, action_taken: "PASSED" },
+            { subject: "Personal Development", q1: 90, q2: 92, finalGrade: 91, sem_final_grade: 91, action_taken: "PASSED" },
+            { subject: "Understanding Culture, Society and Politics", q1: 84, q2: 86, finalGrade: 85, sem_final_grade: 85, action_taken: "PASSED" },
+            { subject: "Physical Education and Health 1", q1: 87, q2: 89, finalGrade: 88, sem_final_grade: 88, action_taken: "PASSED" },
+            { subject: "Empowerment Technologies", q1: 86, q2: 88, finalGrade: 87, sem_final_grade: 87, action_taken: "PASSED" },
+            { subject: "Pre-Calculus", q1: 85, q2: 87, finalGrade: 86, sem_final_grade: 86, action_taken: "PASSED" },
+          ],
+        },
+        {
+          semester: "2nd Semester",
+          generalAverage: roundSf10GeneralAverage(86.8) ?? 87,
+          general_average: roundSf10GeneralAverage(86.8) ?? 87,
+          subjects: [
+            { subject: "Reading and Writing", q3: 70, q4: 98, finalGrade: 84, sem_final_grade: 84, action_taken: "PASSED" },
+            { subject: "Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik", q3: 80, q4: 80, finalGrade: 80, sem_final_grade: 80, action_taken: "PASSED" },
+            { subject: "Personal Development (Pansariling Kaunlaran)", q3: 90, q4: 90, finalGrade: 90, sem_final_grade: 90, action_taken: "PASSED" },
+            { subject: "Physical Education and Health 2", q3: 95, q4: 75, finalGrade: 85, sem_final_grade: 85, action_taken: "PASSED" },
+            { subject: "Statistics and Probability", q3: 86, q4: 87, finalGrade: 87, sem_final_grade: 87, action_taken: "PASSED" },
+            { subject: "Disaster Readiness and Risk Reduction", q3: 91, q4: 93, finalGrade: 92, sem_final_grade: 92, action_taken: "PASSED" },
+            { subject: "Practical Research 1", q3: 84, q4: 87, finalGrade: 86, sem_final_grade: 86, action_taken: "PASSED" },
+            { subject: "Basic Calculus", q3: 88, q4: 98, finalGrade: 93, sem_final_grade: 93, action_taken: "PASSED" },
+            { subject: "General Chemistry 2", q3: 78, q4: 81, finalGrade: 80, sem_final_grade: 80, action_taken: "PASSED" },
+          ],
+        },
+      ],
+    };
+
+    // Assert both semesters have exactly 9 subjects completely unchanged
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects.length, 9);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects.length, 9);
+
+    // Verify Sem 1 subjects & grades unchanged
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[0].subject, "Oral Communication");
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[0].q1, 85);
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[0].q2, 87);
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[0].finalGrade, 86);
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[8].subject, "Pre-Calculus");
+    assert.equal(mockSf10Parsed.shs_semesters[0].subjects[8].finalGrade, 86);
+
+    // Verify Sem 2 subjects & grades unchanged
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[0].subject, "Reading and Writing");
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[0].q3, 70);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[0].q4, 98);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[0].finalGrade, 84);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[3].subject, "Physical Education and Health 2");
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[3].q3, 95);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[3].q4, 75);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[3].finalGrade, 85);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[8].subject, "General Chemistry 2");
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[8].q3, 78);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[8].q4, 81);
+    assert.equal(mockSf10Parsed.shs_semesters[1].subjects[8].finalGrade, 80);
+
+    // Assert General Averages rounded to whole number 87 (from 86.5 and 86.8)
+    assert.equal(mockSf10Parsed.shs_semesters[0].generalAverage, 87);
+    assert.equal(mockSf10Parsed.shs_semesters[1].generalAverage, 87);
+  });
+
+  await t.test("2g. OCR Readability Confidence & Field Completeness metrics calculation", () => {
     // Azure 0.9412 -> 94%
     const m1 = calculateOcrMetrics(0.9412, {
       document_type: "sf10",
@@ -1480,5 +2026,415 @@ _______ 1 Male    _______ 2 Female
 
     // Alias check
     assert.equal(typeof reconcileStudentDataFromPrimaryKeys, "function", "Alias must exist");
+  });
+
+  // ---------------------------------------------------------------------------
+  // 8. Cross-Document Matrix 18-Subject Mapping (Sem 1 + Sem 2) & Primary Source Reconciliation
+  // ---------------------------------------------------------------------------
+  await t.test("8. Cross-Document Matrix indexes all 18 subjects (Sem 1 + Sem 2) and NEVER fabricates 88 fallback", () => {
+    // 8a. Verify ALL 18 subjects (9 Sem 1 + 9 Sem 2) from both SF9 and SF10 are indexed into the Cross-Document Matrix
+    const sem1SubjectsSf9 = [
+      { subject: "Oral Communication", final: 85, semester: "1st Semester" },
+      { subject: "Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino", final: 88, semester: "1st Semester" },
+      { subject: "General Mathematics", final: 89, semester: "1st Semester" },
+      { subject: "Earth and Life Science", final: 87, semester: "1st Semester" },
+      { subject: "21st Century Literature from the Philippines and the World", final: 86, semester: "1st Semester" },
+      { subject: "Introduction to the Philosophy of the Human Person", final: 90, semester: "1st Semester" },
+      { subject: "Physical Education and Health 1", final: 85, semester: "1st Semester" },
+      { subject: "Empowerment Technologies", final: 88, semester: "1st Semester" },
+      { subject: "General Chemistry 1", final: 84, semester: "1st Semester" },
+    ];
+
+    const sem2SubjectsSf9 = [
+      { subject: "Reading and Writing", final: 84, semester: "2nd Semester" },
+      { subject: "Pagbasa at Pagsusuri ng Iba't-Ibang Teksto Tungo sa Pananaliksik", final: 80, semester: "2nd Semester" }, // Hyphenated variant
+      { subject: "Personal Development/ Pansariling Kaunlaran", final: 90, semester: "2nd Semester" }, // Slash variant
+      { subject: "Physical Education and Health 2", final: 85, semester: "2nd Semester" },
+      { subject: "Statistics and Probability", final: 87, semester: "2nd Semester" },
+      { subject: "Disaster Readiness and Risk Reduction", final: 92, semester: "2nd Semester" },
+      { subject: "Practical Research 1", final: 86, semester: "2nd Semester" },
+      { subject: "Basic Calculus", final: 93, semester: "2nd Semester" },
+      { subject: "General Chemistry 2", final: 80, semester: "2nd Semester" },
+    ];
+
+    const sem1SubjectsSf10 = [
+      { subject: "Oral Communication", final: 85, semester: "1st Semester" },
+      { subject: "Komunikasyon at Pananaliksik sa Wika at Kulturang Pilipino", final: 88, semester: "1st Semester" },
+      { subject: "General Mathematics", final: 89, semester: "1st Semester" },
+      { subject: "Earth and Life Science", final: 87, semester: "1st Semester" },
+      { subject: "21st Century Literature from the Philippines and the World", final: 86, semester: "1st Semester" },
+      { subject: "Introduction to the Philosophy of the Human Person", final: 90, semester: "1st Semester" },
+      { subject: "Physical Education and Health 1", final: 85, semester: "1st Semester" },
+      { subject: "Empowerment Technologies", final: 88, semester: "1st Semester" },
+      { subject: "General Chemistry 1", final: 84, semester: "1st Semester" },
+    ];
+
+    const sem2SubjectsSf10 = [
+      { subject: "Reading and Writing", final: 84, semester: "2nd Semester" },
+      { subject: "Pagbasa at Pagsusuri ng Iba't Ibang Teksto Tungo sa Pananaliksik", final: 80, semester: "2nd Semester" },
+      { subject: "Personal Development (Pansariling Kaunlaran)", final: 90, semester: "2nd Semester" }, // Parentheses variant
+      { subject: "Physical Education and Health 2", final: 85, semester: "2nd Semester" },
+      { subject: "Statistics and Probability", final: 87, semester: "2nd Semester" },
+      { subject: "Disaster Readiness and Risk Reduction", final: 92, semester: "2nd Semester" },
+      { subject: "Practical Research 1", final: 86, semester: "2nd Semester" },
+      { subject: "Basic Calculus", final: 93, semester: "2nd Semester" },
+      { subject: "General Chemistry 2", final: 80, semester: "2nd Semester" },
+    ];
+
+    const outcome = evaluateUnifiedStudentValidation({
+      lrn: "111500619123",
+      fullName: "Gomez, Justin Loquillano",
+      sf9: {
+        raw: {
+          school_id: "500169",
+          school_year: "2024-2025",
+          grade_level: "Grade 11",
+          section: "STEM-A",
+          shs_semesters: [
+            { semester: "1st Semester", subjects: sem1SubjectsSf9 },
+            { semester: "2nd Semester", subjects: sem2SubjectsSf9 },
+          ],
+          first_semester_grades: sem1SubjectsSf9,
+          second_semester_grades: sem2SubjectsSf9,
+        },
+      },
+      sf10: {
+        raw: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          middle_name: "LOQUILLANO",
+          school_id: "500169",
+          school_year: "2024-2025",
+          grade_level: "Grade 11",
+          section: "STEM-A",
+          shs_semesters: [
+            { semester: "1st Semester", subjects: sem1SubjectsSf10 },
+            { semester: "2nd Semester", subjects: sem2SubjectsSf10 },
+          ],
+          first_semester_grades: sem1SubjectsSf10,
+          second_semester_grades: sem2SubjectsSf10,
+        },
+      },
+    });
+
+    const subjectRows = outcome.fieldsMatrix.filter((r) => r.category === "ACADEMIC" && r.field !== "general_average");
+    assert.equal(subjectRows.length, 18, `Matrix must contain all 18 subjects across Sem 1 and Sem 2, got ${subjectRows.length}`);
+
+    // Verify all 18 subjects have real extracted Final: <grade> in BOTH SF9 and SF10 (NEVER undefined / NO DATA)
+    for (const r of subjectRows) {
+      assert.ok(r.sf9Value, `${r.label} must have real SF9 value, got ${r.sf9Value}`);
+      assert.ok(r.sf10Value, `${r.label} must have real SF10 value, got ${r.sf10Value}`);
+      assert.match(String(r.sf9Value), /^Final:\s*\d+$/, `${r.label} SF9 value must be Final: <grade>`);
+      assert.match(String(r.sf10Value), /^Final:\s*\d+$/, `${r.label} SF10 value must be Final: <grade>`);
+      assert.equal(r.status, "MATCH", `${r.label} must match across SF9 and SF10`);
+      assert.equal(r.isMatch, true, `${r.label} isMatch must be true`);
+    }
+
+    // Verify Sem 2 subjects are present and matched
+    const basicCalcRow = subjectRows.find((r) => r.label?.includes("Basic Calculus"));
+    assert.ok(basicCalcRow, "Basic Calculus row must exist in matrix");
+    assert.equal(basicCalcRow.sf9Value, "Final: 93");
+    assert.equal(basicCalcRow.sf10Value, "Final: 93");
+
+    const persDevRow = subjectRows.find((r) => r.label?.includes("Personal Development"));
+    assert.ok(persDevRow, "Personal Development row must exist in matrix");
+    assert.equal(persDevRow.sf9Value, "Final: 90");
+    assert.equal(persDevRow.sf10Value, "Final: 90");
+
+    const pagbasaRow = subjectRows.find((r) => r.label?.includes("Pagbasa"));
+    assert.ok(pagbasaRow, "Pagbasa row must exist in matrix");
+    assert.equal(pagbasaRow.sf9Value, "Final: 80");
+    assert.equal(pagbasaRow.sf10Value, "Final: 80");
+
+    // 8b. Test reconcileStudentDataFromPrimarySources:
+    // When SF9 has authentic Sem 2 grades, reconciles using those EXACT grades (never 88 fallback)
+    const dossierWithMismatchedSf10 = {
+      lrn: "111500619123",
+      fullName: "Gomez, Justin Loquillano",
+      overallStatus: "MISMATCH",
+      matchedSources: {
+        sf9: {
+          raw: {
+            school_year: "2024-2025",
+            grade_level: "Grade 11",
+            shs_semesters: [
+              { semester: "2nd Semester", subjects: sem2SubjectsSf9 },
+            ],
+            second_semester_grades: sem2SubjectsSf9,
+            general_average: 88, // General average is 88, but must NEVER be used for subject grades!
+          },
+        },
+        sf10: {
+          raw: {
+            school_year: "2024-2025",
+            grade_level: "Grade 11",
+            second_semester_grades: [],
+          },
+        },
+      },
+      unifiedMatrix: [
+        {
+          field: "grade_reading_and_writing",
+          label: "Subject: Reading and Writing",
+          category: "ACADEMIC",
+          sf9Value: "Final: 84",
+          sf10Value: undefined,
+          status: "INCOMPLETE",
+          isMatch: false,
+        },
+        {
+          field: "grade_basic_calculus",
+          label: "Subject: Basic Calculus",
+          category: "ACADEMIC",
+          sf9Value: "Final: 93",
+          sf10Value: "Final: 75",
+          status: "MISMATCH",
+          isMatch: false,
+        },
+        {
+          field: "grade_disaster_readiness",
+          label: "Subject: Disaster Readiness and Risk Reduction",
+          category: "ACADEMIC",
+          sf9Value: "Final: 92",
+          sf10Value: undefined,
+          status: "INCOMPLETE",
+          isMatch: false,
+        },
+        {
+          field: "grade_unextracted_subject",
+          label: "Subject: Robotics",
+          category: "ACADEMIC",
+          sf9Value: undefined, // SF9 has NO grade for this subject
+          sf10Value: undefined,
+          status: "INCOMPLETE",
+          isMatch: false,
+        },
+      ],
+      discrepancies: [
+        { id: "disc-1", field: "grade_reading_and_writing", severity: "CRITICAL" },
+        { id: "disc-2", field: "grade_basic_calculus", severity: "CRITICAL" },
+        { id: "disc-3", field: "grade_disaster_readiness", severity: "CRITICAL" },
+        { id: "disc-4", field: "grade_unextracted_subject", severity: "CRITICAL" },
+      ],
+    };
+
+    const recResult = reconcileStudentDataFromPrimarySources(dossierWithMismatchedSf10);
+
+    // Reading and Writing must be reconciled to 84 (exact SF9 grade, NOT 88)
+    const recRw = recResult.unifiedMatrix.find((r) => r.field === "grade_reading_and_writing");
+    assert.equal(recRw.sf10Value, "Final: 84", "Reading and Writing SF10 must be reconciled to 84, never 88");
+    assert.equal(recRw.status, "MATCH");
+
+    // Basic Calculus must be reconciled to 93 (exact SF9 grade, NOT 88)
+    const recBc = recResult.unifiedMatrix.find((r) => r.field === "grade_basic_calculus");
+    assert.equal(recBc.sf10Value, "Final: 93", "Basic Calculus SF10 must be reconciled to 93, never 88");
+    assert.equal(recBc.status, "MATCH");
+
+    // Disaster Readiness must be reconciled to 92 (exact SF9 grade, NOT 88)
+    const recDrrr = recResult.unifiedMatrix.find((r) => r.field === "grade_disaster_readiness");
+    assert.equal(recDrrr.sf10Value, "Final: 92", "Disaster Readiness SF10 must be reconciled to 92, never 88");
+    assert.equal(recDrrr.status, "MATCH");
+
+    // Unextracted Subject (NO grade on SF9): MUST REMAIN UNTOUCHED (NEVER fabricated 88!)
+    const recUnextracted = recResult.unifiedMatrix.find((r) => r.field === "grade_unextracted_subject");
+    assert.equal(recUnextracted.sf9Value, undefined, "Unextracted subject SF9 must remain undefined");
+    assert.equal(recUnextracted.sf10Value, undefined, "Unextracted subject SF10 must remain undefined (NEVER 88)");
+    assert.equal(recUnextracted.status, "INCOMPLETE", "Unextracted subject must remain INCOMPLETE");
+    assert.equal(recUnextracted.isMatch, false, "Unextracted subject isMatch must remain false");
+
+    // Reconciliation log must show exact grades, NEVER fabricated 88
+    const rwLog = recResult.reconciliationLog.find((l) => l.fieldName.includes("Reading and Writing"));
+    assert.ok(rwLog, "Must log Reading and Writing reconciliation");
+    assert.equal(rwLog.baselineValue, "84", "Must log baselineValue as authentic 84, never 88");
+
+    const bcLog = recResult.reconciliationLog.find((l) => l.fieldName.includes("Basic Calculus"));
+    assert.ok(bcLog, "Must log Basic Calculus reconciliation");
+    assert.equal(bcLog.baselineValue, "93", "Must log baselineValue as authentic 93, never 88");
+
+    // Ensure NO log item was created for the unextracted subject
+    const unextractedLog = recResult.reconciliationLog.find((l) => l.fieldName.includes("Robotics"));
+    assert.equal(unextractedLog, undefined, "Must NOT log or reconcile subject with NO SF9 grade");
+  });
+
+  // ---------------------------------------------------------------------------
+  // 10. Grade Level Normalization, PSA Civil Document (N/A), & Circular JSON Prevention
+  // ---------------------------------------------------------------------------
+  await t.test("10. Grade Level Normalization ('Grade 11' === '11'), PSA 'Civil Document (N/A)', Single-Source School ID & Acyclic Dossier", async (t) => {
+    // 10a. normalizeGradeLevelForComparison helper
+    assert.equal(normalizeGradeLevelForComparison("Grade 11"), "11");
+    assert.equal(normalizeGradeLevelForComparison("11"), "11");
+    assert.equal(normalizeGradeLevelForComparison("G11"), "11");
+    assert.equal(normalizeGradeLevelForComparison("GRADE 11"), "11");
+    assert.equal(normalizeGradeLevelForComparison("Gr. 11"), "11");
+    assert.equal(normalizeGradeLevelForComparison("Grade 12"), "12");
+    assert.equal(normalizeGradeLevelForComparison("12"), "12");
+    assert.equal(normalizeGradeLevelForComparison("G12"), "12");
+    assert.equal(normalizeGradeLevelForComparison("grade 12"), "12");
+
+    // 10b. evaluateUnifiedStudentValidation with Grade Level ("Grade 11", "Grade 11", "11", "Grade 11")
+    // and DepEd School ID present only on SF10 (500619) while others are blank
+    const validationOutcome = evaluateUnifiedStudentValidation({
+      lrn: "111500619123",
+      fullName: "Gomez, Justin Loquillano",
+      psa: {
+        raw: {
+          first_name: "JUSTIN",
+          middle_name: "LOQUILLANO",
+          last_name: "GOMEZ",
+          birth_date: "2004-06-23",
+          sex: "Male",
+        },
+      },
+      sf1: {
+        raw: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          middle_name: "LOQUILLANO",
+          grade_level: "Grade 11",
+          school_year: "2025-2026",
+          section: "CSS 1",
+          track_strand: "TVL - CSS",
+        },
+      },
+      sf2Records: [
+        {
+          raw: {
+            lrn: "111500619123",
+            last_name: "GOMEZ",
+            first_name: "JUSTIN",
+            middle_name: "LOQUILLANO",
+            grade_level: "Grade 11",
+            school_year: "2025-2026",
+            section: "CSS 1",
+          },
+        },
+      ],
+      sf9: {
+        raw: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          middle_name: "LOQUILLANO",
+          grade_level: "11", // SF9 has bare number "11"
+          school_year: "2025-2026",
+          section: "CSS 1",
+          track_strand: "TVL - CSS",
+        },
+      },
+      sf10: {
+        raw: {
+          lrn: "111500619123",
+          last_name: "GOMEZ",
+          first_name: "JUSTIN",
+          middle_name: "LOQUILLANO",
+          school_id: "500619", // Only SF10 has School ID
+          grade_level: "Grade 11",
+          school_year: "2019-2020", // Historical SF10 year
+          section: "Rizal", // Historical SF10 section
+          track_strand: "Academic - STEM",
+        },
+      },
+    });
+
+    // Grade Level row must evaluate to MATCH across "Grade 11", "Grade 11", "11", "Grade 11"
+    const gradeRow = validationOutcome.fieldsMatrix.find((r) => r.field === "grade_level");
+    assert.ok(gradeRow, "Grade level row must exist in matrix");
+    assert.equal(gradeRow.status, "MATCH", "Grade Level row must evaluate to MATCH");
+    assert.equal(gradeRow.isMatch, true);
+    assert.equal(gradeRow.psaValue, "Civil Document (N/A)", "PSA must be labeled Civil Document (N/A) for grade_level");
+
+    // DepEd School ID row: only on SF10 (500619), others undefined -> evaluates to MATCH without conflict
+    const schoolIdRow = validationOutcome.fieldsMatrix.find((r) => r.field === "school_id");
+    assert.ok(schoolIdRow, "School ID row must exist in matrix");
+    assert.equal(schoolIdRow.status, "MATCH", "Single authentic DepEd School ID must evaluate to MATCH");
+    assert.equal(schoolIdRow.isMatch, true);
+    assert.equal(schoolIdRow.sf10Value, "500619");
+    assert.equal(schoolIdRow.psaValue, "Civil Document (N/A)", "PSA must be labeled Civil Document (N/A) for school_id");
+
+    // PSA value must be "Civil Document (N/A)" for all DepEd-only rows
+    const syRow = validationOutcome.fieldsMatrix.find((r) => r.field === "school_year");
+    assert.equal(syRow?.psaValue, "Civil Document (N/A)");
+
+    const secRow = validationOutcome.fieldsMatrix.find((r) => r.field === "section");
+    assert.equal(secRow?.psaValue, "Civil Document (N/A)");
+
+    const strandRow = validationOutcome.fieldsMatrix.find((r) => r.field === "track_strand");
+    assert.equal(strandRow?.psaValue, "Civil Document (N/A)");
+
+    // 10c. Reconcile primary sources and verify acyclic JSON serialization
+    const dossierToReconcile = {
+      lrn: "111500619123",
+      fullName: "Gomez, Justin Loquillano",
+      overallStatus: validationOutcome.overallStatus,
+      matchedSources: {
+        psa: { raw: { first_name: "JUSTIN", middle_name: "LOQUILLANO", last_name: "GOMEZ" } },
+        sf1: {
+          raw: {
+            school_year: "2025-2026",
+            section: "CSS 1",
+            grade_level: "Grade 11",
+            track_strand: "TVL - CSS",
+          },
+        },
+        sf2: {
+          raw: {
+            school_year: "2025-2026",
+            section: "CSS 1",
+          },
+        },
+        sf9: {
+          raw: {
+            school_year: "2025-2026",
+            section: "CSS 1",
+            grade_level: "11",
+            track_strand: "TVL - CSS",
+          },
+        },
+        sf10: {
+          raw: {
+            school_id: "500619",
+            school_year: "2019-2020",
+            section: "Rizal",
+            grade_level: "Grade 11",
+            track_strand: "Academic - STEM",
+          },
+        },
+      },
+      unifiedMatrix: validationOutcome.fieldsMatrix,
+      discrepancies: validationOutcome.discrepancies,
+    };
+
+    const reconciled = reconcileStudentDataFromPrimarySources(dossierToReconcile);
+
+    // Assert that native JSON.stringify does NOT throw circular structure error!
+    assert.doesNotThrow(() => {
+      JSON.stringify(reconciled);
+    }, "JSON.stringify(reconciled) must NOT throw circular reference error");
+
+    // Assert that safeJsonStringify wraps the batch upload payload with ZERO circular errors
+    const batchUploadPayload = {
+      action: "classify_and_validate",
+      batchId: "batch-test-10",
+      commitToRegistry: true,
+      reconciledDossier: reconciled,
+    };
+
+    let serializedPayload = "";
+    assert.doesNotThrow(() => {
+      serializedPayload = safeJsonStringify(batchUploadPayload);
+    }, "safeJsonStringify(batchUploadPayload) must succeed without throwing");
+    assert.ok(serializedPayload.includes('"batchId":"batch-test-10"'));
+    assert.ok(serializedPayload.includes('"reconciledDossier"'));
+
+    // Assert reconciled fields: School Year reconciled to current 2025-2026, Section reconciled to CSS 1
+    const recSy = reconciled.unifiedMatrix.find((r) => r.field === "school_year");
+    assert.equal(recSy?.status, "MATCH");
+    assert.equal(recSy?.sf10Value, "2025-2026");
+
+    const recSec = reconciled.unifiedMatrix.find((r) => r.field === "section");
+    assert.equal(recSec?.status, "MATCH");
+    assert.equal(recSec?.sf10Value, "CSS 1");
   });
 });

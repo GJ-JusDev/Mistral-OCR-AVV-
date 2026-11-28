@@ -190,7 +190,8 @@ function parseGradeCell(content: string | undefined): number | string | undefine
  */
 export function extractTwoQuarterGrades(cellText?: string | null): [number, number] | null {
   if (!cellText) return null;
-  const matches = (String(cellText).match(/\b(6\d|7\d|8\d|9\d|100)\b/g) || []).map(Number);
+  const cleaned = String(cellText).replace(/\\n/g, " ").replace(/\//g, " ");
+  const matches = (cleaned.match(/\b(6\d|7\d|8\d|9\d|100)\b/g) || []).map(Number);
   return matches.length >= 2 ? [matches[0], matches[1]] : null;
 }
 
@@ -554,7 +555,8 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
     if (
       fullTableText.includes("remedial class") ||
       fullTableText.includes("remedial classes") ||
-      fullTableText.includes("recomputed final grade")
+      fullTableText.includes("recomputed final grade") ||
+      fullTableText.includes("remedial class mark")
     ) {
       continue;
     }
@@ -600,6 +602,15 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
     const isQ4BeforeQ3 = /\b(?:4th|4|quarter\s*4|q4)\b[^\n\r|]{0,30}\b(?:3rd|3|quarter\s*3|q3)\b/i.test(combinedHeadersText);
     const isQ2BeforeQ1 = /\b(?:2nd|2|quarter\s*2|q2)\b[^\n\r|]{0,30}\b(?:1st|1|quarter\s*1|q1)\b/i.test(combinedHeadersText);
 
+    // If 4th/3rd or quarter 3/4 appears in header or first rows, it is strictly Semester 2
+    if (/\b(?:3rd|4th|quarter\s*3|quarter\s*4|q3|q4)\b/i.test(combinedHeadersText)) {
+      isSemester2 = true;
+      isSemester1 = false;
+    } else if (/\b(?:1st|quarter\s*1|q1)\b/i.test(combinedHeadersText) && !/\b(?:3rd|4th)\b/i.test(combinedHeadersText)) {
+      isSemester1 = true;
+      isSemester2 = false;
+    }
+
     let subjectCol = 0;
     let q1Col = -1;
     let q2Col = -1;
@@ -619,7 +630,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         combined.includes("learning area") ||
         combined.includes("pamagat")
       ) {
-        if (!h0.includes("core") && !h0.includes("applied") && !h1.includes("core") && !h1.includes("applied")) {
+        if (!h0.includes("core") && !h0.includes("applied") && !h1.includes("core") && !h1.includes("applied") && !combined.includes("indicate if")) {
           subjectCol = c;
         }
       }
@@ -627,12 +638,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (
         h0 === "1" ||
         h1 === "1" ||
+        h0 === "1st" ||
+        h1 === "1st" ||
         h0 === "q1" ||
         h1 === "q1" ||
         h0 === "quarter 1" ||
         h1 === "quarter 1" ||
         h0.includes("quarter 1") ||
         h1.includes("quarter 1") ||
+        h0.includes("1st") ||
+        h1.includes("1st") ||
         (combined.includes("quarter") && (h0.includes("1") || h1.includes("1")))
       ) {
         q1Col = c;
@@ -641,12 +656,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (
         h0 === "2" ||
         h1 === "2" ||
+        h0 === "2nd" ||
+        h1 === "2nd" ||
         h0 === "q2" ||
         h1 === "q2" ||
         h0 === "quarter 2" ||
         h1 === "quarter 2" ||
         h0.includes("quarter 2") ||
         h1.includes("quarter 2") ||
+        h0.includes("2nd") ||
+        h1.includes("2nd") ||
         (combined.includes("quarter") && (h0.includes("2") || h1.includes("2")))
       ) {
         q2Col = c;
@@ -655,12 +674,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (
         h0 === "3" ||
         h1 === "3" ||
+        h0 === "3rd" ||
+        h1 === "3rd" ||
         h0 === "q3" ||
         h1 === "q3" ||
         h0 === "quarter 3" ||
         h1 === "quarter 3" ||
         h0.includes("quarter 3") ||
         h1.includes("quarter 3") ||
+        h0.includes("3rd") ||
+        h1.includes("3rd") ||
         (combined.includes("quarter") && (h0.includes("3") || h1.includes("3")))
       ) {
         q3Col = c;
@@ -669,12 +692,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (
         h0 === "4" ||
         h1 === "4" ||
+        h0 === "4th" ||
+        h1 === "4th" ||
         h0 === "q4" ||
         h1 === "q4" ||
         h0 === "quarter 4" ||
         h1 === "quarter 4" ||
         h0.includes("quarter 4") ||
         h1.includes("quarter 4") ||
+        h0.includes("4th") ||
+        h1.includes("4th") ||
         (combined.includes("quarter") && (h0.includes("4") || h1.includes("4")))
       ) {
         q4Col = c;
@@ -717,19 +744,61 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (q2Col === -1 && table.columnCount >= 4) q2Col = 2;
     }
 
-    // Default column fallbacks for final grade column and remarks
-    if (finalGradeCol === -1) {
-      if (isFullYearQuarterly && table.columnCount >= 6) {
-        finalGradeCol = 5;
-      } else if (table.columnCount === 4) {
-        finalGradeCol = 2;
-      } else if (table.columnCount >= 5) {
-        finalGradeCol = 3;
+    // Specific column adjustments for DepEd 5-column and 6-column tables
+    if (table.columnCount === 5) {
+      // Case B (5-column layout): Col 0: Category, Col 1: Subject, Col 2: Quarters (merged), Col 3: Sem Final, Col 4: Action Taken
+      if (subjectCol === 0 && (matrix[0]?.[1] || "").toLowerCase().includes("subject")) {
+        subjectCol = 1;
       }
-    }
+      // Only apply merged quarters adjustment if Q1/Q2 or Q3/Q4 are not already distinct columns detected from headers
+      const hasDistinctQuarters =
+        (isSemester2 && q3Col >= 0 && q4Col >= 0 && q3Col !== q4Col) ||
+        (!isSemester2 && q1Col >= 0 && q2Col >= 0 && q1Col !== q2Col);
 
-    if (remarksCol === -1 && table.columnCount >= 4) {
-      remarksCol = table.columnCount - 1;
+      if (!hasDistinctQuarters) {
+        finalGradeCol = 3;
+        remarksCol = 4;
+        if (isSemester2) {
+          q3Col = 2;
+          q4Col = 2;
+        } else {
+          q1Col = 2;
+          q2Col = 2;
+        }
+      }
+    } else if (table.columnCount === 6) {
+      // Case A (6-column layout): Col 0: Category, Col 1: Subject, Col 2: Q1/Q3, Col 3: Q2/Q4, Col 4: Sem Final, Col 5: Action Taken
+      if (subjectCol === 0 && (matrix[0]?.[1] || "").toLowerCase().includes("subject")) {
+        subjectCol = 1;
+      }
+      if (finalGradeCol === -1 || finalGradeCol === 2 || finalGradeCol === 3) {
+        finalGradeCol = 4;
+      }
+      if (remarksCol === -1) {
+        remarksCol = 5;
+      }
+      if (isSemester2) {
+        if (q3Col === -1) q3Col = 2;
+        if (q4Col === -1) q4Col = 3;
+      } else {
+        if (q1Col === -1) q1Col = 2;
+        if (q2Col === -1) q2Col = 3;
+      }
+    } else {
+      // Default column fallbacks for final grade column and remarks
+      if (finalGradeCol === -1) {
+        if (isFullYearQuarterly && table.columnCount >= 6) {
+          finalGradeCol = 5;
+        } else if (table.columnCount === 4) {
+          finalGradeCol = 2;
+        } else if (table.columnCount >= 5) {
+          finalGradeCol = 3;
+        }
+      }
+
+      if (remarksCol === -1 && table.columnCount >= 4) {
+        remarksCol = table.columnCount - 1;
+      }
     }
 
     // Prevent quarter column from stealing SEM FINAL GRADE column
@@ -773,7 +842,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
 
     for (let r = startRow; r < matrix.length; r++) {
       const row = matrix[r];
-      const rawSubject = (row[subjectCol] || "").trim();
+      let rawSubject = (row[subjectCol] || row[0] || "").trim();
       if (!rawSubject || rawSubject.length < 2) continue;
 
       const lowerSubject = rawSubject.toLowerCase().trim();
@@ -845,55 +914,128 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           result.general_average_confidence = foundConf ?? tableOrDocConf;
           if (isSemester1) {
             result.sem1_general_average = foundAvg;
+            (result as any).sem1_printed_general_average = foundAvg;
             result.sem1_confidence = foundConf ?? tableOrDocConf;
           } else if (isSemester2) {
             result.sem2_general_average = foundAvg;
+            (result as any).sem2_printed_general_average = foundAvg;
             result.sem2_confidence = foundConf ?? tableOrDocConf;
           }
         }
         continue;
       }
 
-      // Extract quarterly marks (with merged quarter cell splitting)
+      // SF10-SHS Trailing-Quarter Subject Cell Splitter:
+      // If subject ends with a 2-digit DepEd grade (60-100) separated by whitespace,
+      // strip the grade from the subject title (preserving course numbers like 1 or 2 (< 60)).
+      let trailingQuarterGrade: number | undefined = undefined;
+      const trailingSubjectMatch = rawSubject.match(/^(.*?)\s+(6\d|7\d|8\d|9\d|100)(?:\.0+)?$/);
+      if (trailingSubjectMatch) {
+        const candTitle = trailingSubjectMatch[1].trim();
+        if (/[A-Za-z]{3,}/.test(candTitle)) {
+          rawSubject = candTitle;
+          trailingQuarterGrade = parseFloat(trailingSubjectMatch[2]);
+        }
+      }
+
+      // Extract numeric grades and remarks from subsequent cells in row
+      const remainingCells = row.slice(subjectCol + 1);
+      const rowNumbers: number[] = [];
+      let rowAction: string | undefined = undefined;
+
+      for (const c of remainingCells) {
+        const trimmedCell = (c || "").trim();
+        if (!trimmedCell) continue;
+        if (/^(?:PASSED|PASS|FAILED|FAIL|INC|DRP|DROPPED)$/i.test(trimmedCell)) {
+          rowAction = trimmedCell.toUpperCase();
+          if (rowAction === "PASS") rowAction = "PASSED";
+          if (rowAction === "FAIL") rowAction = "FAILED";
+          continue;
+        }
+        const twoQuarters = extractTwoQuarterGrades(trimmedCell);
+        if (twoQuarters) {
+          rowNumbers.push(twoQuarters[0], twoQuarters[1]);
+          continue;
+        }
+        const gradeVal = parseGradeCell(trimmedCell);
+        if (typeof gradeVal === "number" && gradeVal >= 60 && gradeVal <= 100) {
+          rowNumbers.push(gradeVal);
+        }
+      }
+
+      // Extract quarterly marks (with trailing quarter and merged quarter cell splitting)
       let q1: number | string | undefined;
       let q2: number | string | undefined;
       let q3: number | string | undefined;
       let q4: number | string | undefined;
+      let semFinal: number | string | undefined;
 
-      if (isFullYearQuarterly) {
-        q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : undefined;
-        q2 = q2Col >= 0 ? parseGradeCell(row[q2Col]) : undefined;
-        q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : undefined;
-        q4 = q4Col >= 0 ? parseGradeCell(row[q4Col]) : undefined;
-      } else if (isSemester2) {
-        const quarterCellVal = q3Col >= 0 ? row[q3Col] : (q4Col >= 0 ? row[q4Col] : row[1]);
-        const mergedQ2 = extractTwoQuarterGrades(quarterCellVal);
-        if (mergedQ2) {
-          if (isQ4BeforeQ3) {
-            q4 = mergedQ2[0];
-            q3 = mergedQ2[1];
-          } else {
-            q3 = mergedQ2[0];
-            q4 = mergedQ2[1];
-          }
+      if (trailingQuarterGrade !== undefined) {
+        // Trailing-quarter grade was stripped from subject cell:
+        // Assign stripped number as first quarter column (q3 in Sem 2, q1 in Sem 1),
+        // next column as second quarter column (q4 in Sem 2, q2 in Sem 1),
+        // and SEM FINAL GRADE column as finalGrade!
+        if (isSemester2) {
+          q3 = trailingQuarterGrade;
+          q4 = rowNumbers[0];
+          semFinal = rowNumbers[1];
         } else {
-          q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : undefined;
-          q4 = q4Col >= 0 && q4Col !== finalGradeCol ? parseGradeCell(row[q4Col]) : undefined;
+          q1 = trailingQuarterGrade;
+          q2 = rowNumbers[0];
+          semFinal = rowNumbers[1];
+        }
+      } else if (rowNumbers.length >= 3) {
+        if (isSemester2) {
+          if (isQ4BeforeQ3) {
+            q4 = rowNumbers[0];
+            q3 = rowNumbers[1];
+          } else {
+            q3 = rowNumbers[0];
+            q4 = rowNumbers[1];
+          }
+          semFinal = rowNumbers[2];
+        } else {
+          q1 = rowNumbers[0];
+          q2 = rowNumbers[1];
+          semFinal = rowNumbers[2];
         }
       } else {
-        const quarterCellVal1 = q1Col >= 0 ? row[q1Col] : (q2Col >= 0 ? row[q2Col] : row[1]);
-        const mergedQ1 = extractTwoQuarterGrades(quarterCellVal1);
-        if (mergedQ1) {
-          if (isQ2BeforeQ1) {
-            q2 = mergedQ1[0];
-            q1 = mergedQ1[1];
+        if (isFullYearQuarterly) {
+          q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : (rowNumbers.length > 0 ? rowNumbers[0] : undefined);
+          q2 = q2Col >= 0 ? parseGradeCell(row[q2Col]) : (rowNumbers.length > 1 ? rowNumbers[1] : undefined);
+          q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : (rowNumbers.length > 2 ? rowNumbers[2] : undefined);
+          q4 = q4Col >= 0 ? parseGradeCell(row[q4Col]) : (rowNumbers.length > 3 ? rowNumbers[3] : undefined);
+          if (rowNumbers.length >= 5) semFinal = rowNumbers[4];
+        } else if (isSemester2) {
+          const quarterCellVal = q3Col >= 0 ? row[q3Col] : (q4Col >= 0 ? row[q4Col] : row[1]);
+          const mergedQ2 = extractTwoQuarterGrades(quarterCellVal);
+          if (mergedQ2) {
+            if (isQ4BeforeQ3) {
+              q4 = mergedQ2[0];
+              q3 = mergedQ2[1];
+            } else {
+              q3 = mergedQ2[0];
+              q4 = mergedQ2[1];
+            }
           } else {
-            q1 = mergedQ1[0];
-            q2 = mergedQ1[1];
+            q3 = q3Col >= 0 ? parseGradeCell(row[q3Col]) : (rowNumbers.length > 0 ? rowNumbers[0] : undefined);
+            q4 = q4Col >= 0 && q4Col !== finalGradeCol ? parseGradeCell(row[q4Col]) : (rowNumbers.length > 1 ? rowNumbers[1] : undefined);
           }
         } else {
-          q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : undefined;
-          q2 = q2Col >= 0 && q2Col !== finalGradeCol ? parseGradeCell(row[q2Col]) : undefined;
+          const quarterCellVal1 = q1Col >= 0 ? row[q1Col] : (q2Col >= 0 ? row[q2Col] : row[1]);
+          const mergedQ1 = extractTwoQuarterGrades(quarterCellVal1);
+          if (mergedQ1) {
+            if (isQ2BeforeQ1) {
+              q2 = mergedQ1[0];
+              q1 = mergedQ1[1];
+            } else {
+              q1 = mergedQ1[0];
+              q2 = mergedQ1[1];
+            }
+          } else {
+            q1 = q1Col >= 0 ? parseGradeCell(row[q1Col]) : (rowNumbers.length > 0 ? rowNumbers[0] : undefined);
+            q2 = q2Col >= 0 && q2Col !== finalGradeCol ? parseGradeCell(row[q2Col]) : (rowNumbers.length > 1 ? rowNumbers[1] : undefined);
+          }
         }
       }
 
@@ -943,12 +1085,16 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       if (q2 !== undefined && q2 !== null && (q2Conf === undefined || isNaN(q2Conf))) q2Conf = q1Conf ?? defaultCellConf;
       if (q3 !== undefined && q3 !== null && (q3Conf === undefined || isNaN(q3Conf))) q3Conf = defaultCellConf;
       if (q4 !== undefined && q4 !== null && (q4Conf === undefined || isNaN(q4Conf))) q4Conf = q3Conf ?? defaultCellConf;
-      let finalGradeVal = finalGradeCol >= 0 ? parseGradeCell(row[finalGradeCol]) : undefined;
+      let finalGradeVal = semFinal !== undefined
+        ? semFinal
+        : finalGradeCol >= 0
+        ? parseGradeCell(row[finalGradeCol])
+        : undefined;
       let finalConf = finalGradeCol >= 0
         ? (confMatrix[r]?.[finalGradeCol] !== undefined
             ? normalizeCellConfidencePct(confMatrix[r]?.[finalGradeCol])
             : (finalGradeVal !== undefined && finalGradeVal !== null ? defaultCellConf : undefined))
-        : undefined;
+        : (finalGradeVal !== undefined && finalGradeVal !== null ? defaultCellConf : undefined);
 
       // Homoglyph recovery for quarterly marks (e.g. 16 -> 86, 19 -> 79, 8 -> 88)
       if (q1 !== undefined && q1 !== null) {
@@ -999,7 +1145,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
       const qAVal = typeof q1 === "number" ? q1 : typeof q3 === "number" ? q3 : undefined;
       const qBVal = typeof q2 === "number" ? q2 : typeof q4 === "number" ? q4 : undefined;
 
-      let semFinal = finalGradeVal;
+      semFinal = finalGradeVal;
       let candidateFinal = semFinal;
       if (candidateFinal !== undefined && candidateFinal !== null) {
         const recFin = sanitizeAndRecoverDepEdGrade({
@@ -1025,7 +1171,7 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         (typeof rawLayout?.confidence === "number" ? rawLayout.confidence : undefined) ??
         0.95;
 
-      const rawRemark = remarksCol >= 0 ? row[remarksCol] : undefined;
+      const rawRemark = rowAction || (remarksCol >= 0 ? row[remarksCol] : undefined);
       const gradeEval = evaluateDynamicGradeStatus({
         grade: candidateFinal,
         rawRemark: rawRemark ? String(rawRemark).trim() : undefined,
@@ -1055,9 +1201,10 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
         ? result.grades.findIndex((g) => g.subject.toLowerCase() === rawSubject.toLowerCase())
         : result.grades.findIndex(
             (g) =>
+              Boolean(g) &&
               (!tableGradeLevel || !g.grade_level || g.grade_level === tableGradeLevel) &&
-              g.semester === semesterLabel &&
-              g.subject.toLowerCase() === rawSubject.toLowerCase()
+              g?.semester === semesterLabel &&
+              g.subject?.toLowerCase() === rawSubject.toLowerCase()
           );
 
       if (existingIdx >= 0) {
@@ -1089,8 +1236,18 @@ export function parseAzureLayoutGrades(rawTables?: any[], rawLayout?: any): Pars
           existing.confidence = fieldConf;
         }
       } else {
+        let rowCategory = currentCategory;
+        if (subjectCol > 0 && row[0]) {
+          const catCheckRow = isCategoryHeader(row[0]);
+          if (catCheckRow.isCategory) {
+            rowCategory = catCheckRow.normalizedCategory || row[0].trim();
+          } else if (/^(?:core|applied|specialized)/i.test(row[0].trim())) {
+            rowCategory = row[0].trim().toUpperCase();
+          }
+        }
+
         const record: GradeRecord = {
-          category: currentCategory || undefined,
+          category: rowCategory || undefined,
           subject: rawSubject,
           semester: semesterLabel,
           grade_level: tableGradeLevel,
